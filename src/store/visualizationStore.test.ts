@@ -75,6 +75,18 @@ function makeTrace(): VisualizationTrace {
     stages: ['FROM', 'WHERE', 'SELECT', 'LIMIT'],
     events,
     stageSnapshots: [stageSnapshot('WHERE', 3), stageSnapshot('LIMIT', 2)],
+    sourceTables: [
+      {
+        name: 'demo',
+        alias: null,
+        columns: ['value'],
+        rowCount: 4,
+        previewRows: [{ id: 'demo#1', values: [1] }],
+        role: 'from',
+        joinType: null,
+        on: null,
+      },
+    ],
     totalSteps: events.length,
     finalRows: [],
     finalColumns: [],

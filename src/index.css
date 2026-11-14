@@ -115,3 +115,50 @@ body {
 *::-webkit-scrollbar-corner {
   background: transparent;
 }
+
+/*
+  Monaco decoration for the playback-synced SQL clause highlight.
+  Rendered by the editor when a visualization stage is active; the
+  class name is referenced from SQLEditor.tsx.
+*/
+.clause-highlight-monaco {
+  background: var(--accent-soft);
+  border-bottom: 2px solid var(--accent);
+  border-radius: 3px;
+}
+
+/*
+  Flow-canvas motion. Nodes fade/settle in when playback reveals them and
+  active connections carry a marching overlay so direction is readable
+  even when data packets are far apart. Both are disabled for users who
+  prefer reduced motion (packets are not rendered at all in that case).
+*/
+@keyframes flow-node-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes flow-edge-march {
+  to {
+    stroke-dashoffset: -16;
+  }
+}
+
+.flow-edge-active {
+  animation: flow-edge-march 0.6s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flow-node {
+    animation: none !important;
+  }
+  .flow-edge-active {
+    animation: none;
+  }
+}

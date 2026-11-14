@@ -1,23 +1,34 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   CircleAlert,
   CircleCheck,
   Eye,
   Info,
+  Table2,
   TriangleAlert,
+  Waypoints,
+  X,
 } from 'lucide-react'
 import { motion } from 'motion/react'
 import { PipelinePanel } from './PipelinePanel'
 import { TransformationPanel } from './TransformationPanel'
 import { ExplanationPanel } from './ExplanationPanel'
 import { PlaybackControls } from './PlaybackControls'
+import { ClauseStrip } from './ClauseStrip'
+import { FlowView } from './flow/FlowView'
+import { NodeInspector } from './flow/NodeInspector'
+import { buildFlowGraph } from '../../services/visualization/graphBuilder'
+import { mapQueryClauses, spanOfStage } from '../../services/visualization/clauseMapper'
 import { useVisualizationStore } from '../../store/visualizationStore'
+import { useEditorStore } from '../../store/editorStore'
 import type { StageSnapshot, VisualizedStage } from '../../types/visualization'
 
 /**
- * The full visualization workspace: pipeline (left), data
- * transformation (center), explanation (right) and playback controls
- * (bottom). Fully responsive — side panels collapse on narrow screens.
+ * The full visualization workspace: pipeline (left), Flow View
+ * (default) or Table View (center), node inspector / explanation
+ * (right) and playback controls (bottom). Both views share the same
+ * playback controller, so switching modes never restarts playback.
+ * Side panels collapse on narrow screens.
  */
 
 interface VisualizationWorkspaceProps {
@@ -55,6 +66,14 @@ export function VisualizationWorkspace({ queryName, onClose }: VisualizationWork
 
   // Stage selected for inspection (persists until cleared or playback moves).
   const [inspectedStage, setInspectedStage] = useState<VisualizedStage | null>(null)
+  // View mode: the animated flow canvas is the default; both views share playback.
+  const [viewMode, setViewMode] = useState<'flow' | 'table'>('flow')
+  // Narrow containers show the inspector/explanation as a drawer instead
+  // of a permanent column, so the canvas keeps a usable width.
+  const [detailsOpen, setDetailsOpen] = useState(false)
+  // Selected flow node id — resolved against the current graph, so a
+  // stale id (new trace) simply resolves to nothing selected.
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
 
   const completedByStage = useMemo(() => {
     const map = new Map<VisualizedStage, StageSnapshot>()
@@ -74,6 +93,60 @@ export function VisualizationWorkspace({ queryName, onClose }: VisualizationWork
   const displayStage = inspecting
     ? inspectedStage
     : (liveSnapshot?.stage ?? null)
+
+  // The graph is derived from the immutable trace; node selection is
+  // resolved against the same instance the canvas renders.
+  const flowGraph = useMemo(() => (trace !== null ? buildFlowGraph(trace) : null), [trace])
+  const selectedNode = useMemo(
+    () => flowGraph?.nodes.find((node) => node.id === selectedNodeId) ?? null,
+    [flowGraph, selectedNodeId],
+  )
+
+  // Clause spans of the visualized query, used by the strip and for
+  // pushing the playback-synced highlight into the Monaco editor.
+  const clauseSpans = useMemo(
+    () => (trace !== null ? mapQueryClauses(trace.query) : []),
+    [trace],
+  )
+  const seekableStages = useMemo(() => new Set(trace?.stages ?? []), [trace])
+
+  // Synchronize the active stage with the external editor store: the
+  // Monaco editor decorates the clause of the currently active stage
+  // (or nothing when playback is idle/finished or the query changed).
+  // A completed event leaves activeStage null; the clause the user is
+  // looking at is then the stage that just completed.
+  const setStageHighlight = useEditorStore((state) => state.setStageHighlight)
+  const syncStage: VisualizedStage | null =
+    viewState.activeStage ??
+    (viewState.event?.type === 'STAGE_COMPLETED' ? (viewState.event.stage ?? null) : null)
+  useEffect(() => {
+    if (trace === null || syncStage === null) {
+      setStageHighlight(null)
+      return
+    }
+    const span = spanOfStage(clauseSpans, syncStage)
+    setStageHighlight(
+      span !== null ? { start: span.start, end: span.end, stage: syncStage } : null,
+    )
+  }, [syncStage, clauseSpans, trace, setStageHighlight])
+
+  // Clicking a graph node selects it, moves the shared timeline to the
+  // stage that produced it, and highlights the matching SQL clause — the
+  // flow, table, editor and theory views stay in sync from one state.
+  const handleNodeSelect = (node: { stage: VisualizedStage | null; id: string }): void => {
+    const deselecting = selectedNodeId === node.id
+    setSelectedNodeId(deselecting ? null : node.id)
+    if (!deselecting) setDetailsOpen(true)
+    if (node.stage === null) {
+      setInspectedStage(null)
+      setStageHighlight(null)
+      return
+    }
+    setInspectedStage(node.stage)
+    seekToStage(node.stage)
+    const span = spanOfStage(clauseSpans, node.stage)
+    setStageHighlight(span !== null ? { start: span.start, end: span.end, stage: node.stage } : null)
+  }
 
   if (status !== 'ready' || trace === null) {
     return (
@@ -118,7 +191,7 @@ export function VisualizationWorkspace({ queryName, onClose }: VisualizationWork
   }
 
   return (
-    <section className="flex h-full min-h-0 flex-col overflow-hidden bg-surface">
+    <section className="@container flex h-full min-h-0 flex-col overflow-hidden bg-surface">
       <WorkspaceHeader
         queryName={queryName}
         status={status}
@@ -129,6 +202,21 @@ export function VisualizationWorkspace({ queryName, onClose }: VisualizationWork
         truncated={trace.truncated}
         hasAggregation={trace.capability.hasAggregation}
         hasJoin={trace.capability.hasJoin}
+        viewMode={viewMode}
+        onViewModeChange={setViewMode}
+        detailsOpen={detailsOpen}
+        onToggleDetails={() => setDetailsOpen((open) => !open)}
+      />
+
+      {/* Synchronized clause strip — click a clause to jump to its stage. */}
+      <ClauseStrip
+        query={trace.query}
+        activeStage={syncStage}
+        seekableStages={seekableStages}
+        onSeekStage={(stage) => {
+          setInspectedStage(stage)
+          seekToStage(stage)
+        }}
       />
 
       {/* Validation / truncation warnings */}
@@ -149,33 +237,69 @@ export function VisualizationWorkspace({ queryName, onClose }: VisualizationWork
         </div>
       )}
 
-      <div className="flex min-h-0 flex-1">
-        {/* Left: pipeline */}
-        <div className="hidden w-56 shrink-0 border-r border-border md:block">
+      <div className="relative flex min-h-0 flex-1">
+        {/* Left: pipeline (only when the container is wide enough) */}
+        <div className="hidden w-56 shrink-0 border-r border-border @5xl:block">
           <PipelinePanel
             stages={trace.stages}
             completedByStage={completedByStage}
             activeStage={viewState.activeStage}
             selectedStage={inspectedStage}
             onSelectStage={(stage) => {
-              setInspectedStage((current) => (current === stage ? null : stage))
+              setDetailsOpen(true)
+              setInspectedStage(stage)
               seekToStage(stage)
             }}
           />
         </div>
 
-        {/* Center: transformation */}
+        {/* Center: Flow View (default) or Table View — same playback. */}
         <div className="min-w-0 flex-1 overflow-hidden">
-          <TransformationPanel
-            snapshot={displaySnapshot}
-            activeStage={viewState.activeStage}
-            inspecting={inspecting}
-          />
+          {viewMode === 'flow' && flowGraph !== null ? (
+            <FlowView
+              graph={flowGraph}
+              trace={trace}
+              viewState={viewState}
+              selectedNodeId={selectedNodeId}
+              playing={playing}
+              focusStage={inspecting ? displayStage : null}
+              onSelectNode={handleNodeSelect}
+            />
+          ) : (
+            <TransformationPanel
+              snapshot={displaySnapshot}
+              activeStage={viewState.activeStage}
+              inspecting={inspecting}
+            />
+          )}
         </div>
 
-        {/* Right: explanation */}
-        <div className="hidden w-72 shrink-0 border-l border-border md:block">
-          <ExplanationPanel stage={displayStage} snapshot={displaySnapshot} />
+        {/* Narrow layout: the details panel replaces the canvas (above). */}
+
+        {/* Right: node inspector (when a node is selected) or explanation.
+            On narrow containers this becomes a full-size panel so the
+            details stay readable instead of covering half the canvas. */}
+        <div
+          className={`${
+            detailsOpen ? 'flex' : 'hidden'
+          } absolute inset-0 z-40 flex-col bg-surface @4xl:static @4xl:z-auto @4xl:flex @4xl:w-72 @4xl:max-w-none @4xl:border-l @4xl:border-border`}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              setDetailsOpen(false)
+              setSelectedNodeId(null)
+            }}
+            aria-label="Close details"
+            className="absolute top-1.5 right-1.5 z-50 rounded-md p-1 text-text-muted transition-colors hover:bg-surface-2 hover:text-text-primary @4xl:hidden"
+          >
+            <X className="size-3.5" aria-hidden />
+          </button>
+          {selectedNode !== null ? (
+            <NodeInspector node={selectedNode} trace={trace} onClose={() => setSelectedNodeId(null)} />
+          ) : (
+            <ExplanationPanel stage={displayStage} snapshot={displaySnapshot} />
+          )}
         </div>
       </div>
 
@@ -221,6 +345,10 @@ interface WorkspaceHeaderProps {
   truncated?: boolean
   hasAggregation?: boolean
   hasJoin?: boolean
+  viewMode?: 'flow' | 'table'
+  onViewModeChange?: (mode: 'flow' | 'table') => void
+  detailsOpen?: boolean
+  onToggleDetails?: () => void
 }
 
 function WorkspaceHeader({
@@ -231,6 +359,10 @@ function WorkspaceHeader({
   actualRowCount,
   hasAggregation,
   hasJoin,
+  viewMode,
+  onViewModeChange,
+  detailsOpen,
+  onToggleDetails,
 }: WorkspaceHeaderProps) {
   return (
     <header className="flex flex-wrap items-center gap-2 border-b border-border bg-surface px-3 py-2">
@@ -258,6 +390,51 @@ function WorkspaceHeader({
           <Info className="size-3" aria-hidden />
           join
         </span>
+      )}
+      {viewMode !== undefined && onViewModeChange !== undefined && (
+        <div
+          role="tablist"
+          aria-label="Visualization mode"
+          className="flex rounded-lg border border-border bg-surface-2 p-0.5"
+        >
+          <button
+            role="tab"
+            aria-selected={viewMode === 'flow'}
+            onClick={() => onViewModeChange('flow')}
+            className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
+              viewMode === 'flow'
+                ? 'bg-surface-3 text-text-primary'
+                : 'text-text-muted hover:text-text-secondary'
+            }`}
+          >
+            <Waypoints className="size-3" aria-hidden />
+            Flow
+          </button>
+          <button
+            role="tab"
+            aria-selected={viewMode === 'table'}
+            onClick={() => onViewModeChange('table')}
+            className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
+              viewMode === 'table'
+                ? 'bg-surface-3 text-text-primary'
+                : 'text-text-muted hover:text-text-secondary'
+            }`}
+          >
+            <Table2 className="size-3" aria-hidden />
+            Table
+          </button>
+        </div>
+      )}
+      {onToggleDetails !== undefined && (
+        <button
+          type="button"
+          aria-pressed={detailsOpen === true}
+          onClick={onToggleDetails}
+          className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface-2 px-2 py-1 text-[11px] font-medium text-text-secondary transition-colors hover:border-border-strong hover:text-text-primary @4xl:hidden"
+        >
+          <Info className="size-3" aria-hidden />
+          Details
+        </button>
       )}
       <div className="flex-1" />
       {actualRowCount != null && (

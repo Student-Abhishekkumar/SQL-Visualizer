@@ -5,8 +5,11 @@ queries. Stage 1 delivers a professional, fully client-side SQL playground built
 real SQLite engine running in your browser — no backend, no accounts, no data leaves
 your machine.
 
-Stage 2 will add the animated SQL execution visualizer on top of the integration
-points prepared in this stage.
+Stage 2 adds an animated SQL execution visualizer on top of the same real query, with a
+logical execution simulator, an animated data-flow canvas, a synchronized table view,
+and a playback controller shared across every panel.
+
+![SQL Visualizer — dark workspace](#screenshots)
 
 ![SQL Visualizer — dark workspace](#screenshots)
 
@@ -42,6 +45,41 @@ points prepared in this stage.
 - **Theme toggle, settings, responsive layout** — dark-first design with a light
   palette, draggable editor/results divider, and a mobile drawer sidebar.
 
+## Visualization features (Stage 2)
+
+Press **Visualize** to animate the query in the editor. Nothing is mocked: the
+visualizer reads the same live SQLite tables, simulates the logical pipeline
+(`FROM → JOIN → WHERE → GROUP BY → HAVING → SELECT → DISTINCT → ORDER BY → LIMIT`),
+and validates its final row count against what SQLite actually returned.
+
+- **Flow View (default)** — a query-shaped graph. Source tables (including JOIN inputs)
+  show their real name, alias, row count and a live preview; operation nodes show the
+  clause and its condition/expression; intermediate results show the rows produced so
+  far; WHERE/HAVING render rejected branches; JOINs show inputs converging; GROUP BY
+  fans out into real groups; the final result node shows the actual output rows.
+- **Animated data flow** — directional SVG edges with arrowheads and moving packets on
+  the connections carrying data right now. Completed, active, pending and rejected
+  elements are visually distinct; packets are representative indicators of movement,
+  never a claim about a specific row.
+- **Shared playback** — play, pause, resume, restart, previous/next event, timeline
+  seek and 0.5×/1×/1.5×/2× speed. Flow View and Table View share one controller, so
+  switching views preserves the current stage.
+- **Synchronized navigation** — click a clause chip, a pipeline stage or a graph node
+  to seek to that stage, highlight the matching SQL in the editor, and inspect its
+  node. The camera follows the running stage during playback and scrolls sought-to
+  stages into view.
+- **Table View** — the exact input/output rows of the active stage, with rejected rows
+  highlighted and the same playback position as Flow View.
+- **Beginner guidance** — a stage explanation panel with Beginner/Intermediate/Advanced
+  levels, plain-language hints on nodes, and knowledge checks generated from the real
+  execution data.
+- **Canvas controls** — pan (drag), zoom (buttons or wheel), fit to screen, reset view,
+  expand/collapse table previews, and connected-edge highlighting when a node is
+  selected.
+- **Accessible & responsive** — nodes are keyboard-operable buttons with ARIA labels,
+  motion is disabled under `prefers-reduced-motion`, and a container-query layout keeps
+  the canvas usable on narrow screens (the details panel becomes a full-width overlay).
+
 ## Technology stack
 
 | Layer         | Technology                                                      |
@@ -52,7 +90,7 @@ points prepared in this stage.
 | SQL parsing   | `node-sql-parser` (SQLite dialect, non-blocking — parse failures never block execution) |
 | State         | Zustand (editor / database / history / UI stores)                 |
 | Persistence   | IndexedDB via `idb` (database snapshot, history, saved queries)   |
-| Animation     | `motion` (installed; used by Stage 2 visualizations)              |
+| Animation     | `motion` (UI transitions) + SVG SMIL (data packets)               |
 | Icons         | `lucide-react`                                                    |
 | Tests         | Vitest, React Testing Library, `fake-indexeddb`                   |
 
@@ -97,6 +135,19 @@ src/
     results/   ResultsPanel, ResultsTable, MessagesPanel, QueryInfo
     history/   QueryHistory, SavedQueries
     common/    Button, Tabs, Modal, Tooltip
+    visualization/
+      VisualizationWorkspace.tsx  # Flow/Table workspace + shared playback UI
+      PipelinePanel.tsx            # Stage list (seek)
+      TransformationPanel.tsx      # Table View for the active stage
+      ExplanationPanel.tsx         # Levels, hints, knowledge checks
+      PlaybackControls.tsx         # Play/pause/seek/speed/restart
+      RowTable.tsx                 # Shared data grid
+      ClauseStrip.tsx              # Clickable SQL clauses → stages
+      flow/
+        FlowView.tsx               # Derives playback state → canvas props
+        FlowCanvas.tsx             # Pan/zoom camera, SVG edges, packets
+        FlowNodeView.tsx           # Node cards, previews, keyboard frames
+        NodeInspector.tsx          # Selected-node details with real rows
   services/
     database/
       sqliteService.ts         # SQLite WASM engine wrapper + batch executor
@@ -107,6 +158,11 @@ src/
     sql/
       sqlParser.ts             # node-sql-parser wrapper (types, tables, errors)
       sqlFormatter.ts          # Keyword-driven SQL pretty-printer
+    visualization/
+      simulator.ts             # Logical pipeline simulator → trace/snapshots
+      validation.ts            # Parity check against real SQLite row counts
+      graphBuilder.ts          # Deterministic flow graph + playback state
+      clauseMapper.ts          # Clause spans for editor highlighting
     persistence/
       persistenceService.ts    # IndexedDB stores (snapshot/history/queries)
   store/
@@ -114,10 +170,12 @@ src/
     databaseStore.ts           # Status, schema, execution orchestration
     historyStore.ts            # History + saved queries (persisted)
     uiStore.ts                 # Theme, modals, sidebar
+    visualizationStore.ts      # Trace + shared playback controller
   types/
     query.ts                   # StatementResult, QueryExecutionResult, History…
     database.ts                # TableSchema, ColumnSchema, DatabaseStatus…
-    visualization.ts           # Stage 2 contracts (VisualizationTrace…)
+    visualization.ts           # Trace, events, snapshots, capability
+    flowGraph.ts               # Flow graph nodes/edges/bounds contracts
   hooks/
     useSQLExecution.ts         # Editor → engine → history bridge
 ```
@@ -149,17 +207,41 @@ src/
 Statements that return no result set are clearly distinguished from empty result sets;
 returned-row counts are never conflated with modified-row counts.
 
-## Stage 2 readiness
+## Visualization engine (Stage 2)
 
-The visualization contracts live in `src/types/visualization.ts`
-(`VisualizationEvent`, `VisualizationTrace`, `VisualizationEngine`) and
-`QueryExecutionResult.visualization` is reserved for the trace. SQLite does **not**
-expose intermediate execution states — Stage 2 will implement a separate logical
-query simulator that produces genuine educational traces through these interfaces,
-independent of the SQLite execution path. Stage 1 generates no fake events.
+SQLite does not expose intermediate execution states, so the visualizer runs a
+separate **logical simulator** (`services/visualization/simulator.ts`) over the same
+real table data:
 
-## Current limitations (Stage 1)
+1. `node-sql-parser` extracts the query structure (tables, joins, predicates, groups,
+   projections, ordering, limits) in `astInterpreter`.
+2. The simulator applies the logical pipeline to the actual rows, emitting immutable
+   per-stage snapshots (rows, removed rows, roles, groups, columns, explanations) and a
+   chronologically ordered event trace — intro → per-stage row events → stage
+   completion → final.
+3. `validation.ts` compares the simulated final row count with the row count SQLite
+   actually returned and reports any mismatch instead of hiding it.
+4. `graphBuilder.ts` turns the trace into a deterministic, query-shaped graph
+   (positions, edges, branch columns, labels, bounds) with no external graph
+   dependency, and derives the playback state (hidden/pending/active/completed) for any
+   timeline position.
 
+The simulator never mutates the database, never fabricates rows, and never special-cases
+the sample schema — row identities stay stable across stages and truncation is always
+reported.
+
+## Current limitations
+
+- **Animated packets are representative, not per-row.** A packet shows that data is
+  flowing along a real dependency; it is not a specific record.
+- **Previews are capped** (3 rows collapsed / 10 expanded, 12 per source table) and
+  group fan-out is capped at 8 group nodes plus an “and more” node, so the canvas stays
+  bounded. Caps are reported, never silently applied to results.
+- **SVG `animateMotion` packets require a Chromium-based browser**; other engines show
+  the edges, arrowheads and marching overlay without moving packets.
+- **The flow layout is deterministic, not auto-directed.** Graphs are laid out
+  top-to-bottom with a side column for branches/groups; very wide combined queries may
+  need a pan to reach the branch column (the legend, zoom and fit controls help).
 - SQLite runs on the main thread; very large result sets could briefly block the UI
   (the service is structured so a Web Worker host can be added without UI changes).
 - Monaco's bundle makes the main JS chunk large (expected for a local Monaco setup).
@@ -168,14 +250,16 @@ independent of the SQLite execution path. Stage 1 generates no fake events.
 - The SQL formatter is keyword-driven — it never fails, but does not reflow every
   possible nesting style.
 - No E2E (Playwright) tests yet; testing is unit/integration (Vitest + RTL),
-  including real SQLite-in-Node integration tests and IndexedDB-backed persistence
-  tests.
+  including real SQLite-in-Node integration tests, IndexedDB persistence tests and
+  canvas interaction/reduced-motion tests.
 
-## Roadmap (Stage 2)
+## Roadmap
 
-- Animated query execution: scan → filter → join → group → sort → limit → project.
-- Table data visualization panels and JOIN animation.
-- Execution-plan style step breakdown and interactive lessons.
+- Explicit execution-plan ordering hints (`EXPLAIN QUERY PLAN`) next to the logical
+  pipeline.
+- Guided lessons that chain several queries around one concept.
+- Auto-arranged edge routing for extremely wide nested queries.
+- Optional Web Worker host for SQLite and simulation.
 
 ## License
 

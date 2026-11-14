@@ -194,6 +194,25 @@ export interface VisualizationEvent {
 // Trace and validation
 // ---------------------------------------------------------------------------
 
+/**
+ * Real metadata about one source table of the query, captured by the
+ * simulator while loading data. Previews are genuine table rows (capped
+ * for display); `rowCount` is the full table size. Never fabricated.
+ */
+export interface TraceSourceTable {
+  name: string
+  alias: string | null
+  columns: string[]
+  /** Full row count of the real table (not capped). */
+  rowCount: number
+  /** First rows of the real table, capped for preview display. */
+  previewRows: VisualizedRow[]
+  role: 'from' | 'join'
+  joinType: 'INNER JOIN' | 'LEFT JOIN' | 'CROSS JOIN' | null
+  /** ON condition text, when a join. */
+  on: string | null
+}
+
 export interface VisualizationTrace {
   query: string
   /** Statement type of the visualized statement. */
@@ -203,6 +222,8 @@ export interface VisualizationTrace {
   events: VisualizationEvent[]
   /** Snapshot per completed stage, in stage order. */
   stageSnapshots: StageSnapshot[]
+  /** Real source tables behind the FROM/JOIN stages. */
+  sourceTables: TraceSourceTable[]
   totalSteps: number
   /** Final projected rows of the logical simulation (post LIMIT). */
   finalRows: VisualizedRow[]

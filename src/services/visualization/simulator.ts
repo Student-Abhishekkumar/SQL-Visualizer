@@ -31,7 +31,9 @@ import {
 import type {
   GroupSnapshot,
   StageSnapshot,
+  TraceSourceTable,
   VisualizedRow,
+  VisualizedStage,
   VisualizationCapability,
   VisualizationEvent,
   VisualizationTrace,
@@ -675,6 +677,27 @@ export function simulateQuery(
     const baseRows = [...state.rows]
     const baseLabels = [...state.displayLabels]
 
+    // Real source-table metadata for the flow graph (capped previews,
+    // full row counts — straight from the loaded tables).
+    const SOURCE_PREVIEW_LIMIT = 12
+    const sourceTables: TraceSourceTable[] = []
+    const fromData = getTableData(structure.from.name)
+    if (fromData !== null) {
+      sourceTables.push({
+        name: structure.from.name,
+        alias: structure.from.alias,
+        columns: [...fromData.columns],
+        rowCount: fromData.rows.length,
+        previewRows: fromData.rows.slice(0, SOURCE_PREVIEW_LIMIT).map((values, index) => ({
+          id: `${structure.from.name}#${index + 1}`,
+          values: [...values],
+        })),
+        role: 'from',
+        joinType: null,
+        on: null,
+      })
+    }
+
     events.push({
       type: 'QUERY_STARTED',
       stage: null,
@@ -701,8 +724,47 @@ export function simulateQuery(
 
     // JOIN
     const joinText = structure.joins.map((join) => join.text).join(' ')
+    let joinSnapshot: StageSnapshot | null = null
     if (structure.joins.length > 0) {
+      const leftRowCount = state.rows.length
+      const joinTableCounts = structure.joins.map(
+        (join) => getTableData(join.table.name)?.rows.length ?? 0,
+      )
       joinStage(state, structure, getTableData, maxRows)
+      // Snapshot the joined rows *now*: later stages (WHERE, GROUP BY)
+      // replace state.rows, and the JOIN node must keep showing what the
+      // join itself produced.
+      joinSnapshot = {
+        ...snapshotOf(
+          'JOIN',
+          joinText,
+          state.displayLabels,
+          toVisualized(state.rows),
+          [],
+          `${structure.joins.length === 1 ? 'The join' : `${structure.joins.length} joins`} matched ${leftRowCount} row${leftRowCount === 1 ? '' : 's'} against ${joinTableCounts.join(' + ')} lookup row${joinTableCounts.reduce((a, b) => a + b, 0) === 1 ? '' : 's'}, producing ${state.rows.length} combined row${state.rows.length === 1 ? '' : 's'}.`,
+          state.truncated,
+        ),
+        // Rows entering the join from the left-hand side (the right-hand
+        // tables are inputs too, but a single count cannot express both).
+        inputRowCount: leftRowCount,
+      }
+      for (const join of structure.joins) {
+        const joinData = getTableData(join.table.name)
+        if (joinData === null) continue
+        sourceTables.push({
+          name: join.table.name,
+          alias: join.table.alias,
+          columns: [...joinData.columns],
+          rowCount: joinData.rows.length,
+          previewRows: joinData.rows.slice(0, SOURCE_PREVIEW_LIMIT).map((values, index) => ({
+            id: `${join.table.name}#${index + 1}`,
+            values: [...values],
+          })),
+          role: 'join',
+          joinType: join.type,
+          on: join.on?.text ?? null,
+        })
+      }
     }
 
     // WHERE
@@ -726,20 +788,27 @@ export function simulateQuery(
     groupStage(state, structure, pushFine)
     const groupSnapshot =
       state.groups !== undefined
-        ? snapshotOf(
-            'GROUP_BY',
-            state.groupByExpressions !== undefined && state.groupByExpressions.length > 0
-              ? `GROUP BY ${state.groupByExpressions.map((expr) => expr.text).join(', ')}`
-              : 'Implicit grouping (whole table)',
-            ['(groups)'],
-            state.rows.map((row) => ({ id: row.id, values: row.keyValues ?? [] })),
-            [],
-            state.groupByExpressions !== undefined && state.groupByExpressions.length > 0
-              ? `GROUP BY collected ${beforeGroup} row${beforeGroup === 1 ? '' : 's'} into ${state.groups.length} group${state.groups.length === 1 ? '' : 's'} by matching key values; aggregates are computed per group.`
-              : `With aggregates and no GROUP BY, SQLite treats the whole result as one group (${beforeGroup} row${beforeGroup === 1 ? '' : 's'}).`,
-            state.truncated,
-            state.groups,
-          )
+        ? {
+            ...snapshotOf(
+              'GROUP_BY',
+              state.groupByExpressions !== undefined && state.groupByExpressions.length > 0
+                ? `GROUP BY ${state.groupByExpressions.map((expr) => expr.text).join(', ')}`
+                : 'Implicit grouping (whole table)',
+              ['(groups)'],
+              state.rows.map((row) => ({ id: row.id, values: row.keyValues ?? [] })),
+              [],
+              state.groupByExpressions !== undefined && state.groupByExpressions.length > 0
+                ? `GROUP BY collected ${beforeGroup} row${beforeGroup === 1 ? '' : 's'} into ${state.groups.length} group${state.groups.length === 1 ? '' : 's'} by matching key values; aggregates are computed per group.`
+                : `With aggregates and no GROUP BY, SQLite treats the whole result as one group (${beforeGroup} row${beforeGroup === 1 ? '' : 's'}).`,
+              state.truncated,
+              state.groups,
+            ),
+            // The snapshot's rows are the groups themselves, so the derived
+            // input count would be the group count. The honest number of
+            // rows entering the grouping is the pre-group row count.
+            inputRowCount: beforeGroup,
+            outputRowCount: state.groups.length,
+          }
         : null
 
     // HAVING
@@ -888,19 +957,7 @@ export function simulateQuery(
 
     // Assemble stage snapshots; STAGE_COMPLETED events carry them.
     const stageSnapshots: StageSnapshot[] = [fromSnapshot]
-    if (structure.joins.length > 0) {
-      stageSnapshots.push(
-        snapshotOf(
-          'JOIN',
-          joinText,
-          state.displayLabels,
-          toVisualized(state.rows),
-          [],
-          `${structure.joins.length === 1 ? 'The join' : `${structure.joins.length} joins`} combined the tables using the ON conditions; ${state.rows.length} combined row${state.rows.length === 1 ? '' : 's'} result.`,
-          state.truncated,
-        ),
-      )
-    }
+    if (joinSnapshot !== null) stageSnapshots.push(joinSnapshot)
     if (whereSnapshot !== null) stageSnapshots.push(whereSnapshot)
     if (groupSnapshot !== null) stageSnapshots.push(groupSnapshot)
     if (havingSnapshot !== null) stageSnapshots.push(havingSnapshot)
@@ -923,7 +980,48 @@ export function simulateQuery(
       description: `Logical simulation finished with ${finalRows.length} row${finalRows.length === 1 ? '' : 's'}.`,
     })
 
-    const serialized: VisualizationEvent[] = events.map((event, index) => ({
+    // Build the event timeline in execution order. Fine-grained row
+    // events are generated while the pipeline runs, so they arrive
+    // before any STAGE_COMPLETED. Grouping each stage's row events ahead
+    // of its completion event makes sequential playback tell the real
+    // story: intro → stage rows → stage snapshot → next stage.
+    const orderedEvents: BuildEvent[] = []
+    for (const event of events) {
+      if (event.type === 'QUERY_STARTED' || event.type === 'SOURCE_TABLE_LOADED') {
+        orderedEvents.push(event)
+      }
+    }
+    const rowEventsByStage = new Map<VisualizedStage, BuildEvent[]>()
+    for (const event of events) {
+      if (event.stage === null || event.type === 'STAGE_COMPLETED') continue
+      if (event.type === 'QUERY_STARTED' || event.type === 'SOURCE_TABLE_LOADED') continue
+      if (event.type === 'QUERY_VISUALIZATION_COMPLETED') continue
+      const bucket = rowEventsByStage.get(event.stage) ?? []
+      bucket.push(event)
+      rowEventsByStage.set(event.stage, bucket)
+    }
+    const completionByStage = new Map<VisualizedStage, BuildEvent>()
+    for (const event of events) {
+      if (event.type === 'STAGE_COMPLETED' && event.stage !== null) {
+        completionByStage.set(event.stage, event)
+      }
+    }
+    for (const snapshot of stageSnapshots) {
+      orderedEvents.push(...(rowEventsByStage.get(snapshot.stage) ?? []))
+      const completion = completionByStage.get(snapshot.stage)
+      if (completion !== undefined) orderedEvents.push(completion)
+    }
+    const queryCompleted = events.find((event) => event.type === 'QUERY_VISUALIZATION_COMPLETED')
+    // Keep anything not covered by a stage snapshot (defensive: no
+    // current event type falls through) just before the final event.
+    const included = new Set(orderedEvents)
+    for (const event of events) {
+      if (included.has(event) || event.type === 'QUERY_VISUALIZATION_COMPLETED') continue
+      orderedEvents.push(event)
+    }
+    if (queryCompleted !== undefined) orderedEvents.push(queryCompleted)
+
+    const serialized: VisualizationEvent[] = orderedEvents.map((event, index) => ({
       id: `evt${index + 1}`,
       type: event.type,
       description: event.description,
@@ -951,6 +1049,7 @@ export function simulateQuery(
       stages,
       events: serialized,
       stageSnapshots,
+      sourceTables,
       totalSteps: serialized.length,
       finalRows: toVisualizedProjected(finalRows),
       finalColumns: projection.columns,

@@ -11,8 +11,9 @@ import type { StageSnapshot, VisualizedStage } from '../../types/visualization'
 
 /**
  * Left panel: the logical execution pipeline. Each stage shows its
- * current status (pending / active / completed); completed stages are
- * clickable to inspect their snapshot.
+ * current status (pending / active / completed). Every stage is
+ * clickable: clicking jumps the playback to that stage's completion
+ * event (forward or backward) and opens it for inspection.
  */
 
 interface PipelinePanelProps {
@@ -58,21 +59,18 @@ export function PipelinePanel({
           const active = activeStage === stage
           const status = completed ? 'completed' : active ? 'active' : 'pending'
           const snapshot = completedByStage.get(stage)
-          const clickable = completed
           const selected = selectedStage === stage
           return (
             <li key={stage}>
               <button
                 type="button"
-                disabled={!clickable}
                 onClick={() => onSelectStage(stage)}
                 aria-current={active ? 'step' : undefined}
+                title={`Jump to ${stage} in the playback`}
                 className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors ${
                   selected
                     ? 'bg-accent-soft'
-                    : clickable
-                      ? 'hover:bg-surface-2'
-                      : 'cursor-default'
+                    : 'hover:bg-surface-2'
                 }`}
               >
                 <StageIcon status={status} />

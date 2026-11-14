@@ -41,6 +41,34 @@ function run(sql: string, tables: Record<string, TableData> = TABLES) {
   return simulateQuery(sql, interpretation.structure, (name) => tables[name] ?? null)
 }
 
+describe('event timeline ordering', () => {
+  it('emits each stage’s row events before its completion, in pipeline order', () => {
+    const outcome = run('SELECT name FROM employees WHERE salary > 50000 ORDER BY name')
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    const events = outcome.trace.events
+    const fromCompleted = events.findIndex(
+      (event) => event.type === 'STAGE_COMPLETED' && event.stage === 'FROM',
+    )
+    const firstWhereRow = events.findIndex(
+      (event) => event.stage === 'WHERE' && event.type.startsWith('ROW_'),
+    )
+    const whereCompleted = events.findIndex(
+      (event) => event.type === 'STAGE_COMPLETED' && event.stage === 'WHERE',
+    )
+    const firstOrderRow = events.findIndex(
+      (event) => event.stage === 'ORDER_BY' && event.type === 'ROW_SORTED',
+    )
+    expect(fromCompleted).toBeGreaterThan(-1)
+    expect(firstWhereRow).toBeGreaterThan(fromCompleted)
+    expect(firstWhereRow).toBeLessThan(whereCompleted)
+    expect(firstOrderRow).toBeGreaterThan(whereCompleted)
+    expect(events[0]?.type).toBe('QUERY_STARTED')
+    expect(events[1]?.type).toBe('SOURCE_TABLE_LOADED')
+    expect(events.at(-1)?.type).toBe('QUERY_VISUALIZATION_COMPLETED')
+  })
+})
+
 describe('FROM stage', () => {
   it('produces a FROM snapshot with all source rows and stable ids', () => {
     const outcome = run('SELECT name FROM employees')
@@ -107,6 +135,9 @@ describe('GROUP BY / aggregates / HAVING', () => {
     if (!outcome.ok) return
     const groupSnapshot = outcome.trace.stageSnapshots.find((snapshot) => snapshot.stage === 'GROUP_BY')
     expect(groupSnapshot?.groups).toHaveLength(4) // 1, 2, 3, NULL
+    // The grouping consumed every source row and produced one row per group.
+    expect(groupSnapshot?.inputRowCount).toBe(8)
+    expect(groupSnapshot?.outputRowCount).toBe(4)
     const group1 = groupSnapshot?.groups.find((group) => group.keyValues[0] === 1)
     expect(group1?.rowIds).toEqual(['employees#1', 'employees#2'])
     expect(group1?.aggregates['COUNT(*)']).toBe(2)
@@ -317,6 +348,24 @@ describe('edge cases', () => {
     expect(names).not.toContain('John')
     const joinSnapshot = outcome.trace.stageSnapshots.find((snapshot) => snapshot.stage === 'JOIN')
     expect(joinSnapshot).toBeDefined()
+  })
+
+  it('keeps the JOIN snapshot at join time even when WHERE runs afterwards', () => {
+    const outcome = run(
+      'SELECT e.name, e.salary, d.department_name FROM employees e INNER JOIN departments d ON e.department_id = d.id WHERE e.salary > 60000',
+    )
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    const joinSnapshot = outcome.trace.stageSnapshots.find((snapshot) => snapshot.stage === 'JOIN')
+    // 8 employees joined against 3 departments: John has NULL department,
+    // so INNER JOIN keeps 7 rows — the WHERE filter must not leak in.
+    expect(joinSnapshot?.outputRowCount).toBe(7)
+    expect(joinSnapshot?.inputRowCount).toBe(8)
+    expect(joinSnapshot?.rows).toHaveLength(7)
+    const whereSnapshot = outcome.trace.stageSnapshots.find((snapshot) => snapshot.stage === 'WHERE')
+    expect(whereSnapshot?.inputRowCount).toBe(7)
+    expect(whereSnapshot?.outputRowCount).toBe(3)
+    expect(outcome.trace.finalRows).toHaveLength(3)
   })
 
   it('supports LEFT JOIN with unmatched rows filled by NULLs', () => {

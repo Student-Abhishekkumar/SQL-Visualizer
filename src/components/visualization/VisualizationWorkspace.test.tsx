@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type {
   StageSnapshot,
@@ -62,7 +62,8 @@ function makeTrace(): VisualizationTrace {
     event('STAGE_COMPLETED', 'FROM', 3, stageSnapshot('FROM', 4)),
     event('ROW_FILTERED', 'WHERE', 4),
     event('STAGE_COMPLETED', 'WHERE', 5, stageSnapshot('WHERE', 3)),
-    event('QUERY_VISUALIZATION_COMPLETED', null, 6),
+    event('STAGE_COMPLETED', 'SELECT', 6, stageSnapshot('SELECT', 3)),
+    event('QUERY_VISUALIZATION_COMPLETED', null, 7),
   ]
   return {
     query: 'SELECT name, salary FROM employees WHERE salary > 50000',
@@ -80,7 +81,19 @@ function makeTrace(): VisualizationTrace {
     },
     stages: ['FROM', 'WHERE', 'SELECT'],
     events,
-    stageSnapshots: [stageSnapshot('FROM', 4), stageSnapshot('WHERE', 3)],
+    stageSnapshots: [stageSnapshot('FROM', 4), stageSnapshot('WHERE', 3), stageSnapshot('SELECT', 3)],
+    sourceTables: [
+      {
+        name: 'employees',
+        alias: null,
+        columns: ['name', 'salary'],
+        rowCount: 8,
+        previewRows: [{ id: 'employees#1', values: ['Emp1', 50000] }],
+        role: 'from',
+        joinType: null,
+        on: null,
+      },
+    ],
     totalSteps: events.length,
     finalRows: [],
     finalColumns: ['name', 'salary'],
@@ -139,7 +152,8 @@ describe('unsupported query handling', () => {
 })
 
 describe('ready workspace', () => {
-  it('renders pipeline stages, the snapshot table and the validated badge', () => {
+  it('renders pipeline stages, the snapshot table and the validated badge', async () => {
+    const user = userEvent.setup()
     const store = useVisualizationStore.getState()
     store.loadTrace(makeTrace())
     useVisualizationStore.setState({
@@ -151,18 +165,20 @@ describe('ready workspace', () => {
 
     render(<VisualizationWorkspace queryName="WHERE demo" onClose={() => {}} />)
 
-    expect(screen.getByText('Simulation ready')).toBeInTheDocument()
-    expect(screen.getByText('Validated (ordered) vs SQLite')).toBeInTheDocument()
+    expect(screen.getAllByText('Simulation ready').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Validated (ordered) vs SQLite').length).toBeGreaterThan(0)
     expect(screen.getByText('SQLite returned 3 rows')).toBeInTheDocument()
-    // Snapshot table shows projected values.
-    expect(screen.getByText('Emp1')).toBeInTheDocument()
-    expect(screen.getByText('51000')).toBeInTheDocument()
+
+    // Snapshot table details live in Table View.
+    await user.click(screen.getByRole('tab', { name: /table/i }))
+    expect(screen.getAllByText('Emp1').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('51000').length).toBeGreaterThan(0)
     // Removed row from the WHERE snapshot is shown in its own section.
     expect(screen.getByText(/Removed rows/)).toBeInTheDocument()
     expect(screen.getByText('Filtered')).toBeInTheDocument()
   })
 
-  it('pipeline stage selection inspects that stage and seeks to it', async () => {
+  it('pipeline stage selection inspects that stage and seeks to it (Table View)', async () => {
     const user = userEvent.setup()
     const store = useVisualizationStore.getState()
     store.loadTrace(makeTrace())
@@ -170,6 +186,9 @@ describe('ready workspace', () => {
     useVisualizationStore.getState().jumpToEnd()
 
     render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    // Switch to Table View — the inspecting badge lives there.
+    await user.click(screen.getByRole('tab', { name: /table/i }))
 
     const pipeline = screen.getByRole('navigation', { name: 'Execution pipeline' })
     const whereButton = Array.from(pipeline.querySelectorAll('button')).find(
@@ -182,12 +201,12 @@ describe('ready workspace', () => {
 
     // The inspected stage's snapshot replaces the live one.
     expect(screen.getByText(/inspecting/)).toBeInTheDocument()
-    expect(screen.getByText('Filtered')).toBeInTheDocument()
+    expect(screen.getAllByText('Filtered').length).toBeGreaterThan(0)
     // Seeking moved playback to the WHERE completion event.
     expect(useVisualizationStore.getState().eventIndex).toBe(5)
   })
 
-  it('pending stages are not clickable', () => {
+  it('pending stages are clickable and jump the playback forward to them', () => {
     const store = useVisualizationStore.getState()
     store.loadTrace(makeTrace())
     useVisualizationStore.setState({ status: 'ready' })
@@ -197,7 +216,16 @@ describe('ready workspace', () => {
     const selectButton = Array.from(pipeline.querySelectorAll('button')).find(
       (button) => button.textContent?.includes('SELECT'),
     )
-    expect(selectButton?.disabled).toBe(true)
+    expect(selectButton).toBeDefined()
+    expect(selectButton?.disabled).toBe(false)
+
+    selectButton!.click()
+
+    // Playback jumped to the SELECT completion event.
+    expect(useVisualizationStore.getState().eventIndex).toBe(6)
+    // The clicked stage is selected in the pipeline and its snapshot
+    // data is visible in the graph state (stage completed after seek).
+    expect(useVisualizationStore.getState().viewState.completedStages.map((snapshot) => snapshot.stage)).toContain('SELECT')
   })
 
   it('shows a warning banner when validation failed', () => {
@@ -247,7 +275,7 @@ describe('ready workspace', () => {
     expect(useVisualizationStore.getState().eventIndex).toBe(1)
 
     // Position counter reflects the folded view state.
-    expect(screen.getByText('2/7')).toBeInTheDocument()
+    expect(screen.getByText('2/8')).toBeInTheDocument()
   })
 
   it('jump-to-end marks playback finished and enables Replay', async () => {
@@ -279,5 +307,71 @@ describe('ready workspace', () => {
     )
     await user.click(screen.getByRole('button', { name: 'Back to results' }))
     expect(closed).toBe(true)
+  })
+})
+
+describe('Flow View behavior', () => {
+  it('is the default mode and renders source and operation nodes from the trace', () => {
+    const store = useVisualizationStore.getState()
+    store.loadTrace(makeTrace())
+    useVisualizationStore.setState({ status: 'ready' })
+
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    // Flow tab is selected by default.
+    expect(screen.getByRole('tab', { name: /flow/i })).toHaveAttribute('aria-selected', 'true')
+    // Source table node from the real sourceTables metadata.
+    expect(screen.getByLabelText(/Source table employees, 8 rows/)).toBeInTheDocument()
+    // Operation nodes for the pipeline stages.
+    expect(screen.getByLabelText(/Operation WHERE/)).toBeInTheDocument()
+    expect(screen.getByLabelText(/Operation SELECT/)).toBeInTheDocument()
+  })
+
+  it('hides the rejected branch until WHERE completes, then shows real counts', () => {
+    const store = useVisualizationStore.getState()
+    store.loadTrace(makeTrace())
+    useVisualizationStore.setState({ status: 'ready' })
+
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+    // WHERE not completed → no rejected branch node.
+    expect(screen.queryByLabelText(/Rejected rows \(1\)/)).not.toBeInTheDocument()
+
+    act(() => {
+      useVisualizationStore.getState().seekToStage('WHERE')
+    })
+    expect(screen.getByLabelText(/Rejected rows \(1\)/)).toBeInTheDocument()
+  })
+
+  it('clicking a data node opens the inspector with the real snapshot rows', async () => {
+    const user = userEvent.setup()
+    const store = useVisualizationStore.getState()
+    store.loadTrace(makeTrace())
+    useVisualizationStore.setState({ status: 'ready' })
+    useVisualizationStore.getState().seekToStage('WHERE')
+
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+    const inspector = screen.getByRole('complementary', { name: 'Node inspector' })
+    expect(inspector).toBeInTheDocument()
+    // Real snapshot rows appear inside the inspector (and the canvas node).
+    expect(screen.getAllByText('Emp1').length).toBeGreaterThan(0)
+    // Closing returns to the explanation panel.
+    await user.click(screen.getByRole('button', { name: 'Close node inspector' }))
+    expect(screen.queryByRole('complementary', { name: 'Node inspector' })).not.toBeInTheDocument()
+  })
+
+  it('switching to Table View keeps the playback position', async () => {
+    const user = userEvent.setup()
+    const store = useVisualizationStore.getState()
+    store.loadTrace(makeTrace())
+    useVisualizationStore.setState({ status: 'ready' })
+    useVisualizationStore.getState().seek(4)
+
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+    await user.click(screen.getByRole('tab', { name: /table/i }))
+    await user.click(screen.getByRole('tab', { name: /flow/i }))
+    // Playback position untouched by view switching.
+    expect(useVisualizationStore.getState().eventIndex).toBe(4)
   })
 })
