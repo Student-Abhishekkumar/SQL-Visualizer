@@ -1,113 +1,64 @@
-import {
-  clearDatabaseSnapshot,
-  loadDatabaseSnapshot,
-  saveDatabaseSnapshot,
-} from '../persistence/persistenceService'
-import {
-  SCHEMA_SQL,
-  SEED_SQL,
-  UNIVERSITY_DB_NAME,
-} from './seedData'
-import { getDatabaseSchema } from './schemaService'
-import { SQLiteDatabase } from './sqliteService'
 import type { DatabaseSchema } from '../../types/database'
+import {
+  closeLiveDatabase,
+  getLiveDatabase,
+  getActiveDatabase,
+  initDatabaseManager,
+  openDatabase,
+  persistActiveDatabase,
+  resetDatabase as resetManagedDatabase,
+  type SqlJsConfig,
+} from './databaseManager'
 
 /**
- * Database lifecycle: initialize (restore or seed), reset, and keep a
- * module-level reference to the live connection so consecutive queries
- * reuse the same database session.
+ * Backwards-compatible database lifecycle facade.
  *
- * The browser passes a WASM locateFile config; test and worker hosts
- * can pass their own.
+ * The real multi-database logic lives in `databaseManager.ts`; these
+ * wrappers keep the historical single-database helpers (used by older
+ * tests and the dev bridge) working against the active database.
+ *
+ * New code should import from `databaseManager` directly.
  */
 
-export type SqlJsConfig = Parameters<typeof SQLiteDatabase.create>[0]
+export type { SqlJsConfig }
 
-let liveDatabase: SQLiteDatabase | null = null
-
-/** The currently open database, or null before initialization. */
-export function getLiveDatabase(): SQLiteDatabase | null {
-  return liveDatabase
-}
+export { getLiveDatabase }
 
 export interface InitializeResult {
-  db: SQLiteDatabase
+  db: NonNullable<ReturnType<typeof getLiveDatabase>>
   /** True when an existing snapshot was restored instead of seeded. */
   restored: boolean
   schema: DatabaseSchema
 }
 
-/**
- * Initialize the WASM SQLite engine:
- *  1. Restore the persisted snapshot when available.
- *  2. Otherwise create a fresh University Database with seed data.
- * The result is cached — repeated calls return the same connection.
- */
+/** Initialize the workspace and return the active live connection. */
 export async function initializeDatabase(
   config?: SqlJsConfig,
 ): Promise<InitializeResult> {
-  if (liveDatabase) {
-    return {
-      db: liveDatabase,
-      restored: true,
-      schema: getDatabaseSchema(liveDatabase, UNIVERSITY_DB_NAME),
-    }
+  const result = await initDatabaseManager(config)
+  const db = getLiveDatabase()
+  if (db === null || result.schema === null) {
+    throw new Error('No database could be initialized.')
   }
-
-  const snapshot = await loadDatabaseSnapshot()
-  if (snapshot) {
-    try {
-      const db = await SQLiteDatabase.create(config, snapshot)
-      liveDatabase = db
-      return {
-        db,
-        restored: true,
-        schema: getDatabaseSchema(db, UNIVERSITY_DB_NAME),
-      }
-    } catch {
-      // Corrupt snapshot — fall through to a fresh seed below.
-      await clearDatabaseSnapshot()
-    }
-  }
-
-  const db = await SQLiteDatabase.create(config)
-  db.runRaw(SCHEMA_SQL)
-  db.runRaw(SEED_SQL)
-  await saveDatabaseSnapshot(db.exportSnapshot())
-  liveDatabase = db
-  return {
-    db,
-    restored: false,
-    schema: getDatabaseSchema(db, UNIVERSITY_DB_NAME),
-  }
+  return { db, restored: result.restored, schema: result.schema }
 }
 
-/**
- * Replace the live database with a fresh, seeded University Database.
- * Returns the new schema. Throws when reset fails (caller shows UI).
- */
+/** Reset the active database to its template state. */
 export async function resetDatabase(config?: SqlJsConfig): Promise<DatabaseSchema> {
-  const db = await SQLiteDatabase.create(config)
-  db.runRaw(SCHEMA_SQL)
-  db.runRaw(SEED_SQL)
-  await saveDatabaseSnapshot(db.exportSnapshot())
-
-  liveDatabase?.close()
-  liveDatabase = db
-  return getDatabaseSchema(db, UNIVERSITY_DB_NAME)
+  return resetManagedDatabase(undefined, config)
 }
 
-/**
- * Persist the current database state after mutating statements.
- * Fire-and-forget: persistence failures are non-fatal (the session
- * stays usable; only refresh would lose the change).
- */
-export async function persistDatabase(db: SQLiteDatabase): Promise<void> {
-  await saveDatabaseSnapshot(db.exportSnapshot())
+/** Persist the active database after a mutating statement. */
+export async function persistDatabase(
+  db: NonNullable<ReturnType<typeof getLiveDatabase>>,
+): Promise<void> {
+  await persistActiveDatabase(db)
 }
 
 /** Close the live connection (used by tests and hot reloads). */
 export function closeDatabase(): void {
-  liveDatabase?.close()
-  liveDatabase = null
+  closeLiveDatabase()
 }
+
+/** Open a database by id through the manager. */
+export { openDatabase, getActiveDatabase }

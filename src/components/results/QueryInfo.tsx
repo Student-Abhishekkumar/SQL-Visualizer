@@ -1,6 +1,6 @@
 import type { QueryExecutionResult } from '../../types/query'
 import { getReferencedTables } from '../../services/sql/sqlParser'
-import { getLiveDatabase } from '../../services/database/databaseInitializer'
+import { getLiveDatabase } from '../../services/database/databaseManager'
 
 interface QueryInfoProps {
   result: QueryExecutionResult | null

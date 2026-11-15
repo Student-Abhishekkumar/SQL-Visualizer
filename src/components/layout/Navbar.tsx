@@ -1,29 +1,25 @@
-import { useEffect } from 'react'
 import { Database, Moon, PanelLeft, Settings, Sun } from 'lucide-react'
 import { useUIStore } from '../../store/uiStore'
 import { useDatabaseStore } from '../../store/databaseStore'
 import { Tooltip } from '../common/Tooltip'
 import { SettingsModal } from './SettingsModal'
+import { DatabaseSelector } from '../database/DatabaseSelector'
+import { DatabaseManager } from '../database/DatabaseManager'
 
-/** Top navigation: brand, database indicator, theme, settings. */
+/** Top navigation: brand, database selector, theme, settings. */
 export function Navbar() {
   const toggleTheme = useUIStore((state) => state.toggleTheme)
   const theme = useUIStore((state) => state.theme)
   const setSettingsOpen = useUIStore((state) => state.setSettingsOpen)
   const isSettingsOpen = useUIStore((state) => state.isSettingsOpen)
   const toggleSidebar = useUIStore((state) => state.toggleSidebar)
-  const schema = useDatabaseStore((state) => state.schema)
   const status = useDatabaseStore((state) => state.status)
-
-  useEffect(() => {
-    // Title already set in index.html; keep favicon logic minimal.
-  }, [])
 
   const statusLabel =
     status === 'ready' ? 'SQLite WASM · connected' : `SQLite WASM · ${status}`
 
   return (
-    <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border bg-bg-elevated px-3">
+    <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border bg-bg-elevated px-2 sm:gap-3 sm:px-3">
       <button
         onClick={toggleSidebar}
         aria-label="Toggle sidebar"
@@ -32,20 +28,18 @@ export function Navbar() {
         <PanelLeft className="size-4" />
       </button>
 
-      <div className="flex items-center gap-2.5">
+      <div className="flex shrink-0 items-center gap-2.5">
         <span className="flex size-7 items-center justify-center rounded-lg bg-gradient-to-br from-accent to-purple text-white shadow-sm">
           <Database className="size-4" />
         </span>
-        <span className="text-[15px] font-semibold tracking-tight text-text-primary">
+        <span className="hidden text-[15px] font-semibold tracking-tight text-text-primary sm:inline">
           SQL Visualizer
-        </span>
-        <span className="hidden rounded-full border border-border bg-surface-2 px-2 py-0.5 text-[10px] font-medium text-text-muted sm:inline">
-          Stage 1 · Playground
         </span>
       </div>
 
-      <div className="mx-auto hidden items-center gap-2 md:flex">
-        <span className="flex items-center gap-2 rounded-full border border-border bg-surface-2 px-3 py-1 text-[12px]">
+      <div className="flex min-w-0 flex-1 items-center gap-2 sm:flex-none">
+        <DatabaseSelector />
+        <span className="hidden items-center gap-2 rounded-full border border-border bg-surface-2 px-3 py-1 text-[11px] lg:flex">
           <span
             className={`size-1.5 rounded-full ${
               status === 'ready'
@@ -55,15 +49,11 @@ export function Navbar() {
                   : 'bg-warning animate-pulse'
             }`}
           />
-          <span className="font-medium text-text-secondary">
-            {schema?.name ?? 'University Database'}
-          </span>
-          <span className="text-text-muted">·</span>
           <span className="text-text-muted">{statusLabel}</span>
         </span>
       </div>
 
-      <div className="ml-auto flex items-center gap-1 md:ml-0">
+      <div className="ml-auto flex shrink-0 items-center gap-1">
         <Tooltip label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}>
           <button
             onClick={toggleTheme}
@@ -85,6 +75,7 @@ export function Navbar() {
       </div>
 
       <SettingsModal open={isSettingsOpen} />
+      <DatabaseManager />
     </header>
   )
 }

@@ -9,6 +9,10 @@ Stage 2 adds an animated SQL execution visualizer on top of the same real query,
 logical execution simulator, an animated data-flow canvas, a synchronized table view,
 and a playback controller shared across every panel.
 
+The workspace now manages **multiple independent SQLite databases**, and an
+always-visible **Query ↔ Canvas** switch keeps both workspaces alive while you move
+between writing SQL and watching it run.
+
 ![SQL Visualizer — dark workspace](#screenshots)
 
 ![SQL Visualizer — dark workspace](#screenshots)
@@ -21,14 +25,33 @@ and a playback controller shared across every panel.
 
 ## Main features (Stage 1)
 
+- **Multi-database workspace** — create, open, switch, rename, duplicate, reset,
+  export and delete independent SQLite databases. Each database is a separate
+  `sql.js` instance with its own serialized snapshot, metadata (name, description,
+  template, created/modified dates, table/row/byte stats) and history. The active
+  database is clearly marked, and the last selected one is restored after a refresh.
+- **Database templates** — start **blank**, from the optional **Example** University
+  schema, or from **Custom SQL** setup statements (replayed on reset). New databases
+  are never seeded unless you pick the example template.
+- **Import & export** — import `.db` / `.sqlite` / `.sqlite3` files (validated with a
+  SQLite header check and `PRAGMA integrity_check`) or `.sql` scripts. Imports always
+  create a new database and never overwrite an existing one. Export a real `.sqlite`
+  file or a correctly labelled `.sql` script (`CREATE TABLE`, `INSERT`, indexes, views,
+  triggers).
+- **Strict database isolation** — switching databases clears stale results,
+  visualization traces, schema and selection state, so data from another database can
+  never leak into the workspace.
+- **Query ↔ Canvas toggle** — a segmented `Code2` / `Workflow` control (plus
+  `Ctrl/Cmd+Shift+M`) switches the visible workspace without clearing the editor,
+  re-running SQL, resetting playback, or losing node selection, zoom or pan.
 - **Real SQL execution** — SQLite compiled to WebAssembly (`sql.js`), executing in a
   Web Worker-free but non-blocking single-page session. `SELECT`, `WHERE`, `ORDER BY`,
   `GROUP BY`, `HAVING`, `DISTINCT`, `LIMIT`, `OFFSET`, `INNER/LEFT/RIGHT/CROSS JOIN`,
   aggregates, subqueries, `CREATE/INSERT/UPDATE/DELETE/DROP`, PRAGMA and multiple
   statements separated by semicolons.
-- **University Database** — a realistic sample dataset (employees, departments,
+- **Example University Database** — a realistic sample dataset (employees, departments,
   projects, employee_projects) with real primary/foreign key constraints and foreign
-  key enforcement, seeded automatically on first launch.
+  key enforcement, available as a template or created automatically on first launch.
 - **Monaco SQL editor** — local (offline) Monaco bundle with SQL syntax highlighting,
   line numbers, bracket matching, schema-aware autocomplete (tables, columns, typed
   from the live database), dark/light themes and `Ctrl+Enter` execution.
@@ -36,10 +59,13 @@ and a playback controller shared across every panel.
   sticky-header data grid with row numbers and inferred column types, horizontal
   scrolling, NULL/BLOB formatting, empty-result and no-result-set states.
 - **Database explorer** — expandable tables, column types, PK/FK indicators, live row
-  counts, a per-table schema viewer with sample rows, and schema refresh after DDL.
+  counts, indexes and constraints, the original `CREATE TABLE` statement, views and
+  triggers, and a per-table schema viewer with sample rows.
 - **Query history & saved queries** — every execution recorded with status, duration
-  and row count; history and saved queries persist in IndexedDB across refreshes.
-- **Database reset** — one click restores the original seed data.
+  and the database it ran against; filter history to the active database or view all.
+  History and saved queries persist in IndexedDB across refreshes.
+- **Database reset** — restore the active database to its template state (empty,
+  example seed, or custom setup SQL) with an explicit confirmation step.
 - **Format SQL / Examples** — a robust keyword-driven SQL formatter (never fails on
   valid input) and a dropdown of 14 executable example queries.
 - **Theme toggle, settings, responsive layout** — dark-first design with a light
@@ -52,6 +78,11 @@ visualizer reads the same live SQLite tables, simulates the logical pipeline
 (`FROM → JOIN → WHERE → GROUP BY → HAVING → SELECT → DISTINCT → ORDER BY → LIMIT`),
 and validates its final row count against what SQLite actually returned.
 
+- **Persistent Query/Canvas workspaces** — both views stay mounted, so switching keeps
+  the Monaco editor, last results, playback position, selected node, zoom, pan and
+  expanded previews exactly as they were. The canvas header shows the active database
+  and warns with a **re-visualize** action when the SQL has changed since the trace was
+  generated.
 - **Flow View (default)** — a query-shaped graph of compact, tactile node modules.
   Source tables (including JOIN inputs) show their real name, alias, row count and a
   live preview; operation nodes show the clause and its condition/expression;
@@ -102,7 +133,7 @@ and validates its final row count against what SQLite actually returned.
 | Database      | `sql.js` (SQLite → WebAssembly), executed fully client-side       |
 | SQL parsing   | `node-sql-parser` (SQLite dialect, non-blocking — parse failures never block execution) |
 | State         | Zustand (editor / database / history / UI stores)                 |
-| Persistence   | IndexedDB via `idb` (database snapshot, history, saved queries)   |
+| Persistence   | IndexedDB via `idb` (per-database metadata + snapshots, history, saved queries, app state) |
 | Animation     | `motion` (UI transitions) + SVG SMIL (data packets)               |
 | Icons         | `lucide-react`                                                    |
 | Tests         | Vitest, React Testing Library, `fake-indexeddb`                   |
@@ -142,9 +173,11 @@ src/
     monacoSetup.ts              # Local Monaco, themes, schema autocomplete
     devBridge.ts                # DEV-only automation hook (tree-shaken in prod)
   components/
-    layout/    Navbar, Sidebar, MainLayout (draggable split), SettingsModal
+    layout/    Navbar, Sidebar, MainLayout (split + mounted views),
+               WorkspaceViewToggle, SettingsModal
     editor/    SQLEditor (Monaco), EditorToolbar, exampleQueries.ts
-    database/  DatabaseExplorer, TableNode, SchemaViewer
+    database/  DatabaseExplorer, TableNode, SchemaViewer,
+               DatabaseSelector, DatabaseManager, CreateDatabaseForm
     results/   ResultsPanel, ResultsTable, MessagesPanel, QueryInfo
     history/   QueryHistory, SavedQueries
     common/    Button, Tabs, Modal, Tooltip
@@ -164,10 +197,15 @@ src/
         NodeInspector.tsx          # Selected-node details with real rows
   services/
     database/
+      databaseManager.ts       # Multi-database lifecycle: create/open/switch/
+                               #   rename/duplicate/delete/reset/import/export
+      databaseInitializer.ts   # Backwards-compatible lifecycle facade
+      templates.ts             # Blank / Example / Custom starter templates
+      databaseDump.ts          # Labelled SQL script generation
       sqliteService.ts         # SQLite WASM engine wrapper + batch executor
-      databaseInitializer.ts   # Lifecycle: restore-or-seed, reset, live handle
-      schemaService.ts         # Live schema introspection (PRAGMA-based)
-      seedData.ts              # University Database schema + seed rows
+      schemaService.ts         # Live schema introspection (tables/columns/
+                               #   indexes/views/triggers/CREATE SQL)
+      seedData.ts              # University schema + seed rows (example template)
       wasmConfig.ts            # Browser WASM asset wiring
     sql/
       sqlParser.ts             # node-sql-parser wrapper (types, tables, errors)
@@ -179,31 +217,65 @@ src/
       flowGeometry.ts          # Socket centres + cubic wire routing
       clauseMapper.ts          # Clause spans for editor highlighting
     persistence/
-      persistenceService.ts    # IndexedDB stores (snapshot/history/queries)
+      persistenceService.ts    # IndexedDB v2: databases/snapshots/app state,
+                               #   history + saved queries, legacy migration
   store/
-    editorStore.ts             # Editor content (survives tab switches)
-    databaseStore.ts           # Status, schema, execution orchestration
-    historyStore.ts            # History + saved queries (persisted)
-    uiStore.ts                 # Theme, modals, sidebar
+    editorStore.ts             # Editor content (survives view switches)
+    databaseStore.ts           # Active DB, metadata list, execution, manager actions
+    historyStore.ts            # History + saved queries (database-tagged, persisted)
+    uiStore.ts                 # Theme, workspace view, modals, sidebar
     visualizationStore.ts      # Trace + shared playback controller
   types/
     query.ts                   # StatementResult, QueryExecutionResult, History…
-    database.ts                # TableSchema, ColumnSchema, DatabaseStatus…
+    database.ts                # Table/Index/DatabaseSchema, DatabaseInfo…
     visualization.ts           # Trace, events, snapshots, capability
     flowGraph.ts               # Flow graph nodes/edges/bounds contracts
   hooks/
     useSQLExecution.ts         # Editor → engine → history bridge
+  utils/
+    download.ts                # Browser file downloads for exports
 ```
 
 ### Database architecture
 
-- `sql.js` initializes once; the live `SQLiteDatabase` handle is a module singleton so
-  consecutive queries run against the same session.
-- First launch runs the schema + seed DDL/DML and writes a serialized snapshot to
-  IndexedDB. Every mutating execution re-snapshots the database.
-- On reload the snapshot is restored (corrupt snapshots fall back to a fresh seed).
+- `sql.js` initializes once. `databaseManager` owns exactly one live
+  `SQLiteDatabase` connection at a time plus the metadata list for every known
+  database, so a query can only ever target the active database.
+- Every database has a persistent `DatabaseInfo` record (`id`, name, description,
+  template, timestamps, cached table/row/byte stats) and a serialized snapshot in
+  IndexedDB. Mutating executions re-snapshot the active database and refresh its stats.
+- Switching opens the target snapshot **before** closing the previous connection, so a
+  failed switch leaves the current database usable. A missing or corrupt snapshot is
+  rebuilt from that database's template.
+- First run creates the optional Example Database (University schema + seed) to
+  preserve the original experience. Every other new database stays exactly as created.
+- Import validates SQLite files with a header check and `PRAGMA integrity_check`, and
+  always creates a new database (unique name suffix) — it never overwrites one.
+- History and saved queries are tagged with the database id. Legacy rows from the
+  previous single-database version are migrated and tagged automatically.
 - `PRAGMA foreign_keys = ON` is applied per connection, so FK constraints are always
   enforced — including in the playground.
+
+### IndexedDB schema (version 2)
+
+| Store       | Key                    | Contents                                   |
+| ----------- | ---------------------- | ------------------------------------------ |
+| `databases` | `id`                   | `DatabaseInfo` metadata records            |
+| `snapshots` | database `id`          | serialized SQLite bytes per database       |
+| `app`       | `key`                  | active database id, migration marker       |
+| `history`   | `id`                   | execution log (database-tagged)            |
+| `queries`   | `id`                   | saved queries (database-tagged)            |
+| `database`  | fixed `current`        | legacy v1 snapshot (migrated, left intact) |
+
+The upgrade migrates a v1 `database/current` snapshot into a proper database record
+once (guarded by a marker) so existing users keep their data.
+
+### Workspace views
+
+`MainLayout` mounts the Query and Canvas workspaces at the same time and toggles
+visibility (`absolute inset-0` + `invisible/opacity-0`). Because nothing unmounts,
+switching views cannot clear the editor, re-run SQL, reset playback, change the active
+database, or lose node selection/zoom/pan. The choice is persisted in `localStorage`.
 
 ### SQL execution architecture
 
@@ -259,14 +331,20 @@ reported.
   need a pan to reach the branch column (the legend, zoom and fit controls help).
 - SQLite runs on the main thread; very large result sets could briefly block the UI
   (the service is structured so a Web Worker host can be added without UI changes).
+- Only one database connection is live at a time; others live as snapshots in
+  IndexedDB, so very large numbers of databases increase storage and switch latency.
+- Imports must fit in browser memory, and `.sql` imports are executed as written —
+  an unsupported script fails with the SQLite error rather than being partially
+  imported.
 - Monaco's bundle makes the main JS chunk large (expected for a local Monaco setup).
 - Foreign keys are enforced but `ON DELETE`/`ON UPDATE` actions beyond the schema's
   defaults are not surfaced in the explorer UI.
 - The SQL formatter is keyword-driven — it never fails, but does not reflow every
   possible nesting style.
 - No E2E (Playwright) tests yet; testing is unit/integration (Vitest + RTL),
-  including real SQLite-in-Node integration tests, IndexedDB persistence tests and
-  canvas interaction/reduced-motion tests.
+  including real SQLite-in-Node integration tests, multi-database creation/isolation/
+  import/export scenario tests, IndexedDB persistence/migration tests and canvas
+  interaction/reduced-motion tests.
 
 ## Roadmap
 

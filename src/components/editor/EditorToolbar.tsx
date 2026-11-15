@@ -12,6 +12,11 @@ import {
 import { Button } from '../common/Button'
 import { Modal } from '../common/Modal'
 import { EXAMPLE_QUERIES } from './exampleQueries'
+import { useDatabaseStore } from '../../store/databaseStore'
+import {
+  EXAMPLE_DATABASE_DESCRIPTION,
+  EXAMPLE_DATABASE_NAME,
+} from '../../services/database/templates'
 
 interface EditorToolbarProps {
   onRun: () => void
@@ -37,7 +42,19 @@ export function EditorToolbar({
   const [resetOpen, setResetOpen] = useState(false)
   const [resetting, setResetting] = useState(false)
   const [resetError, setResetError] = useState<string | null>(null)
+  const [exampleError, setExampleError] = useState<string | null>(null)
   const examplesRef = useRef<HTMLDivElement>(null)
+
+  const databases = useDatabaseStore((state) => state.databases)
+  const activeDatabaseId = useDatabaseStore((state) => state.activeDatabaseId)
+  const createDatabase = useDatabaseStore((state) => state.createDatabase)
+  const openDatabase = useDatabaseStore((state) => state.openDatabase)
+
+  const activeDatabase =
+    databases.find((database) => database.id === activeDatabaseId) ?? null
+  const exampleDatabase =
+    databases.find((database) => database.template === 'example') ?? null
+  const isExampleDatabase = activeDatabase?.template === 'example'
 
   useEffect(() => {
     if (!examplesOpen) return
@@ -62,6 +79,33 @@ export function EditorToolbar({
       setResetting(false)
     }
   }
+
+  const openExampleDatabase = async () => {
+    setExampleError(null)
+    try {
+      if (exampleDatabase) {
+        await openDatabase(exampleDatabase.id)
+      } else {
+        await createDatabase({
+          name: EXAMPLE_DATABASE_NAME,
+          description: EXAMPLE_DATABASE_DESCRIPTION,
+          template: 'example',
+        })
+      }
+      setExamplesOpen(false)
+    } catch (error) {
+      setExampleError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  const resetExplanation =
+    activeDatabase === null
+      ? 'No database is selected.'
+      : activeDatabase.template === 'example'
+        ? `“${activeDatabase.name}” returns to its original University schema and seed rows.`
+        : activeDatabase.template === 'custom'
+          ? `“${activeDatabase.name}” runs its setup SQL again from scratch.`
+          : `Every table and row in “${activeDatabase.name}” is permanently removed, leaving an empty database.`
 
   return (
     <div className="flex flex-wrap items-center gap-1.5 border-b border-border bg-surface px-3 py-2">
@@ -132,6 +176,25 @@ export function EditorToolbar({
                 </div>
               </button>
             ))}
+            {!isExampleDatabase && (
+              <div className="mt-1 rounded-md border border-border bg-surface px-2.5 py-2">
+                <p className="text-[10px] leading-relaxed text-text-muted">
+                  These examples query the optional Example Database. On another
+                  database, create matching tables first.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void openExampleDatabase()}
+                  className="mt-1 inline-flex items-center gap-1 rounded border border-accent/40 bg-accent-soft px-1.5 py-0.5 text-[10px] font-medium text-accent transition-colors hover:bg-accent/15"
+                >
+                  <Database className="size-3" aria-hidden />
+                  {exampleDatabase ? 'Open Example Database' : 'Create Example Database'}
+                </button>
+                {exampleError && (
+                  <p className="mt-1 text-[10px] text-danger">{exampleError}</p>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -152,9 +215,7 @@ export function EditorToolbar({
         title="Reset database"
       >
         <p className="text-sm leading-relaxed text-text-secondary">
-          This restores the University Database to its original seed data.
-          Every table you created and row you modified will be permanently
-          discarded.
+          {resetExplanation} Resetting is permanent and cannot be undone.
         </p>
         {resetError && (
           <div className="mt-3 flex items-start gap-2 rounded-lg border border-danger/40 bg-danger-soft px-3 py-2 text-xs text-danger">

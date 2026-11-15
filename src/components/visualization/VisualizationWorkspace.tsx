@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   CircleAlert,
   CircleCheck,
+  Database as DatabaseIcon,
   Eye,
   Info,
   Table2,
@@ -34,6 +35,12 @@ import type { StageSnapshot, VisualizedStage } from '../../types/visualization'
 interface VisualizationWorkspaceProps {
   queryName: string
   onClose: () => void
+  /** Current editor SQL, used to flag stale visualizations. */
+  currentQuery?: string
+  /** Name of the active database, shown in the header. */
+  activeDatabaseName?: string | null
+  /** Re-run the visualization for the current editor SQL. */
+  onRevisualize?: () => void
 }
 
 const STATUS_LABELS = {
@@ -43,7 +50,13 @@ const STATUS_LABELS = {
   unavailable: 'Database not ready',
 } as const
 
-export function VisualizationWorkspace({ queryName, onClose }: VisualizationWorkspaceProps) {
+export function VisualizationWorkspace({
+  queryName,
+  onClose,
+  currentQuery,
+  activeDatabaseName = null,
+  onRevisualize,
+}: VisualizationWorkspaceProps) {
   const trace = useVisualizationStore((state) => state.trace)
   const viewState = useVisualizationStore((state) => state.viewState)
   const playing = useVisualizationStore((state) => state.playing)
@@ -155,6 +168,7 @@ export function VisualizationWorkspace({ queryName, onClose }: VisualizationWork
           queryName={queryName}
           status={status}
           onClose={onClose}
+          databaseName={activeDatabaseName}
           onRestart={restart}
         />
         <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
@@ -196,7 +210,7 @@ export function VisualizationWorkspace({ queryName, onClose }: VisualizationWork
         queryName={queryName}
         status={status}
         onClose={onClose}
-        onRestart={restart}
+        databaseName={activeDatabaseName}
         validation={validation}
         actualRowCount={actualRowCount}
         truncated={trace.truncated}
@@ -218,6 +232,25 @@ export function VisualizationWorkspace({ queryName, onClose }: VisualizationWork
           seekToStage(stage)
         }}
       />
+
+      {currentQuery !== undefined && currentQuery.trim() !== trace.query.trim() && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-warning/40 bg-warning/10 px-3 py-1.5 text-[11px] text-warning">
+          <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+          <span className="min-w-0 flex-1">
+            The SQL editor has changed since this visualization. The canvas still
+            represents the previously executed query.
+          </span>
+          {onRevisualize !== undefined && (
+            <button
+              type="button"
+              onClick={onRevisualize}
+              className="shrink-0 rounded-md border border-warning/40 px-2 py-0.5 text-[11px] font-medium transition-colors hover:bg-warning/15"
+            >
+              Re-visualize
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Validation / truncation warnings */}
       {(validation?.validated === false || trace.truncated) && (
@@ -339,7 +372,8 @@ interface WorkspaceHeaderProps {
   queryName: string
   status: keyof typeof STATUS_LABELS
   onClose: () => void
-  onRestart: () => void
+  onRestart?: () => void
+  databaseName?: string | null
   validation?: ReturnType<typeof useVisualizationStore.getState>['validation']
   actualRowCount?: number | null
   truncated?: boolean
@@ -355,6 +389,7 @@ function WorkspaceHeader({
   queryName,
   status,
   onClose,
+  databaseName,
   validation,
   actualRowCount,
   hasAggregation,
@@ -370,6 +405,12 @@ function WorkspaceHeader({
       <h2 className="max-w-72 truncate font-mono text-[13px] font-semibold text-text-primary">
         {queryName}
       </h2>
+      {databaseName !== null && databaseName !== undefined && (
+        <span className="inline-flex max-w-48 items-center gap-1 rounded-md border border-border bg-surface-2 px-2 py-0.5 text-[11px] text-text-secondary">
+          <DatabaseIcon className="size-3 shrink-0" aria-hidden />
+          <span className="truncate">{databaseName}</span>
+        </span>
+      )}
       <span className="rounded-md border border-border bg-surface-2 px-2 py-0.5 text-[11px] text-text-muted">
         {STATUS_LABELS[status]}
       </span>
@@ -448,7 +489,7 @@ function WorkspaceHeader({
         className="rounded-lg border border-border px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-border-strong hover:text-text-primary"
         whileTap={{ scale: 0.97 }}
       >
-        Back to results
+        Back to query
       </motion.button>
     </header>
   )

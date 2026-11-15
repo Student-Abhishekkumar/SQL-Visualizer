@@ -1,8 +1,9 @@
 import { useEditorStore } from '../store/editorStore'
 import { useDatabaseStore } from '../store/databaseStore'
 import { useHistoryStore } from '../store/historyStore'
+import { useUIStore } from '../store/uiStore'
 import { useVisualizationStore } from '../store/visualizationStore'
-import { resetDatabase } from '../services/database/databaseInitializer'
+import type { DatabaseTemplateId } from '../types/database'
 
 /**
  * Development-only automation bridge (import.meta.env.DEV).
@@ -21,7 +22,30 @@ export function installDevBridge(): void {
     },
     history: () => useHistoryStore.getState().history,
     clearHistory: () => useHistoryStore.getState().clearAllHistory(),
-    resetDatabase: () => resetDatabase(),
+    resetDatabase: () => useDatabaseStore.getState().resetDatabase(),
+    databases: () => useDatabaseStore.getState().databases,
+    getActiveDatabaseId: () => useDatabaseStore.getState().activeDatabaseId,
+    openDatabase: (id: string) => useDatabaseStore.getState().openDatabase(id),
+    createDatabase: (input: {
+      name: string
+      description?: string
+      template: DatabaseTemplateId
+      setupSql?: string
+    }) =>
+      useDatabaseStore.getState().createDatabase({
+        name: input.name,
+        description: input.description,
+        template: input.template === 'imported' ? 'blank' : input.template,
+        setupSql: input.setupSql,
+      }),
+    renameDatabase: (id: string, name: string) =>
+      useDatabaseStore.getState().renameDatabase(id, name),
+    duplicateDatabase: (id: string, name?: string) =>
+      useDatabaseStore.getState().duplicateDatabase(id, name),
+    deleteDatabase: (id: string) => useDatabaseStore.getState().deleteDatabase(id),
+    getSchema: () => useDatabaseStore.getState().schema,
+    setView: (view: 'query' | 'canvas') => useUIStore.getState().setWorkspaceView(view),
+    getView: () => useUIStore.getState().workspaceView,
     getPlayback: () => {
       const state = useVisualizationStore.getState()
       return {
@@ -32,6 +56,7 @@ export function installDevBridge(): void {
         activeStage: state.viewState.activeStage,
         playing: state.playing,
         finished: state.finished,
+        databaseId: state.databaseId,
         completedStages: state.viewState.completedStages.map((snapshot) => snapshot.stage),
       }
     },

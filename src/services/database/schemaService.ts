@@ -1,6 +1,7 @@
 import type {
   ColumnSchema,
   DatabaseSchema,
+  IndexSchema,
   TableSchema,
 } from '../../types/database'
 import type { SQLiteDatabase } from './sqliteService'
@@ -8,28 +9,56 @@ import type { SQLiteDatabase } from './sqliteService'
 /**
  * Schema introspection for the database explorer.
  * All information comes from live SQLite pragmas and catalog queries —
- * nothing is hardcoded.
+ * nothing is hardcoded, so any user-created table is discovered.
  */
+
+interface TableRow {
+  name: string
+  sql: string | null
+}
 
 /** User tables (system tables excluded), sorted alphabetically. */
 export function getDatabaseSchema(db: SQLiteDatabase, dbName: string): DatabaseSchema {
   const { values: tableRows } = db.queryAll(
-    `SELECT name FROM sqlite_master
+    `SELECT name, sql FROM sqlite_master
      WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
      ORDER BY name`,
   )
 
   const tables: TableSchema[] = []
   for (const row of tableRows) {
-    const tableName = String(row[0])
-    tables.push(getTableSchema(db, tableName))
+    const table: TableRow = {
+      name: String(row[0]),
+      sql: row[1] == null ? null : String(row[1]),
+    }
+    tables.push(getTableSchema(db, table.name, table.sql))
   }
 
-  return { name: dbName, tables }
+  const { values: viewRows } = db.queryAll(
+    `SELECT name FROM sqlite_master
+     WHERE type = 'view' AND name NOT LIKE 'sqlite_%'
+     ORDER BY name`,
+  )
+  const { values: triggerRows } = db.queryAll(
+    `SELECT name FROM sqlite_master
+     WHERE type = 'trigger' AND name NOT LIKE 'sqlite_%'
+     ORDER BY name`,
+  )
+
+  return {
+    name: dbName,
+    tables,
+    views: viewRows.map((row) => String(row[0])),
+    triggers: triggerRows.map((row) => String(row[0])),
+  }
 }
 
-/** Columns (with PK/FK flags) and live row count for one table. */
-export function getTableSchema(db: SQLiteDatabase, tableName: string): TableSchema {
+/** Columns, indexes (with PK/FK flags) and live row count for one table. */
+export function getTableSchema(
+  db: SQLiteDatabase,
+  tableName: string,
+  createSql?: string | null,
+): TableSchema {
   const safeName = quoteIdentifier(tableName)
 
   // PRAGMA table_info: [cid, name, type, notnull, dflt_value, pk]
@@ -70,10 +99,72 @@ export function getTableSchema(db: SQLiteDatabase, tableName: string): TableSche
     rowCount = 0
   }
 
-  return { name: tableName, columns, rowCount }
+  const sql =
+    createSql === undefined
+      ? (db.queryOne(
+          `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ${quoteLiteral(tableName)}`,
+        )?.row[0] as string | null | undefined) ?? null
+      : createSql
+
+  const table: TableSchema = {
+    name: tableName,
+    columns,
+    rowCount,
+    indexes: getTableIndexes(db, tableName),
+  }
+  if (sql != null) table.sql = sql
+  return table
+}
+
+/** Indexes and unique constraints for a table (PRAGMA index_list). */
+export function getTableIndexes(db: SQLiteDatabase, tableName: string): IndexSchema[] {
+  const safeName = quoteIdentifier(tableName)
+  // PRAGMA index_list: [seq, name, unique, origin, partial]
+  const { values: indexRows } = db.queryAll(`PRAGMA index_list(${safeName})`)
+
+  const indexes: IndexSchema[] = []
+  for (const row of indexRows) {
+    const indexName = String(row[1] ?? '')
+    if (indexName === '') continue
+    const originRaw = String(row[3] ?? 'c')
+    const origin: IndexSchema['origin'] =
+      originRaw === 'pk' ? 'pk' : originRaw === 'u' ? 'unique' : 'created'
+
+    // PRAGMA index_info: [seqno, cid, name]
+    const { values: columnRows } = db.queryAll(
+      `PRAGMA index_info(${quoteIdentifier(indexName)})`,
+    )
+    const columns = columnRows
+      .map((columnRow) => (columnRow[2] == null ? '' : String(columnRow[2])))
+      .filter((column) => column !== '')
+
+    indexes.push({
+      name: indexName,
+      unique: Number(row[2]) === 1,
+      origin,
+      columns,
+    })
+  }
+  return indexes
+}
+
+/** Aggregate table/row stats used by database metadata. */
+export function getSchemaStats(schema: DatabaseSchema): {
+  tableCount: number
+  rowCount: number
+} {
+  return {
+    tableCount: schema.tables.length,
+    rowCount: schema.tables.reduce((total, table) => total + table.rowCount, 0),
+  }
 }
 
 /** Double-quoted identifier with embedded quotes escaped. */
 export function quoteIdentifier(identifier: string): string {
   return `"${identifier.replace(/"/g, '""')}"`
+}
+
+/** Single-quoted SQL literal with embedded quotes escaped. */
+export function quoteLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`
 }

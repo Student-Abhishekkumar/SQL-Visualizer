@@ -6,7 +6,7 @@ import type {
   VisualizationViewState,
   ValidationResult,
 } from '../types/visualization'
-import { getLiveDatabase } from '../services/database/databaseInitializer'
+import { getActiveDatabaseId, getLiveDatabase } from '../services/database/databaseManager'
 import { simulateAndValidate } from '../services/visualization/validation'
 
 /**
@@ -52,6 +52,8 @@ interface VisualizationState {
   validation: ValidationResult | null
   /** Row count SQLite actually returned (null when not executed). */
   actualRowCount: number | null
+  /** Database the loaded trace belongs to (null when nothing is loaded). */
+  databaseId: string | null
 
   /**
    * Full pipeline: interpret → simulate → execute for real → validate →
@@ -63,6 +65,12 @@ interface VisualizationState {
   loadTrace: (trace: VisualizationTrace) => void
   /** Clear the current trace (e.g. when leaving visualization mode). */
   clear: () => void
+  /**
+   * Fully invalidate visualization state when the active database
+   * changes: a trace from another database must never be shown, and
+   * stale status/validation text must not linger.
+   */
+  resetForDatabaseSwitch: () => void
 
   play: () => void
   pause: () => void
@@ -179,9 +187,11 @@ export const useVisualizationStore = create<VisualizationState>()((set, get) => 
   unavailableReasons: [],
   validation: null,
   actualRowCount: null,
+  databaseId: null,
 
   visualize: (sql, statements) => {
     const db = getLiveDatabase()
+    const databaseId = getActiveDatabaseId()
     if (db === null) {
       clearTimer()
       const sessionId = get().sessionId + 1
@@ -192,6 +202,7 @@ export const useVisualizationStore = create<VisualizationState>()((set, get) => 
         unavailableReasons: ['The database is not ready yet. Run a query first, then visualize.'],
         validation: null,
         actualRowCount: null,
+        databaseId,
         viewState: emptyViewState(),
         finished: false,
         eventIndex: 0,
@@ -210,6 +221,7 @@ export const useVisualizationStore = create<VisualizationState>()((set, get) => 
         unavailableReasons: outcome.simulation.reasons,
         validation: null,
         actualRowCount: outcome.execution?.values.length ?? null,
+        databaseId,
         viewState: emptyViewState(),
         finished: false,
         eventIndex: 0,
@@ -230,6 +242,7 @@ export const useVisualizationStore = create<VisualizationState>()((set, get) => 
       unavailableReasons: [],
       validation: outcome.validation,
       actualRowCount: outcome.execution?.values.length ?? null,
+      databaseId,
     })
   },
 
@@ -243,6 +256,7 @@ export const useVisualizationStore = create<VisualizationState>()((set, get) => 
       viewState: foldEvents(trace.events, 0),
       finished: false,
       sessionId,
+      databaseId: getActiveDatabaseId(),
     })
   },
 
@@ -256,6 +270,25 @@ export const useVisualizationStore = create<VisualizationState>()((set, get) => 
       viewState: emptyViewState(),
       finished: false,
       sessionId,
+      databaseId: null,
+    })
+  },
+
+  resetForDatabaseSwitch: () => {
+    clearTimer()
+    const sessionId = get().sessionId + 1
+    set({
+      trace: null,
+      eventIndex: 0,
+      playing: false,
+      viewState: emptyViewState(),
+      finished: false,
+      sessionId,
+      status: 'idle',
+      unavailableReasons: [],
+      validation: null,
+      actualRowCount: null,
+      databaseId: null,
     })
   },
 

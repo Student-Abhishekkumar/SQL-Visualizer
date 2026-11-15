@@ -74,6 +74,8 @@ export interface QueryExecutionResult {
   error?: string
   /** Index into `statements`/source statements when execution aborted. */
   errorStatementIndex?: number
+  /** Database the query actually ran against (set by the store). */
+  databaseId?: string
   /**
    * Stage 2 hook: the visualization engine will attach an execution
    * trace here. Stage 1 never populates it.
@@ -90,6 +92,8 @@ export interface HistoryEntry {
   executionTime: number
   rowCount: number
   statementType: StatementType
+  /** Database the query was executed against (v2 workspace). */
+  databaseId?: string
 }
 
 /** A user-saved, named query. */
@@ -98,4 +102,6 @@ export interface SavedQuery {
   name: string
   sql: string
   createdAt: number
+  /** Database the query was written for; absent means "any database". */
+  databaseId?: string
 }

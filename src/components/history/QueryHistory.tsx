@@ -1,6 +1,8 @@
+import { useState } from 'react'
 import { Trash2 } from 'lucide-react'
 import { useHistoryStore } from '../../store/historyStore'
 import { useEditorStore } from '../../store/editorStore'
+import { useDatabaseStore } from '../../store/databaseStore'
 import { summarizeSQL } from '../../services/sql/sqlFormatter'
 import type { HistoryEntry } from '../../types/query'
 
@@ -24,11 +26,26 @@ interface QueryHistoryProps {
   onClearRequest: () => void
 }
 
-/** Sidebar section: recent executions with outcome and duration. */
+/**
+ * Sidebar section: recent executions with outcome and duration.
+ * Filtered to the active database by default so queries executed
+ * against different databases are never conflated.
+ */
 export function QueryHistory({ onClearRequest }: QueryHistoryProps) {
   const history = useHistoryStore((state) => state.history)
   const removeHistoryEntry = useHistoryStore((state) => state.removeHistoryEntry)
   const loadQuery = useEditorStore((state) => state.loadQuery)
+  const activeDatabaseId = useDatabaseStore((state) => state.activeDatabaseId)
+  const databases = useDatabaseStore((state) => state.databases)
+
+  const [scope, setScope] = useState<'current' | 'all'>('current')
+
+  const visible =
+    scope === 'current' && activeDatabaseId !== null
+      ? history.filter((entry) => entry.databaseId === activeDatabaseId)
+      : history
+
+  const nameById = new Map(databases.map((database) => [database.id, database.name]))
 
   return (
     <div className="flex min-h-[120px] flex-1 flex-col">
@@ -36,28 +53,65 @@ export function QueryHistory({ onClearRequest }: QueryHistoryProps) {
         <span className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">
           Query History
         </span>
-        {history.length > 0 && (
-          <button
-            onClick={onClearRequest}
-            aria-label="Clear query history"
-            title="Clear all history"
-            className="rounded p-1 text-text-muted transition-colors hover:bg-surface-2 hover:text-danger"
-          >
-            <Trash2 className="size-3.5" />
-          </button>
-        )}
+        <div className="flex items-center gap-0.5">
+          {history.length > 0 && (
+            <>
+              <button
+                type="button"
+                onClick={() => setScope('current')}
+                aria-pressed={scope === 'current'}
+                className={`rounded px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide transition-colors ${
+                  scope === 'current'
+                    ? 'bg-accent-soft text-accent'
+                    : 'text-text-muted hover:text-text-secondary'
+                }`}
+              >
+                This DB
+              </button>
+              <button
+                type="button"
+                onClick={() => setScope('all')}
+                aria-pressed={scope === 'all'}
+                className={`rounded px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide transition-colors ${
+                  scope === 'all'
+                    ? 'bg-accent-soft text-accent'
+                    : 'text-text-muted hover:text-text-secondary'
+                }`}
+              >
+                All
+              </button>
+              <button
+                onClick={onClearRequest}
+                aria-label="Clear query history"
+                title="Clear all history"
+                className="ml-0.5 rounded p-1 text-text-muted transition-colors hover:bg-surface-2 hover:text-danger"
+              >
+                <Trash2 className="size-3.5" />
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
-      {history.length === 0 ? (
+      {visible.length === 0 ? (
         <p className="px-3 pb-2 text-[11px] leading-relaxed text-text-muted/80">
-          Executed queries appear here and survive page refreshes.
+          {history.length === 0
+            ? 'Executed queries appear here and survive page refreshes.'
+            : scope === 'current'
+              ? 'No queries yet for this database.'
+              : 'No history entries.'}
         </p>
       ) : (
         <ul className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2">
-          {history.map((entry) => (
+          {visible.map((entry) => (
             <HistoryRow
               key={entry.id}
               entry={entry}
+              databaseName={
+                entry.databaseId === undefined
+                  ? undefined
+                  : (nameById.get(entry.databaseId) ?? 'Deleted database')
+              }
               onLoad={() => loadQuery(entry.sql)}
               onDelete={() => void removeHistoryEntry(entry.id)}
             />
@@ -70,10 +124,12 @@ export function QueryHistory({ onClearRequest }: QueryHistoryProps) {
 
 function HistoryRow({
   entry,
+  databaseName,
   onLoad,
   onDelete,
 }: {
   entry: HistoryEntry
+  databaseName?: string
   onLoad: () => void
   onDelete: () => void
 }) {
@@ -94,6 +150,11 @@ function HistoryRow({
           <span className="rounded bg-surface-3 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-text-muted">
             {entry.statementType}
           </span>
+          {databaseName !== undefined && (
+            <span className="max-w-24 truncate rounded border border-border px-1 py-0.5 text-[9px] text-text-muted">
+              {databaseName}
+            </span>
+          )}
           <span className="ml-auto font-mono text-[10px] text-text-muted">
             {formatDuration(entry.executionTime)}
           </span>

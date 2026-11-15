@@ -28,10 +28,10 @@ interface HistoryState {
   loaded: boolean
 
   loadFromStorage: () => Promise<void>
-  recordExecution: (result: QueryExecutionResult) => void
+  recordExecution: (result: QueryExecutionResult, databaseId?: string) => void
   removeHistoryEntry: (id: string) => Promise<void>
   clearAllHistory: () => Promise<void>
-  addSavedQuery: (name: string, sql: string) => Promise<SavedQuery>
+  addSavedQuery: (name: string, sql: string, databaseId?: string) => Promise<SavedQuery>
   removeSavedQuery: (id: string) => Promise<void>
 }
 
@@ -49,7 +49,7 @@ export const useHistoryStore = create<HistoryState>()((set, get) => ({
     set({ history, savedQueries, loaded: true })
   },
 
-  recordExecution: (result) => {
+  recordExecution: (result, databaseId) => {
     const entry: HistoryEntry = {
       id: newId(),
       sql: result.query,
@@ -58,6 +58,7 @@ export const useHistoryStore = create<HistoryState>()((set, get) => ({
       executionTime: result.executionTime,
       rowCount: result.rowCount,
       statementType: result.statementType,
+      databaseId: databaseId ?? result.databaseId,
     }
     set((state) => ({
       history: [entry, ...state.history].slice(0, 200),
@@ -75,13 +76,14 @@ export const useHistoryStore = create<HistoryState>()((set, get) => ({
     await clearHistory()
   },
 
-  addSavedQuery: async (name, sql) => {
+  addSavedQuery: async (name, sql, databaseId) => {
     const query: SavedQuery = {
       id: newId(),
       name: name.trim() || 'Untitled query',
       sql,
       createdAt: Date.now(),
     }
+    if (databaseId !== undefined) query.databaseId = databaseId
     set((state) => ({ savedQueries: [query, ...state.savedQueries] }))
     await saveSavedQuery(query)
     return query

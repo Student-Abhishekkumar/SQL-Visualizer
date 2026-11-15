@@ -8,10 +8,19 @@ interface ModalProps {
   children: ReactNode
   /** Extra width for content-heavy dialogs. */
   wide?: boolean
+  /** Widest layout for the database manager (two-column). */
+  extraWide?: boolean
 }
 
 /** Accessible-enough modal: Escape closes, backdrop click closes. */
-export function Modal({ open, onClose, title, children, wide = false }: ModalProps) {
+export function Modal({
+  open,
+  onClose,
+  title,
+  children,
+  wide = false,
+  extraWide = false,
+}: ModalProps) {
   const panelRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -37,7 +46,7 @@ export function Modal({ open, onClose, title, children, wide = false }: ModalPro
       <div
         ref={panelRef}
         className={`flex max-h-[85vh] w-full flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-2xl ${
-          wide ? 'max-w-2xl' : 'max-w-md'
+          extraWide ? 'max-w-4xl' : wide ? 'max-w-2xl' : 'max-w-md'
         }`}
       >
         <div className="flex items-center justify-between border-b border-border px-4 py-3">

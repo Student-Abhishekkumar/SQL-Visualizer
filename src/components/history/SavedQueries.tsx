@@ -2,21 +2,32 @@ import { useState } from 'react'
 import { Plus, Trash2 } from 'lucide-react'
 import { useHistoryStore } from '../../store/historyStore'
 import { useEditorStore } from '../../store/editorStore'
+import { useDatabaseStore } from '../../store/databaseStore'
 import { Button } from '../common/Button'
 import { Modal } from '../common/Modal'
 import { summarizeSQL } from '../../services/sql/sqlFormatter'
 
-/** Sidebar section: user-saved named queries, persisted in IndexedDB. */
+/**
+ * Sidebar section: user-saved named queries, persisted in IndexedDB.
+ * New saves record the active database so schema assumptions stay clear;
+ * queries saved before the multi-database update remain usable anywhere.
+ */
 export function SavedQueries() {
   const savedQueries = useHistoryStore((state) => state.savedQueries)
   const addSavedQuery = useHistoryStore((state) => state.addSavedQuery)
   const removeSavedQuery = useHistoryStore((state) => state.removeSavedQuery)
   const loadQuery = useEditorStore((state) => state.loadQuery)
   const currentContent = useEditorStore((state) => state.content)
+  const activeDatabaseId = useDatabaseStore((state) => state.activeDatabaseId)
+  const databases = useDatabaseStore((state) => state.databases)
 
   const [saveOpen, setSaveOpen] = useState(false)
   const [name, setName] = useState('')
   const [error, setError] = useState<string | null>(null)
+
+  const nameById = new Map(databases.map((database) => [database.id, database.name]))
+  const activeDatabase =
+    databases.find((database) => database.id === activeDatabaseId) ?? null
 
   const handleSave = async () => {
     if (!name.trim()) {
@@ -27,7 +38,7 @@ export function SavedQueries() {
       setError('The editor is empty — nothing to save.')
       return
     }
-    await addSavedQuery(name, currentContent)
+    await addSavedQuery(name, currentContent, activeDatabaseId ?? undefined)
     setName('')
     setError(null)
     setSaveOpen(false)
@@ -55,29 +66,38 @@ export function SavedQueries() {
         </p>
       ) : (
         <ul className="px-1.5">
-          {savedQueries.map((query) => (
-            <li key={query.id} className="group relative">
-              <button
-                onClick={() => loadQuery(query.sql)}
-                title={query.sql}
-                className="block w-full rounded-md px-2 py-1.5 pr-8 text-left hover:bg-surface-2"
-              >
-                <span className="block truncate text-[13px] font-medium text-text-secondary group-hover:text-text-primary">
-                  {query.name}
-                </span>
-                <span className="block truncate font-mono text-[11px] text-text-muted">
-                  {summarizeSQL(query.sql, 46)}
-                </span>
-              </button>
-              <button
-                onClick={() => void removeSavedQuery(query.id)}
-                aria-label={`Delete saved query ${query.name}`}
-                className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-1 text-text-muted opacity-0 transition-opacity hover:text-danger group-hover:opacity-100"
-              >
-                <Trash2 className="size-3.5" />
-              </button>
-            </li>
-          ))}
+          {savedQueries.map((query) => {
+            const databaseLabel =
+              query.databaseId === undefined
+                ? 'Any database'
+                : `Saved for ${nameById.get(query.databaseId) ?? 'a deleted database'}`
+            return (
+              <li key={query.id} className="group relative">
+                <button
+                  onClick={() => loadQuery(query.sql)}
+                  title={query.sql}
+                  className="block w-full rounded-md px-2 py-1.5 pr-8 text-left hover:bg-surface-2"
+                >
+                  <span className="block truncate text-[13px] font-medium text-text-secondary group-hover:text-text-primary">
+                    {query.name}
+                  </span>
+                  <span className="block truncate font-mono text-[11px] text-text-muted">
+                    {summarizeSQL(query.sql, 46)}
+                  </span>
+                  <span className="mt-0.5 block truncate text-[10px] text-text-muted/70">
+                    {databaseLabel}
+                  </span>
+                </button>
+                <button
+                  onClick={() => void removeSavedQuery(query.id)}
+                  aria-label={`Delete saved query ${query.name}`}
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-1 text-text-muted opacity-0 transition-opacity hover:text-danger group-hover:opacity-100"
+                >
+                  <Trash2 className="size-3.5" />
+                </button>
+              </li>
+            )
+          })}
         </ul>
       )}
 
@@ -98,6 +118,11 @@ export function SavedQueries() {
         />
         <p className="mt-2 truncate font-mono text-[11px] text-text-muted">
           {summarizeSQL(currentContent, 80)}
+        </p>
+        <p className="mt-1 text-[10px] text-text-muted">
+          {activeDatabase
+            ? `Saved for “${activeDatabase.name}”.`
+            : 'No database is selected; the query will be saved for any database.'}
         </p>
         {error && <p className="mt-2 text-xs text-danger">{error}</p>}
         <div className="mt-4 flex justify-end gap-2">

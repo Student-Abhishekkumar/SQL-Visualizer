@@ -1,12 +1,15 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Database, Plus } from 'lucide-react'
 import { Navbar } from './Navbar'
 import { Sidebar } from './Sidebar'
+import { WorkspaceViewToggle } from './WorkspaceViewToggle'
 import { SQLEditor } from '../editor/SQLEditor'
 import { EditorToolbar } from '../editor/EditorToolbar'
 import { ResultsPanel } from '../results/ResultsPanel'
 import { VisualizationWorkspace } from '../visualization/VisualizationWorkspace'
 import { useEditorStore } from '../../store/editorStore'
 import { useDatabaseStore } from '../../store/databaseStore'
+import { useUIStore } from '../../store/uiStore'
 import { useVisualizationStore } from '../../store/visualizationStore'
 import { useSQLExecution } from '../../hooks/useSQLExecution'
 import { formatSQL } from '../../services/sql/sqlFormatter'
@@ -16,11 +19,15 @@ const MIN_SPLIT = 20
 const MAX_SPLIT = 80
 
 /**
- * Main workspace shell: navbar + (explorer | editor ⇅ results).
- * The editor/results divider is draggable; editor content persists
- * across tab switches because it lives in the editor store.
- * "Visualize" switches the area below the toolbar into the
- * visualization workspace mode without touching the execution path.
+ * Main workspace shell.
+ *
+ * Two workspaces share one execution context:
+ *  - Query  : SQL editor + results
+ *  - Canvas : full-size animated SQL visualization
+ *
+ * Both stay mounted while hidden, so switching never resets editor
+ * content, results, canvas pan/zoom, node selection, playback or the
+ * active database. Ctrl/Cmd+Shift+M toggles the visible workspace.
  */
 export function MainLayout() {
   const content = useEditorStore((state) => state.content)
@@ -29,14 +36,34 @@ export function MainLayout() {
   const clear = useEditorStore((state) => state.clear)
   const isExecuting = useDatabaseStore((state) => state.isExecuting)
   const lastResult = useDatabaseStore((state) => state.lastResult)
-  const reset = useDatabaseStore((state) => state.reset)
+  const activeDatabaseId = useDatabaseStore((state) => state.activeDatabaseId)
+  const databases = useDatabaseStore((state) => state.databases)
+  const reset = useDatabaseStore((state) => state.resetDatabase)
   const visualize = useVisualizationStore((state) => state.visualize)
+  const workspaceView = useUIStore((state) => state.workspaceView)
+  const setWorkspaceView = useUIStore((state) => state.setWorkspaceView)
+  const toggleWorkspaceView = useUIStore((state) => state.toggleWorkspaceView)
+  const setDatabaseManagerOpen = useUIStore((state) => state.setDatabaseManagerOpen)
   const { execute } = useSQLExecution()
 
   const [editorRatio, setEditorRatio] = useState(52)
-  const [mode, setMode] = useState<'results' | 'visualization'>('results')
   const mainRef = useRef<HTMLDivElement>(null)
   const draggingRef = useRef(false)
+
+  const activeDatabase = databases.find((database) => database.id === activeDatabaseId) ?? null
+
+  // Ctrl/Cmd+Shift+M toggles Query/Canvas. Chosen because Monaco does not
+  // bind it, so the shortcut is safe even while the editor is focused.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'm') {
+        event.preventDefault()
+        toggleWorkspaceView()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [toggleWorkspaceView])
 
   const runQuery = useCallback(() => {
     void execute(content)
@@ -44,12 +71,16 @@ export function MainLayout() {
 
   const handleVisualize = useCallback(() => {
     visualize(content, splitStatements(content))
-    setMode('visualization')
-  }, [visualize, content])
+    setWorkspaceView('canvas')
+  }, [visualize, content, setWorkspaceView])
 
   const handleReset = useCallback(async () => {
-    const schema = await reset()
-    return schema !== null
+    try {
+      await reset()
+      return true
+    } catch {
+      return false
+    }
   }, [reset])
 
   const startDrag = (event: React.PointerEvent) => {
@@ -70,21 +101,42 @@ export function MainLayout() {
     event.currentTarget.releasePointerCapture(event.pointerId)
   }
 
+  const queryVisible = workspaceView === 'query'
+  const canvasVisible = workspaceView === 'canvas'
+
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-bg text-text-primary">
       <Navbar />
       <div className="flex min-h-0 flex-1">
         <Sidebar />
-        <div ref={mainRef} className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          {mode === 'visualization' ? (
-            <div className="min-h-0 flex-1 overflow-hidden">
-              <VisualizationWorkspace
-                queryName={content.trim() === '' ? '(empty query)' : content.trim().split('\n')[0] ?? ''}
-                onClose={() => setMode('results')}
-              />
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          <WorkspaceViewToggle />
+
+          {activeDatabaseId === null && (
+            <div className="flex flex-wrap items-center gap-2 border-b border-warning/40 bg-warning/10 px-3 py-2 text-[12px] text-warning">
+              <Database className="size-3.5 shrink-0" aria-hidden />
+              <span className="min-w-0 flex-1">
+                No database is selected. Create or open one to run SQL.
+              </span>
+              <button
+                type="button"
+                onClick={() => setDatabaseManagerOpen(true)}
+                className="inline-flex items-center gap-1 rounded-md border border-warning/40 px-2 py-1 text-[11px] font-medium transition-colors hover:bg-warning/15"
+              >
+                <Plus className="size-3" aria-hidden />
+                Open Database Manager
+              </button>
             </div>
-          ) : (
-            <>
+          )}
+
+          <div ref={mainRef} className="relative min-h-0 flex-1 overflow-hidden">
+            {/* Query workspace — kept mounted so editor/results state survives. */}
+            <div
+              aria-hidden={!queryVisible}
+              className={`absolute inset-0 flex min-h-0 flex-col overflow-hidden transition-opacity duration-200 ${
+                queryVisible ? 'opacity-100' : 'pointer-events-none invisible opacity-0'
+              }`}
+            >
               <div
                 className="flex min-h-0 flex-col overflow-hidden"
                 style={{ height: `${editorRatio}%` }}
@@ -118,8 +170,28 @@ export function MainLayout() {
               <div className="min-h-0 flex-1 overflow-hidden">
                 <ResultsPanel result={lastResult} isExecuting={isExecuting} />
               </div>
-            </>
-          )}
+            </div>
+
+            {/* Canvas workspace — also kept mounted for pan/zoom/playback. */}
+            <div
+              aria-hidden={!canvasVisible}
+              className={`absolute inset-0 flex min-h-0 flex-col overflow-hidden bg-surface transition-opacity duration-200 ${
+                canvasVisible ? 'opacity-100' : 'pointer-events-none invisible opacity-0'
+              }`}
+            >
+              <VisualizationWorkspace
+                queryName={
+                  content.trim() === ''
+                    ? '(empty query)'
+                    : (content.trim().split('\n')[0] ?? '')
+                }
+                activeDatabaseName={activeDatabase?.name ?? null}
+                currentQuery={content}
+                onRevisualize={handleVisualize}
+                onClose={() => setWorkspaceView('query')}
+              />
+            </div>
+          </div>
         </div>
       </div>
     </div>

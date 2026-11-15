@@ -1,23 +1,40 @@
 import { create } from 'zustand'
-import type { DatabaseSchema, DatabaseStatus } from '../types/database'
+import type {
+  DatabaseInfo,
+  DatabaseSchema,
+  DatabaseStatus,
+} from '../types/database'
 import type { QueryExecutionResult, StatementType } from '../types/query'
 import {
+  createDatabase as createManagedDatabase,
+  deleteDatabase as deleteManagedDatabase,
+  duplicateDatabase as duplicateManagedDatabase,
+  exportDatabase as exportManagedDatabase,
+  exportDatabaseSql as exportManagedDatabaseSql,
+  getActiveDatabase,
+  getActiveDatabaseId,
+  getDatabases,
   getLiveDatabase,
-  initializeDatabase,
-  persistDatabase,
-  resetDatabase,
+  importDatabase as importManagedDatabase,
+  initDatabaseManager,
+  openDatabase as openManagedDatabase,
+  persistActiveDatabase,
+  renameDatabase as renameManagedDatabase,
+  resetDatabase as resetManagedDatabase,
+  type CreateDatabaseInput,
+  type ImportDatabaseInput,
   type SqlJsConfig,
-} from '../services/database/databaseInitializer'
+} from '../services/database/databaseManager'
 import { getDatabaseSchema } from '../services/database/schemaService'
 import { SqlExecutionError, hasExecutableSql } from '../services/database/sqliteService'
-import {
-  isMutatingStatementType,
-} from '../services/sql/sqlParser'
+import { isMutatingStatementType } from '../services/sql/sqlParser'
+import { useVisualizationStore } from './visualizationStore'
 
 /**
- * Database application state: lifecycle, live schema snapshot and the
- * last execution result. Execution itself always goes through
- * `execute()` so history, persistence and schema refresh stay in sync.
+ * Database application state: workspace lifecycle, the active live
+ * schema, cached metadata for every database and the last result.
+ * Every execution resolves the live connection and database id at call
+ * time so a stale reference can never target the wrong database.
  */
 
 interface DatabaseState {
@@ -25,21 +42,56 @@ interface DatabaseState {
   /** Populated when status === 'error'. */
   initError: string | null
   schema: DatabaseSchema | null
+  /** Id of the database queries run against, or null when none is open. */
+  activeDatabaseId: string | null
+  /** Metadata for every known database, most recently used first. */
+  databases: DatabaseInfo[]
   isExecuting: boolean
   lastResult: QueryExecutionResult | null
 
   initialize: (config?: SqlJsConfig) => Promise<void>
   execute: (sql: string) => Promise<QueryExecutionResult>
-  reset: (config?: SqlJsConfig) => Promise<DatabaseSchema | null>
   refreshSchema: () => void
+
+  openDatabase: (id: string) => Promise<void>
+  createDatabase: (input: CreateDatabaseInput) => Promise<DatabaseInfo>
+  importDatabase: (input: ImportDatabaseInput) => Promise<DatabaseInfo>
+  renameDatabase: (id: string, name: string) => Promise<DatabaseInfo>
+  duplicateDatabase: (id: string, name?: string) => Promise<DatabaseInfo>
+  deleteDatabase: (id: string) => Promise<void>
+  resetDatabase: (id?: string, config?: SqlJsConfig) => Promise<DatabaseSchema>
+  exportDatabase: (id?: string) => Promise<Uint8Array>
+  exportDatabaseSql: (id?: string) => Promise<{ sql: string; fileName: string }>
 }
 
-let schemaName = 'Database'
+function messageOf(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback
+}
+
+/** Apply a database switch: refresh metadata, drop stale results/traces. */
+function applyActiveDatabase(
+  set: (partial: Partial<DatabaseState>) => void,
+  schema: DatabaseSchema | null,
+  activeDatabaseId: string | null,
+): void {
+  set({
+    status: 'ready',
+    initError: null,
+    schema,
+    activeDatabaseId,
+    databases: [...getDatabases()],
+    lastResult: null,
+  })
+  // A trace/results from the previous database must never be shown.
+  useVisualizationStore.getState().resetForDatabaseSwitch()
+}
 
 export const useDatabaseStore = create<DatabaseState>()((set, get) => ({
   status: 'uninitialized',
   initError: null,
   schema: null,
+  activeDatabaseId: null,
+  databases: [],
   isExecuting: false,
   lastResult: null,
 
@@ -47,24 +99,26 @@ export const useDatabaseStore = create<DatabaseState>()((set, get) => ({
     if (get().status === 'initializing') return
     set({ status: 'initializing', initError: null })
     try {
-      const result = await initializeDatabase(config)
-      schemaName = result.schema.name
+      const result = await initDatabaseManager(config)
       set({
         status: 'ready',
         schema: result.schema,
+        activeDatabaseId: result.activeDatabaseId,
+        databases: result.databases,
         initError: null,
       })
+      useVisualizationStore.getState().resetForDatabaseSwitch()
     } catch (error) {
       set({
         status: 'error',
-        initError:
-          error instanceof Error ? error.message : 'Failed to initialize database',
+        initError: messageOf(error, 'Failed to initialize database'),
       })
     }
   },
 
   execute: async (sql) => {
     const startedAt = performance.now()
+    const databaseId = getActiveDatabaseId() ?? undefined
 
     if (!hasExecutableSql(sql)) {
       return {
@@ -76,6 +130,7 @@ export const useDatabaseStore = create<DatabaseState>()((set, get) => ({
         executionTime: performance.now() - startedAt,
         statementType: 'UNKNOWN' as StatementType,
         statements: [],
+        databaseId,
         error: 'No SQL statement to execute. Write a query or pick an example first.',
       }
     }
@@ -91,7 +146,8 @@ export const useDatabaseStore = create<DatabaseState>()((set, get) => ({
         executionTime: performance.now() - startedAt,
         statementType: 'UNKNOWN' as StatementType,
         statements: [],
-        error: 'Database is not ready yet. Please try again in a moment.',
+        databaseId,
+        error: 'No database is open. Create or open one from the database selector.',
       }
     }
 
@@ -114,6 +170,7 @@ export const useDatabaseStore = create<DatabaseState>()((set, get) => ({
         executionTime,
         statementType: statements[0]?.statementType ?? 'UNKNOWN',
         statements,
+        databaseId,
       }
 
       // Persist schema-affecting/data changes and refresh the explorer.
@@ -121,18 +178,25 @@ export const useDatabaseStore = create<DatabaseState>()((set, get) => ({
         isMutatingStatementType(statement.statementType),
       )
       if (mutating) {
-        await persistDatabase(db)
-        get().refreshSchema()
+        await persistActiveDatabase(db)
+        // Only refresh if this connection is still the active one.
+        if (getLiveDatabase() === db) {
+          get().refreshSchema()
+          set({ databases: [...getDatabases()] })
+        }
       }
 
-      set({ isExecuting: false, lastResult: result })
+      // A database switch during execution must not surface this result
+      // in the new database's workspace.
+      if (getLiveDatabase() === db) {
+        set({ isExecuting: false, lastResult: result })
+      } else {
+        set({ isExecuting: false })
+      }
       return result
     } catch (error) {
       const executionTime = performance.now() - startedAt
-      const sqliteError =
-        error instanceof SqlExecutionError
-          ? error
-          : null
+      const sqliteError = error instanceof SqlExecutionError ? error : null
       const message = sqliteError
         ? sqliteError.message
         : error instanceof Error
@@ -148,38 +212,82 @@ export const useDatabaseStore = create<DatabaseState>()((set, get) => ({
         executionTime,
         statementType: 'UNKNOWN' as StatementType,
         statements: [],
+        databaseId,
         error: message,
         errorStatementIndex: sqliteError?.statementIndex,
       }
-      set({ isExecuting: false, lastResult: result })
+      if (getLiveDatabase() === db) {
+        set({ isExecuting: false, lastResult: result })
+      } else {
+        set({ isExecuting: false })
+      }
       return result
-    }
-  },
-
-  reset: async (config) => {
-    try {
-      const schema = await resetDatabase(config)
-      schemaName = schema.name
-      set({
-        status: 'ready',
-        schema,
-        initError: null,
-        lastResult: null,
-      })
-      return schema
-    } catch (error) {
-      set({
-        status: 'error',
-        initError:
-          error instanceof Error ? error.message : 'Failed to reset database',
-      })
-      return null
     }
   },
 
   refreshSchema: () => {
     const db = getLiveDatabase()
-    if (!db) return
-    set({ schema: getDatabaseSchema(db, schemaName) })
+    if (!db) {
+      set({ schema: null })
+      return
+    }
+    const info = getActiveDatabase()
+    set({ schema: getDatabaseSchema(db, info?.name ?? 'Database') })
   },
+
+  openDatabase: async (id) => {
+    const schema = await openManagedDatabase(id)
+    applyActiveDatabase(set, schema, id)
+  },
+
+  createDatabase: async (input) => {
+    const { info, schema } = await createManagedDatabase(input)
+    applyActiveDatabase(set, schema, info.id)
+    return info
+  },
+
+  importDatabase: async (input) => {
+    const { info, schema } = await importManagedDatabase(input)
+    applyActiveDatabase(set, schema, info.id)
+    return info
+  },
+
+  renameDatabase: async (id, name) => {
+    const info = await renameManagedDatabase(id, name)
+    set({ databases: [...getDatabases()] })
+    if (get().activeDatabaseId === id) {
+      get().refreshSchema()
+    }
+    return info
+  },
+
+  duplicateDatabase: async (id, name) => {
+    const info = await duplicateManagedDatabase(id, name)
+    set({ databases: [...getDatabases()] })
+    return info
+  },
+
+  deleteDatabase: async (id) => {
+    const result = await deleteManagedDatabase(id)
+    applyActiveDatabase(set, result.schema, result.activeDatabaseId)
+  },
+
+  resetDatabase: async (id, config) => {
+    const targetId = id ?? getActiveDatabaseId()
+    const schema = await resetManagedDatabase(id, config)
+    const activeId = getActiveDatabaseId()
+    const isActive = targetId === activeId
+    set({
+      ...(isActive ? { schema, lastResult: null } : {}),
+      activeDatabaseId: activeId,
+      databases: [...getDatabases()],
+    })
+    // Resetting another database must not clear the active canvas/results.
+    if (isActive) useVisualizationStore.getState().resetForDatabaseSwitch()
+    return schema
+  },
+
+  exportDatabase: async (id) => exportManagedDatabase(id),
+
+  exportDatabaseSql: async (id) => exportManagedDatabaseSql(id),
 }))

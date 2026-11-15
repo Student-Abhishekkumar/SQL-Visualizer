@@ -305,7 +305,7 @@ describe('ready workspace', () => {
         }}
       />,
     )
-    await user.click(screen.getByRole('button', { name: 'Back to results' }))
+    await user.click(screen.getByRole('button', { name: 'Back to query' }))
     expect(closed).toBe(true)
   })
 })

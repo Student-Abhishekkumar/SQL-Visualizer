@@ -13,7 +13,7 @@ export function useSQLExecution() {
 
   const execute = useCallback(async (sql: string): Promise<QueryExecutionResult> => {
     const result = await useDatabaseStore.getState().execute(sql)
-    useHistoryStore.getState().recordExecution(result)
+    useHistoryStore.getState().recordExecution(result, result.databaseId)
     return result
   }, [])
 

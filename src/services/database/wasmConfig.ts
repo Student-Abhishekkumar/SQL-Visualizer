@@ -1,5 +1,5 @@
 import wasmUrl from 'sql.js/dist/sql-wasm.wasm?url'
-import type { SqlJsConfig } from './databaseInitializer'
+import type { SqlJsConfig } from './databaseManager'
 
 /**
  * Browser-specific sql.js configuration: point the WASM loader at the

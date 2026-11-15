@@ -90,6 +90,40 @@ export function SchemaViewer({ tableName, schema, db, onClose }: SchemaViewerPro
             </tbody>
           </table>
 
+          {table.indexes.length > 0 && (
+            <div className="mt-4">
+              <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+                Indexes &amp; constraints
+              </h3>
+              <ul className="space-y-1">
+                {table.indexes.map((index) => (
+                  <li
+                    key={index.name}
+                    className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 text-[12px]"
+                  >
+                    <span className="font-mono text-text-primary">{index.name}</span>
+                    <span className="font-mono text-[11px] text-text-muted">
+                      ({index.columns.join(', ')})
+                    </span>
+                    {index.unique && <Constraint text="UNIQUE" tone="accent" />}
+                    {index.origin === 'pk' && <Constraint text="PRIMARY KEY" tone="warning" />}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {table.sql && (
+            <div className="mt-4">
+              <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+                CREATE statement
+              </h3>
+              <pre className="overflow-x-auto rounded-lg border border-border bg-surface-2 px-3 py-2 font-mono text-[11px] leading-relaxed text-text-secondary">
+                {table.sql}
+              </pre>
+            </div>
+          )}
+
           {sample && sample.columns.length > 0 && (
             <div className="mt-4">
               <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
