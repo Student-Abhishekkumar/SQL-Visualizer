@@ -24,6 +24,32 @@ export type FlowNodeKind = 'source' | 'operation' | 'data' | 'branch' | 'group' 
 
 export type FlowEdgeKind = 'main' | 'join-input' | 'rejected' | 'group-member' | 'final'
 
+/** Edge of a node that a wire attaches to. */
+export type FlowSocketSide = 'top' | 'bottom' | 'left' | 'right'
+
+/**
+ * `data` sockets carry rows along the main pipeline; `branch` sockets
+ * carry rows that leave it (rejected/skipped rows, GROUP BY members).
+ * The renderer uses this to draw filled vs. hollow ports.
+ */
+export type FlowSocketKind = 'data' | 'branch'
+
+/**
+ * A deterministic connection point on a node. Positions are relative to
+ * the node's top-left corner at its collapsed height, so wires can be
+ * routed without ever measuring the DOM.
+ */
+export interface FlowSocket {
+  id: string
+  direction: 'input' | 'output'
+  kind: FlowSocketKind
+  side: FlowSocketSide
+  /** Tiny port label, e.g. a table alias, "rows" or "rejected". */
+  label?: string
+  x: number
+  y: number
+}
+
 export interface FlowGraphNode {
   id: string
   kind: FlowNodeKind
@@ -39,6 +65,15 @@ export interface FlowGraphNode {
   y: number
   width: number
   height: number
+  /** Connection points, always sorted input(s) then output(s). */
+  sockets: FlowSocket[]
+  /**
+   * Height when the node's real-row preview is expanded. Undefined when
+   * the node has nothing more to show than its collapsed preview.
+   */
+  expandedHeight?: number
+  /** True when the trace cannot faithfully visualize this stage. */
+  unsupported?: boolean
   /** For source nodes: real table metadata from the trace. */
   table?: TraceSourceTable
   /** The real snapshot of the node's stage (operation/data/branch). */
@@ -72,9 +107,16 @@ export interface FlowGraphEdge {
    * its data is actually flowing.
    */
   stage: VisualizedStage | null
-  /** Elbow polyline anchor points (start → corner(s) → end). */
-  points: Array<{ x: number; y: number }>
-  /** Where to place the edge label (midpoint of the routed path). */
+  /** Socket ids the wire attaches to on the source/target nodes. */
+  fromSocket: string
+  toSocket: string
+  /**
+   * Cubic Bézier control points: start → control1 → control2 → end.
+   * Curve routing is computed from socket centres, so wires always meet
+   * the ports exactly and can be re-routed when a node expands.
+   */
+  curve: Array<{ x: number; y: number }>
+  /** Where to place the edge label (midpoint of the routed curve). */
   labelPoint?: { x: number; y: number }
 }
 

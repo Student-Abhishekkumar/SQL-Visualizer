@@ -6,6 +6,7 @@ import type {
   VisualizationTrace,
 } from '../../types/visualization'
 import { buildFlowGraph, deriveFlowState } from './graphBuilder'
+import { socketPoint } from './flowGeometry'
 
 /**
  * Flow-graph builder tests: nodes must come from real trace data,
@@ -297,12 +298,12 @@ describe('buildFlowGraph — layout quality', () => {
     expect(dataSelect.label).toBe('Projected rows · 4')
   })
 
-  it('gives every edge a label point on the routed path', () => {
+  it('gives every edge a label point on the routed curve', () => {
     const graph = buildFlowGraph(makeTrace())
     for (const edge of graph.edges) {
       expect(edge.labelPoint).toBeDefined()
-      const xs = edge.points.map((point) => point.x)
-      const ys = edge.points.map((point) => point.y)
+      const xs = edge.curve.map((point) => point.x)
+      const ys = edge.curve.map((point) => point.y)
       if (xs.length === 0 || ys.length === 0) continue
       expect(edge.labelPoint!.x).toBeGreaterThanOrEqual(Math.min(...xs) - 1)
       expect(edge.labelPoint!.x).toBeLessThanOrEqual(Math.max(...xs) + 1)
@@ -343,6 +344,73 @@ describe('buildFlowGraph — layout quality', () => {
     }
     // A seven-stage pipeline should produce a tall but bounded graph.
     expect(graph.bounds.height).toBeGreaterThan(800)
+  })
+})
+
+describe('buildFlowGraph — sockets and wire routing', () => {
+  it('attaches every wire to real output/input sockets', () => {
+    const graph = buildFlowGraph(makeTrace())
+    const byId = new Map(graph.nodes.map((node) => [node.id, node]))
+    for (const edge of graph.edges) {
+      const from = byId.get(edge.from)!
+      const to = byId.get(edge.to)!
+      const fromSocket = from.sockets.find((socket) => socket.id === edge.fromSocket)
+      const toSocket = to.sockets.find((socket) => socket.id === edge.toSocket)
+      expect(fromSocket?.direction).toBe('output')
+      expect(toSocket?.direction).toBe('input')
+      // Cubic Bézier control points, starting/ending on socket centres.
+      expect(edge.curve).toHaveLength(4)
+      expect(edge.curve[0]).toEqual(socketPoint(from, fromSocket!))
+      expect(edge.curve[3]).toEqual(socketPoint(to, toSocket!))
+    }
+  })
+
+  it('gives JOIN two lateral inputs and a bottom output', () => {
+    const graph = buildFlowGraph(
+      makeTrace({
+        stages: ['FROM', 'JOIN', 'SELECT'],
+        sourceTables: [
+          sourceTable('employees', 'from', 8),
+          sourceTable('departments', 'join', 3, 'INNER JOIN'),
+        ],
+        stageSnapshots: [snapshot('FROM', 8), snapshot('JOIN', 8), snapshot('SELECT', 8)],
+      }),
+    )
+    const join = graph.nodes.find((node) => node.id === 'op-JOIN')!
+    const inputs = join.sockets.filter((socket) => socket.direction === 'input')
+    expect(inputs).toHaveLength(2)
+    expect(inputs.every((socket) => socket.side === 'left')).toBe(true)
+    const output = join.sockets.find((socket) => socket.id === 'out')
+    expect(output?.side).toBe('bottom')
+    expect(output?.kind).toBe('data')
+  })
+
+  it('marks branch outputs as hollow branch sockets and sources as right outputs', () => {
+    const graph = buildFlowGraph(makeTrace())
+    const where = graph.nodes.find((node) => node.id === 'op-WHERE')!
+    expect(where.sockets.find((socket) => socket.id === 'out-branch')?.kind).toBe('branch')
+    expect(where.sockets.find((socket) => socket.id === 'out')?.side).toBe('bottom')
+    const source = graph.nodes.find((node) => node.kind === 'source')!
+    expect(source.sockets[0]?.side).toBe('right')
+    expect(source.sockets[0]?.direction).toBe('output')
+  })
+
+  it('computes honest expanded preview heights from real rows', () => {
+    const graph = buildFlowGraph(makeTrace())
+    const source = graph.nodes.find((node) => node.kind === 'source')!
+    const data = graph.nodes.find((node) => node.id === 'data-WHERE')!
+    // The fixture has three source preview rows and four data rows, so
+    // only the data node can reveal more.
+    expect(source.expandedHeight).toBeUndefined()
+    expect(data.expandedHeight).toBeGreaterThan(data.height)
+    expect(graph.nodes.find((node) => node.kind === 'final')?.expandedHeight).toBeUndefined()
+    // The branch shows no preview until expanded, so its expanded height
+    // must fit the preview table chrome plus every real removed row — not
+    // just one more row.
+    const branch = graph.nodes.find((node) => node.kind === 'branch')!
+    expect(branch.removedRows).toHaveLength(4)
+    expect(branch.expandedHeight).toBeGreaterThanOrEqual(branch.height + 4 * 17)
+    expect(branch.expandedHeight).toBeGreaterThan(branch.height + 17)
   })
 })
 

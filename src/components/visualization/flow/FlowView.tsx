@@ -61,7 +61,7 @@ export function FlowView({
         (edge) =>
           edge.stage === focusStage &&
           flowState.edges[edge.id] !== 'hidden' &&
-          edge.points.length >= 2,
+          edge.curve.length >= 4,
       )
       .map((edge) => edge.id)
   }, [flowState.packetEdgeIds, flowState.edges, graph.edges, focusStage])

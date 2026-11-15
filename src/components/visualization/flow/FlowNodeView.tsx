@@ -1,34 +1,37 @@
+import { memo } from 'react'
 import {
+  ArrowDownUp,
   ArrowRight,
+  Boxes,
+  Check,
   ChevronDown,
   ChevronUp,
+  CircleAlert,
   Database,
   Filter,
+  FilterX,
+  Gauge,
   GitMerge,
-  Layers,
-  ListOrdered,
   Scissors,
+  SlidersHorizontal,
   Sparkles,
   Table2,
-  Waypoints,
 } from 'lucide-react'
-import type { FlowElementStatus, FlowGraphNode } from '../../../types/flowGraph'
+import type { FlowElementStatus, FlowGraphNode, FlowSocket } from '../../../types/flowGraph'
 import type { RowRole, VisualizedStage } from '../../../types/visualization'
+import { nodeDisplayHeight, socketOffset } from '../../../services/visualization/flowGeometry'
+import { nodeAccentKey } from './nodeAccent'
 
 /**
- * Renders one flow-graph node. All displayed data comes from real
- * snapshots / source-table metadata — previews are genuine rows.
+ * Renders one flow-graph node as a compact Blender-inspired module:
+ * tinted title bar, real data body, circular sockets on the exact
+ * geometric ports used by the wire router, and a tiny status orb.
  *
- * Nodes are keyboard-accessible (role="button" + Enter/Space) so the
- * preview expand control can be a real nested <button>.
+ * Every displayed value comes from real snapshots / source-table
+ * metadata — previews are genuine rows. Nodes remain keyboard-accessible
+ * (role="button" + Enter/Space) so the preview expand control can be a
+ * real nested <button>.
  */
-
-const STATUS_RING: Record<FlowElementStatus, string> = {
-  completed: 'border-border bg-surface',
-  active: 'border-accent bg-surface ring-2 ring-accent/35 shadow-md',
-  pending: 'border-border bg-surface opacity-75',
-  hidden: '',
-}
 
 const ROLE_CELL_CLASSES: Record<RowRole, string> = {
   unchanged: '',
@@ -40,27 +43,15 @@ const ROLE_CELL_CLASSES: Record<RowRole, string> = {
   grouped: 'text-purple',
 }
 
-/** Pipeline stages get distinct but restrained accent colors. */
-const STAGE_ACCENT: Partial<Record<VisualizedStage, string>> = {
-  JOIN: 'text-purple',
-  WHERE: 'text-warning',
-  GROUP_BY: 'text-purple',
-  HAVING: 'text-purple',
-  SELECT: 'text-accent',
-  DISTINCT: 'text-success',
-  ORDER_BY: 'text-text-secondary',
-  LIMIT: 'text-text-secondary',
-}
-
 const STAGE_ICONS: Partial<Record<VisualizedStage, typeof Filter>> = {
   JOIN: GitMerge,
   WHERE: Filter,
-  GROUP_BY: Layers,
-  HAVING: Layers,
+  GROUP_BY: Boxes,
+  HAVING: SlidersHorizontal,
   SELECT: Scissors,
   DISTINCT: Sparkles,
-  ORDER_BY: ListOrdered,
-  LIMIT: Waypoints,
+  ORDER_BY: ArrowDownUp,
+  LIMIT: Gauge,
 }
 
 const PREVIEW_ROWS = 3
@@ -87,40 +78,27 @@ function MiniPreview({
 }) {
   const preview = rows.slice(0, limit)
   if (preview.length === 0) {
-    return (
-      <div className="mt-1 rounded-md border border-dashed border-border px-2 py-1.5 text-center text-[10px] text-text-muted">
-        no rows
-      </div>
-    )
+    return <div className="flow-empty">no rows</div>
   }
   return (
-    <div className="mt-1 overflow-hidden rounded-md border border-border/70">
+    <div className="flow-preview">
       <table className="w-full table-fixed border-collapse text-left">
         <thead>
-          <tr className="bg-surface-2/70">
+          <tr>
             {columns.slice(0, 4).map((column, index) => (
-              <th
-                key={`${column}-${index}`}
-                className="truncate px-1.5 py-0.5 text-[9px] font-medium text-text-muted"
-                title={column}
-              >
+              <th key={`${column}-${index}`} title={column}>
                 {column}
               </th>
             ))}
           </tr>
         </thead>
         <tbody>
-          {preview.map((row, rowIndex) => {
+          {preview.map((row) => {
             const role = roles?.[row.id] ?? 'unchanged'
             return (
-              <tr key={row.id} className={rowIndex % 2 === 1 ? 'bg-surface-2/35' : undefined}>
+              <tr key={row.id}>
                 {row.values.slice(0, 4).map((value, index) => (
-                  <td
-                    key={index}
-                    className={`max-w-0 truncate px-1.5 py-[1px] font-mono text-[10px] leading-[15px] text-text-primary ${
-                      ROLE_CELL_CLASSES[role]
-                    }`}
-                  >
+                  <td key={index} className={`max-w-0 truncate ${ROLE_CELL_CLASSES[role]}`}>
                     <Value value={value} />
                   </td>
                 ))}
@@ -134,20 +112,28 @@ function MiniPreview({
 }
 
 function CountBadge({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="shrink-0 rounded-md bg-surface-3 px-1.5 py-0.5 text-[9.5px] font-medium tabular-nums text-text-secondary">
-      {children}
-    </span>
-  )
+  return <span className="flow-count-badge">{children}</span>
 }
 
-function ExpandButton({
-  expanded,
-  onClick,
-}: {
-  expanded: boolean
-  onClick: () => void
-}) {
+function StatusOrb({ status }: { status: FlowElementStatus }) {
+  if (status === 'active') {
+    return (
+      <span className="flow-status flow-status-active" title="running" aria-hidden>
+        <span />
+      </span>
+    )
+  }
+  if (status === 'completed') {
+    return (
+      <span className="flow-status flow-status-completed" title="completed" aria-hidden>
+        <Check className="size-2.5" strokeWidth={3} />
+      </span>
+    )
+  }
+  return <span className="flow-status flow-status-pending" title="pending" aria-hidden />
+}
+
+function ExpandButton({ expanded, onClick }: { expanded: boolean; onClick: () => void }) {
   return (
     <button
       type="button"
@@ -158,24 +144,109 @@ function ExpandButton({
         event.stopPropagation()
         onClick()
       }}
-      className="ml-auto shrink-0 rounded-md p-1 text-text-muted transition-colors hover:bg-surface-2 hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
+      onKeyDown={(event) => {
+        // Keep Space/Enter on the preview control from also selecting the node.
+        if (event.key === 'Enter' || event.key === ' ') event.stopPropagation()
+      }}
+      className="flow-icon-button focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
     >
       {expanded ? (
-        <ChevronUp className="size-3.5" aria-hidden />
+        <ChevronUp className="size-3" aria-hidden />
       ) : (
-        <ChevronDown className="size-3.5" aria-hidden />
+        <ChevronDown className="size-3" aria-hidden />
       )}
     </button>
   )
 }
 
-/** Wrapper giving every node the same interaction + positioning. */
+function NodeHeader({
+  icon: Icon,
+  title,
+  badge,
+  status,
+  unsupported,
+  children,
+}: {
+  icon: typeof Filter
+  title: string
+  badge?: string
+  status: FlowElementStatus
+  unsupported?: boolean
+  children?: React.ReactNode
+}) {
+  return (
+    <div className="flow-node-header">
+      <Icon className="flow-node-icon" aria-hidden />
+      <span className="flow-node-title" title={title}>
+        {title}
+      </span>
+      {badge !== undefined && <span className="flow-node-badge">{badge}</span>}
+      {unsupported === true && (
+        <span className="flow-node-unsupported" title="This stage cannot be visualized faithfully">
+          <CircleAlert className="size-3" aria-hidden />
+        </span>
+      )}
+      <span className="ml-auto flex shrink-0 items-center gap-1">
+        {children}
+        <StatusOrb status={status} />
+      </span>
+    </div>
+  )
+}
+
+function SocketView({
+  node,
+  socket,
+  displayHeight,
+}: {
+  node: FlowGraphNode
+  socket: FlowSocket
+  displayHeight: number
+}) {
+  const offset = socketOffset(node, socket, displayHeight)
+  const labelPosition =
+    socket.side === 'left'
+      ? { left: offset.x - 7, top: offset.y }
+      : socket.side === 'right'
+        ? { left: offset.x + 7, top: offset.y }
+        : socket.side === 'top'
+          ? { left: offset.x + 7, top: offset.y - 3 }
+          : { left: offset.x + 7, top: offset.y + 3 }
+  const title = `${socket.direction === 'input' ? 'Input' : 'Output'} ${
+    socket.kind === 'branch' ? 'branch' : 'data'
+  } socket${socket.label !== undefined ? ` · ${socket.label}` : ''}`
+  return (
+    <>
+      <span
+        aria-hidden
+        className="flow-socket"
+        data-direction={socket.direction}
+        data-kind={socket.kind}
+        title={title}
+        style={{ left: offset.x, top: offset.y }}
+      />
+      {socket.label !== undefined && (
+        <span
+          aria-hidden
+          className="flow-socket-label"
+          data-side={socket.side}
+          data-kind={socket.kind}
+          style={labelPosition}
+        >
+          {socket.label}
+        </span>
+      )}
+    </>
+  )
+}
+
+/** Wrapper giving every node the same interaction, ports and positioning. */
 function NodeFrame({
   node,
   status,
   selected,
   expanded,
-  extraClass,
+  offsetY,
   ariaLabel,
   onSelect,
   children,
@@ -184,12 +255,14 @@ function NodeFrame({
   status: FlowElementStatus
   selected: boolean
   expanded: boolean
-  extraClass?: string
+  /** Live vertical offset applied when a neighbouring preview expands. */
+  offsetY: number
   ariaLabel: string
   onSelect: (node: FlowGraphNode) => void
   children: React.ReactNode
 }) {
   if (status === 'hidden') return null
+  const displayHeight = nodeDisplayHeight(node, expanded)
   return (
     <div
       role="button"
@@ -197,6 +270,11 @@ function NodeFrame({
       aria-label={ariaLabel}
       aria-pressed={selected}
       title={node.hint !== undefined ? `${node.label} — ${node.hint}` : node.label}
+      data-accent={nodeAccentKey(node)}
+      data-kind={node.kind}
+      data-status={status}
+      data-selected={selected ? 'true' : undefined}
+      data-unsupported={node.unsupported === true ? 'true' : undefined}
       onClick={() => onSelect(node)}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
@@ -204,18 +282,23 @@ function NodeFrame({
           onSelect(node)
         }
       }}
-      className={`flow-node absolute cursor-pointer rounded-xl border text-left shadow-sm transition-[border-color,box-shadow,background-color,opacity] duration-200 focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none ${
-        STATUS_RING[status]
-      } ${selected ? 'ring-2 ring-accent' : ''} ${extraClass ?? ''}`}
+      className="flow-node absolute cursor-pointer text-left focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
       style={{
         left: node.x,
-        top: node.y,
+        top: node.y + offsetY,
         width: node.width,
-        height: expanded ? node.height + (EXPANDED_ROWS - PREVIEW_ROWS) * 17 : node.height,
+        height: displayHeight,
         zIndex: expanded ? 30 : selected ? 20 : 1,
-        animation: 'flow-node-in 220ms ease-out',
       }}
     >
+      {node.sockets.map((socket) => (
+        <SocketView
+          key={socket.id}
+          node={node}
+          socket={socket}
+          displayHeight={displayHeight}
+        />
+      ))}
       {children}
     </div>
   )
@@ -226,15 +309,18 @@ interface FlowNodeViewProps {
   status: FlowElementStatus
   selected: boolean
   expanded: boolean
+  /** Vertical offset applied when an earlier preview pushes this node down. */
+  offsetY?: number
   onSelect: (node: FlowGraphNode) => void
   onToggleExpand: (nodeId: string) => void
 }
 
-export function FlowNodeView({
+export const FlowNodeView = memo(function FlowNodeView({
   node,
   status,
   selected,
   expanded,
+  offsetY = 0,
   onSelect,
   onToggleExpand,
 }: FlowNodeViewProps) {
@@ -245,45 +331,47 @@ export function FlowNodeView({
     const table = node.table
     if (!table) return null
     const expandable = table.previewRows.length > PREVIEW_ROWS
+    const extraColumns = Math.max(0, table.columns.length - 4)
     return (
       <NodeFrame
         node={node}
         status={status}
         selected={selected}
         expanded={expanded}
-        extraClass={table.role === 'join' ? 'border-purple/40' : 'border-border'}
+        offsetY={offsetY}
         ariaLabel={`Source table ${node.label}, ${table.rowCount} rows`}
         onSelect={onSelect}
       >
-        <div className="flex h-full flex-col overflow-hidden rounded-xl p-2.5">
-          <div className="flex items-center gap-2">
-            <span
-              className={`flex size-7 shrink-0 items-center justify-center rounded-lg ${
-                table.role === 'join' ? 'bg-purple/15 text-purple' : 'bg-accent-soft text-accent'
-              }`}
-            >
-              <Database className="size-3.5" aria-hidden />
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-1.5">
-                <span className="truncate text-[12.5px] font-semibold text-text-primary">
-                  {node.label}
-                </span>
-                {table.role === 'join' && (
-                  <span className="shrink-0 rounded bg-purple/15 px-1 py-px text-[8.5px] font-medium text-purple uppercase">
-                    {table.joinType?.replace(' JOIN', '')}
-                  </span>
-                )}
-              </div>
-              <div className="truncate text-[9.5px] text-text-muted">
-                {table.role === 'from' ? 'FROM' : 'join input'}
-                {table.alias !== null ? ` · alias ${table.alias}` : ''} · {table.rowCount} row
-                {table.rowCount === 1 ? '' : 's'}
-              </div>
-            </div>
+        <div className="flow-node-surface">
+          <NodeHeader
+            icon={Database}
+            title={node.label}
+            badge={table.role === 'from' ? 'FROM' : (table.joinType?.replace(' JOIN', '') ?? 'JOIN')}
+            status={status}
+            unsupported={node.unsupported}
+          >
             {expandable && <ExpandButton expanded={expanded} onClick={toggle} />}
+          </NodeHeader>
+          <div className="flow-node-body">
+            <div className="flow-meta-row">
+              <CountBadge>
+                {table.rowCount} row{table.rowCount === 1 ? '' : 's'}
+              </CountBadge>
+              <span className="flow-meta-text truncate">
+                {table.alias !== null ? `alias ${table.alias}` : 'source table'}
+              </span>
+            </div>
+            <div className="flow-column-list" title={table.columns.join(', ')}>
+              {table.columns.slice(0, 4).map((column) => (
+                <span key={column} className="flow-column-chip">
+                  {column}
+                </span>
+              ))}
+              {extraColumns > 0 && <span className="flow-column-chip">+{extraColumns}</span>}
+              {table.columns.length === 0 && <span className="flow-column-chip">no columns</span>}
+            </div>
+            <MiniPreview columns={table.columns} rows={table.previewRows} limit={limit} />
           </div>
-          <MiniPreview columns={table.columns} rows={table.previewRows} limit={limit} />
         </div>
       </NodeFrame>
     )
@@ -292,43 +380,36 @@ export function FlowNodeView({
   if (node.kind === 'operation') {
     const snapshot = node.snapshot
     const StageIcon = STAGE_ICONS[node.stage ?? 'SELECT'] ?? ArrowRight
-    const accent = STAGE_ACCENT[node.stage ?? 'SELECT'] ?? 'text-text-secondary'
     return (
       <NodeFrame
         node={node}
         status={status}
         selected={selected}
         expanded={false}
-        extraClass="overflow-hidden"
+        offsetY={offsetY}
         ariaLabel={`Operation ${node.label}: ${node.detail ?? ''}`}
         onSelect={onSelect}
       >
-        <div className={`flex h-full items-stretch bg-surface`}>
-          <span className={`w-1 shrink-0 bg-current opacity-80 ${accent}`} aria-hidden />
-          <div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 px-2.5 py-1.5">
-            <div className="flex items-center gap-1.5">
-              <StageIcon className={`size-3.5 shrink-0 ${accent}`} aria-hidden />
-              <span className="truncate text-[11px] font-semibold tracking-wide text-text-primary uppercase">
-                {node.label}
+        <div className="flow-node-surface">
+          <NodeHeader
+            icon={StageIcon}
+            title={node.label}
+            status={status}
+            unsupported={node.unsupported}
+          >
+            {snapshot !== undefined && status === 'completed' && (
+              <span className="flow-op-count">
+                {snapshot.inputRowCount} → {snapshot.outputRowCount}
               </span>
-              {status === 'active' && (
-                <span className="ml-auto flex items-center gap-1 text-[9px] font-medium text-accent">
-                  <span className="size-1.5 animate-pulse rounded-full bg-accent" aria-hidden />
-                  running
-                </span>
-              )}
-              {snapshot !== undefined && status === 'completed' && (
-                <span className="ml-auto shrink-0 text-[9px] tabular-nums text-text-muted">
-                  {snapshot.inputRowCount} → {snapshot.outputRowCount}
-                </span>
-              )}
-            </div>
-            <div className="truncate font-mono text-[9.5px] leading-tight text-text-secondary">
+            )}
+          </NodeHeader>
+          <div className="flow-node-body flow-op-body">
+            <div className="flow-op-detail" title={node.detail}>
               {node.detail}
             </div>
-            {node.hint !== undefined && (
-              <div className="truncate text-[9px] leading-tight text-text-muted">{node.hint}</div>
-            )}
+            <div className="flow-hint" title={node.hint}>
+              {node.hint}
+            </div>
           </div>
         </div>
       </NodeFrame>
@@ -345,32 +426,34 @@ export function FlowNodeView({
         status={status}
         selected={selected}
         expanded={expanded}
-        extraClass="border-border"
+        offsetY={offsetY}
         ariaLabel={`Intermediate result after ${node.stage}, ${snapshot.outputRowCount} rows`}
         onSelect={onSelect}
       >
-        <div className="flex h-full flex-col overflow-hidden rounded-xl p-2.5">
-          <div className="flex items-center gap-2">
-            <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-text-secondary">
-              <Table2 className="size-3.5" aria-hidden />
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[11.5px] font-medium text-text-primary">
-                {node.label}
-              </div>
-              <div className="truncate text-[9.5px] tabular-nums text-text-muted">
-                {node.detail}
-              </div>
-            </div>
+        <div className="flow-node-surface">
+          <NodeHeader
+            icon={Table2}
+            title={node.label}
+            badge={node.stage?.replace('_', ' ')}
+            status={status}
+            unsupported={node.unsupported}
+          >
+            <CountBadge>{snapshot.outputRowCount}</CountBadge>
             {expandable && <ExpandButton expanded={expanded} onClick={toggle} />}
-            {!expandable && <CountBadge>{snapshot.outputRowCount}</CountBadge>}
+          </NodeHeader>
+          <div className="flow-node-body">
+            <div className="flow-meta-row">
+              <span className="flow-meta-text tabular-nums">
+                {snapshot.inputRowCount} in → {snapshot.outputRowCount} out
+              </span>
+            </div>
+            <MiniPreview
+              columns={snapshot.columns}
+              rows={snapshot.rows}
+              roles={snapshot.roles}
+              limit={limit}
+            />
           </div>
-          <MiniPreview
-            columns={snapshot.columns}
-            rows={snapshot.rows}
-            roles={snapshot.roles}
-            limit={limit}
-          />
         </div>
       </NodeFrame>
     )
@@ -386,29 +469,34 @@ export function FlowNodeView({
         status={status}
         selected={selected}
         expanded={expanded}
-        extraClass="border-dashed border-danger/50 bg-danger-soft/30"
+        offsetY={offsetY}
         ariaLabel={`${node.label} — removed records`}
         onSelect={onSelect}
       >
-        <div className="flex h-full flex-col overflow-hidden rounded-xl p-2.5">
-          <div className="flex items-start gap-1.5">
-            <Filter className="mt-px size-3.5 shrink-0 text-danger" aria-hidden />
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[11px] font-semibold text-danger">{node.label}</div>
-              <div className="line-clamp-1 text-[9.5px] leading-tight text-text-muted">
-                {node.hint ?? 'These rows did not continue.'}
-              </div>
-            </div>
+        <div className="flow-node-surface">
+          <NodeHeader
+            icon={FilterX}
+            title={node.label}
+            badge="removed"
+            status={status}
+            unsupported={node.unsupported}
+          >
+            <CountBadge>{node.removedRows?.length ?? 0}</CountBadge>
             {expandable && <ExpandButton expanded={expanded} onClick={toggle} />}
+          </NodeHeader>
+          <div className="flow-node-body">
+            <div className="flow-hint" title={node.hint}>
+              {node.hint ?? 'These rows did not continue.'}
+            </div>
+            {expanded && node.removedRows !== undefined && (
+              <MiniPreview
+                columns={snapshot.columns}
+                rows={node.removedRows}
+                roles={snapshot.roles}
+                limit={limit}
+              />
+            )}
           </div>
-          {expanded && node.removedRows !== undefined && (
-            <MiniPreview
-              columns={snapshot.columns}
-              rows={node.removedRows}
-              roles={snapshot.roles}
-              limit={limit}
-            />
-          )}
         </div>
       </NodeFrame>
     )
@@ -422,21 +510,24 @@ export function FlowNodeView({
         status={status}
         selected={selected}
         expanded={false}
-        extraClass="border-purple/40 bg-purple/10"
+        offsetY={offsetY}
         ariaLabel={`Group ${node.label}: ${node.detail ?? ''}`}
         onSelect={onSelect}
       >
-        <div className="flex h-full flex-col justify-center gap-0.5 px-2.5 py-1.5">
-          <div className="flex items-center gap-1.5">
-            <Layers className="size-3 shrink-0 text-purple" aria-hidden />
-            <span className="truncate font-mono text-[10.5px] font-semibold text-purple">
-              {node.label}
-            </span>
-          </div>
-          <div className="flex items-center gap-1.5 overflow-hidden">
-            <span className="truncate text-[9.5px] text-text-secondary">{node.detail}</span>
+        <div className="flow-node-surface">
+          <NodeHeader
+            icon={Boxes}
+            title={node.label}
+            badge="group"
+            status={status}
+            unsupported={node.unsupported}
+          >
+            {node.group !== undefined && <CountBadge>{node.group.rowIds.length}</CountBadge>}
+          </NodeHeader>
+          <div className="flow-node-body flow-group-body">
+            <span className="flow-hint truncate">{node.detail}</span>
             {aggregates.length > 0 && (
-              <span className="ml-auto shrink-0 rounded bg-surface/70 px-1 font-mono text-[9px] text-text-secondary">
+              <span className="flow-group-aggregate truncate" title={aggregates.map(([name, value]) => `${name}=${value === null ? 'NULL' : String(value)}`).join(' ')}>
                 {aggregates
                   .slice(0, 2)
                   .map(([name, value]) => `${name}=${value === null ? 'NULL' : String(value)}`)
@@ -460,32 +551,30 @@ export function FlowNodeView({
       status={status}
       selected={selected}
       expanded={expanded}
-      extraClass="border-accent/60 bg-surface"
+      offsetY={offsetY}
       ariaLabel={finished ? 'Final result' : 'Final result (pending)'}
       onSelect={onSelect}
     >
-      <div className="flex h-full flex-col overflow-hidden rounded-xl p-2.5">
-        <div className="flex items-center gap-2">
-          <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
-            <Sparkles className="size-3.5" aria-hidden />
-          </span>
-          <div className="min-w-0 flex-1">
-            <div className="text-[12px] font-semibold text-text-primary">Final result</div>
-            <div className="truncate text-[9.5px] text-text-muted">
-              {finished ? `${rows.length} row${rows.length === 1 ? '' : 's'}` : 'waiting for playback'}
-            </div>
-          </div>
+      <div className="flow-node-surface">
+        <NodeHeader icon={Sparkles} title="Final result" badge="OUTPUT" status={status}>
+          {finished && <CountBadge>{rows.length}</CountBadge>}
           {expandable && <ExpandButton expanded={expanded} onClick={toggle} />}
-          {finished && !expandable && <CountBadge>{rows.length}</CountBadge>}
-        </div>
-        {finished ? (
-          <MiniPreview columns={columns} rows={rows} limit={limit} />
-        ) : (
-          <div className="mt-1 flex flex-1 items-center justify-center rounded-md border border-dashed border-border px-2 py-2 text-[10px] text-text-muted">
-            not produced yet
+        </NodeHeader>
+        <div className="flow-node-body">
+          <div className="flow-meta-row">
+            <span className="flow-meta-text truncate">
+              {finished
+                ? `${rows.length} row${rows.length === 1 ? '' : 's'} returned by the query`
+                : 'waiting for playback'}
+            </span>
           </div>
-        )}
+          {finished ? (
+            <MiniPreview columns={columns} rows={rows} limit={limit} />
+          ) : (
+            <div className="flow-empty">not produced yet</div>
+          )}
+        </div>
       </div>
     </NodeFrame>
   )
-}
+})

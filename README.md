@@ -52,15 +52,26 @@ visualizer reads the same live SQLite tables, simulates the logical pipeline
 (`FROM → JOIN → WHERE → GROUP BY → HAVING → SELECT → DISTINCT → ORDER BY → LIMIT`),
 and validates its final row count against what SQLite actually returned.
 
-- **Flow View (default)** — a query-shaped graph. Source tables (including JOIN inputs)
-  show their real name, alias, row count and a live preview; operation nodes show the
-  clause and its condition/expression; intermediate results show the rows produced so
-  far; WHERE/HAVING render rejected branches; JOINs show inputs converging; GROUP BY
-  fans out into real groups; the final result node shows the actual output rows.
-- **Animated data flow** — directional SVG edges with arrowheads and moving packets on
-  the connections carrying data right now. Completed, active, pending and rejected
-  elements are visually distinct; packets are representative indicators of movement,
-  never a claim about a specific row.
+- **Flow View (default)** — a query-shaped graph of compact, tactile node modules.
+  Source tables (including JOIN inputs) show their real name, alias, row count and a
+  live preview; operation nodes show the clause and its condition/expression;
+  intermediate results show the rows produced so far; WHERE/HAVING render rejected
+  branches; JOINs show inputs converging on two labelled data sockets; GROUP BY fans
+  out into real groups; the final result node shows the actual output rows. Every
+  operation has its own accent colour (source blue, JOIN purple, WHERE orange, GROUP BY
+  teal, HAVING amber, SELECT green, DISTINCT pink, ORDER BY cyan, LIMIT red), used by
+  both its header and its outgoing wires. Nodes use circular data/branch sockets and
+  smooth curved connections that are re-routed from real socket positions whenever a
+  preview grows.
+- **Animated data flow** — directional SVG wires with arrowheads, marching dashes and
+  moving packets on the connections carrying data right now. Completed, active,
+  pending, unsupported and rejected elements are visually distinct; packets are
+  representative indicators of the simulator's real movement events, never a claim
+  about a specific row, and they stop under `prefers-reduced-motion`.
+- **Expandable previews** — table, intermediate-result and rejected-row nodes reveal
+  up to ten real rows on demand. Expanding a preview grows the node, pushes nodes
+  below it in the same column out of the way, and re-routes the affected wires without
+  moving the rest of the pipeline.
 - **Shared playback** — play, pause, resume, restart, previous/next event, timeline
   seek and 0.5×/1×/1.5×/2× speed. Flow View and Table View share one controller, so
   switching views preserves the current stage.
@@ -73,9 +84,11 @@ and validates its final row count against what SQLite actually returned.
 - **Beginner guidance** — a stage explanation panel with Beginner/Intermediate/Advanced
   levels, plain-language hints on nodes, and knowledge checks generated from the real
   execution data.
-- **Canvas controls** — pan (drag), zoom (buttons or wheel), fit to screen, reset view,
-  expand/collapse table previews, and connected-edge highlighting when a node is
-  selected.
+- **Canvas controls** — drag empty canvas to pan, pointer-centred wheel/trackpad zoom
+  (plus toolbar zoom, fit to screen and reset view), expand/collapse real row previews,
+  and connected-edge highlighting with unrelated wires dimmed when a node is selected.
+  Cursors and toolbar zoom follow the interaction, and the camera only follows playback
+  when the running stage leaves the visible band.
 - **Accessible & responsive** — nodes are keyboard-operable buttons with ARIA labels,
   motion is disabled under `prefers-reduced-motion`, and a container-query layout keeps
   the canvas usable on narrow screens (the details panel becomes a full-width overlay).
@@ -145,8 +158,9 @@ src/
       ClauseStrip.tsx              # Clickable SQL clauses → stages
       flow/
         FlowView.tsx               # Derives playback state → canvas props
-        FlowCanvas.tsx             # Pan/zoom camera, SVG edges, packets
-        FlowNodeView.tsx           # Node cards, previews, keyboard frames
+        FlowCanvas.tsx             # Pan/zoom camera, SVG wires, packets
+        FlowNodeView.tsx           # Node modules, sockets, previews
+        nodeAccent.ts              # Operation → accent colour identity
         NodeInspector.tsx          # Selected-node details with real rows
   services/
     database/
@@ -162,6 +176,7 @@ src/
       simulator.ts             # Logical pipeline simulator → trace/snapshots
       validation.ts            # Parity check against real SQLite row counts
       graphBuilder.ts          # Deterministic flow graph + playback state
+      flowGeometry.ts          # Socket centres + cubic wire routing
       clauseMapper.ts          # Clause spans for editor highlighting
     persistence/
       persistenceService.ts    # IndexedDB stores (snapshot/history/queries)

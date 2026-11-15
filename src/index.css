@@ -25,6 +25,40 @@
   --warning: #d97706;
   --danger: #dc2626;
   --danger-soft: rgba(220, 38, 38, 0.1);
+  /* Per-operation node accents (light theme): strong hue, tinted header, readable ink. */
+  --node-source: #2563eb;
+  --node-source-soft: #dbeafe;
+  --node-source-fg: #1e3a8a;
+  --node-join: #7c3aed;
+  --node-join-soft: #ede9fe;
+  --node-join-fg: #4c1d95;
+  --node-where: #ea580c;
+  --node-where-soft: #ffedd5;
+  --node-where-fg: #9a3412;
+  --node-group: #0d9488;
+  --node-group-soft: #ccfbf1;
+  --node-group-fg: #115e59;
+  --node-having: #d97706;
+  --node-having-soft: #fef3c7;
+  --node-having-fg: #92400e;
+  --node-select: #16a34a;
+  --node-select-soft: #dcfce7;
+  --node-select-fg: #14532d;
+  --node-distinct: #db2777;
+  --node-distinct-soft: #fce7f3;
+  --node-distinct-fg: #831843;
+  --node-order: #0891b2;
+  --node-order-soft: #cffafe;
+  --node-order-fg: #164e63;
+  --node-limit: #dc2626;
+  --node-limit-soft: #fee2e2;
+  --node-limit-fg: #7f1d1d;
+  --node-final: #059669;
+  --node-final-soft: #d1fae5;
+  --node-final-fg: #064e3b;
+  --node-rejected: #dc2626;
+  --node-rejected-soft: #fee2e2;
+  --node-rejected-fg: #7f1d1d;
   --scrollbar-thumb: #c4cfe0;
   --shadow-panel: 0 1px 3px rgba(16, 24, 40, 0.08);
   color-scheme: light;
@@ -49,6 +83,40 @@
   --warning: #fbbf24;
   --danger: #f87171;
   --danger-soft: rgba(248, 113, 113, 0.12);
+  /* Per-operation node accents (dark theme): brighter hues, translucent headers. */
+  --node-source: #60a5fa;
+  --node-source-soft: rgba(96, 165, 250, 0.16);
+  --node-source-fg: #bfdbfe;
+  --node-join: #a78bfa;
+  --node-join-soft: rgba(167, 139, 250, 0.16);
+  --node-join-fg: #ddd6fe;
+  --node-where: #fb923c;
+  --node-where-soft: rgba(251, 146, 60, 0.15);
+  --node-where-fg: #fed7aa;
+  --node-group: #2dd4bf;
+  --node-group-soft: rgba(45, 212, 191, 0.15);
+  --node-group-fg: #99f6e4;
+  --node-having: #fbbf24;
+  --node-having-soft: rgba(251, 191, 36, 0.15);
+  --node-having-fg: #fde68a;
+  --node-select: #4ade80;
+  --node-select-soft: rgba(74, 222, 128, 0.15);
+  --node-select-fg: #bbf7d0;
+  --node-distinct: #f472b6;
+  --node-distinct-soft: rgba(244, 114, 182, 0.15);
+  --node-distinct-fg: #fbcfe8;
+  --node-order: #22d3ee;
+  --node-order-soft: rgba(34, 211, 238, 0.15);
+  --node-order-fg: #cffafe;
+  --node-limit: #f87171;
+  --node-limit-soft: rgba(248, 113, 113, 0.15);
+  --node-limit-fg: #fecaca;
+  --node-final: #34d399;
+  --node-final-soft: rgba(52, 211, 153, 0.16);
+  --node-final-fg: #a7f3d0;
+  --node-rejected: #f87171;
+  --node-rejected-soft: rgba(248, 113, 113, 0.15);
+  --node-rejected-fg: #fecaca;
   --scrollbar-thumb: #2c3a5c;
   --shadow-panel: 0 1px 3px rgba(0, 0, 0, 0.4);
   color-scheme: dark;
@@ -128,11 +196,542 @@ body {
 }
 
 /*
-  Flow-canvas motion. Nodes fade/settle in when playback reveals them and
-  active connections carry a marching overlay so direction is readable
-  even when data packets are far apart. Both are disabled for users who
-  prefer reduced motion (packets are not rendered at all in that case).
+  Flow-canvas node design — compact, tactile modules inspired by visual
+  programming editors. Every colour comes from the per-operation tokens
+  above, so light/dark contrast is handled in one place.
 */
+
+.flow-node {
+  --flow-accent: var(--node-source);
+  --flow-accent-soft: var(--node-source-soft);
+  --flow-accent-fg: var(--node-source-fg);
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--flow-accent) 26%, var(--border));
+  border-radius: 14px;
+  box-shadow:
+    0 1px 2px rgba(16, 24, 40, 0.07),
+    0 8px 20px -16px rgba(16, 24, 40, 0.35);
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    opacity 160ms ease,
+    transform 160ms ease,
+    top 180ms ease,
+    height 180ms ease;
+  animation: flow-node-in 220ms ease-out;
+  will-change: transform;
+}
+
+.dark .flow-node {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.4),
+    0 12px 28px -18px rgba(0, 0, 0, 0.75);
+}
+
+.flow-node[data-accent='source'] {
+  --flow-accent: var(--node-source);
+  --flow-accent-soft: var(--node-source-soft);
+  --flow-accent-fg: var(--node-source-fg);
+}
+.flow-node[data-accent='join'] {
+  --flow-accent: var(--node-join);
+  --flow-accent-soft: var(--node-join-soft);
+  --flow-accent-fg: var(--node-join-fg);
+}
+.flow-node[data-accent='where'] {
+  --flow-accent: var(--node-where);
+  --flow-accent-soft: var(--node-where-soft);
+  --flow-accent-fg: var(--node-where-fg);
+}
+.flow-node[data-accent='group'] {
+  --flow-accent: var(--node-group);
+  --flow-accent-soft: var(--node-group-soft);
+  --flow-accent-fg: var(--node-group-fg);
+}
+.flow-node[data-accent='having'] {
+  --flow-accent: var(--node-having);
+  --flow-accent-soft: var(--node-having-soft);
+  --flow-accent-fg: var(--node-having-fg);
+}
+.flow-node[data-accent='select'] {
+  --flow-accent: var(--node-select);
+  --flow-accent-soft: var(--node-select-soft);
+  --flow-accent-fg: var(--node-select-fg);
+}
+.flow-node[data-accent='distinct'] {
+  --flow-accent: var(--node-distinct);
+  --flow-accent-soft: var(--node-distinct-soft);
+  --flow-accent-fg: var(--node-distinct-fg);
+}
+.flow-node[data-accent='order'] {
+  --flow-accent: var(--node-order);
+  --flow-accent-soft: var(--node-order-soft);
+  --flow-accent-fg: var(--node-order-fg);
+}
+.flow-node[data-accent='limit'] {
+  --flow-accent: var(--node-limit);
+  --flow-accent-soft: var(--node-limit-soft);
+  --flow-accent-fg: var(--node-limit-fg);
+}
+.flow-node[data-accent='final'] {
+  --flow-accent: var(--node-final);
+  --flow-accent-soft: var(--node-final-soft);
+  --flow-accent-fg: var(--node-final-fg);
+}
+.flow-node[data-accent='rejected'] {
+  --flow-accent: var(--node-rejected);
+  --flow-accent-soft: var(--node-rejected-soft);
+  --flow-accent-fg: var(--node-rejected-fg);
+}
+
+.flow-node:hover {
+  border-color: color-mix(in srgb, var(--flow-accent) 58%, var(--border));
+  box-shadow:
+    0 2px 4px rgba(16, 24, 40, 0.08),
+    0 14px 28px -18px color-mix(in srgb, var(--flow-accent) 60%, transparent);
+  transform: translateY(-1px);
+}
+
+.flow-node[data-status='pending'] {
+  opacity: 0.76;
+}
+
+.flow-node[data-status='completed'] {
+  opacity: 1;
+}
+
+.flow-node[data-status='active'] {
+  border-color: var(--flow-accent);
+  animation:
+    flow-node-in 220ms ease-out,
+    flow-node-pulse 1.8s ease-in-out infinite;
+}
+
+.flow-node[data-selected='true'] {
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent),
+    0 14px 30px -20px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+
+.flow-node:focus-visible,
+.flow-node[data-selected='true']:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.flow-node[data-kind='branch'] {
+  border-style: dashed;
+}
+
+.flow-node[data-kind='final'][data-status='completed'] {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--node-final) 45%, transparent),
+    0 16px 34px -22px color-mix(in srgb, var(--node-final) 80%, transparent);
+}
+
+.flow-node[data-unsupported='true'] {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--warning) 70%, var(--border));
+}
+
+/* Coloured title bar + dark/theme-aware data body. */
+.flow-node-surface {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 13px;
+}
+
+.flow-node-header {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  min-height: 27px;
+  padding: 3px 7px 3px 9px;
+  background: var(--flow-accent-soft);
+  border-bottom: 1px solid color-mix(in srgb, var(--flow-accent) 26%, transparent);
+  border-radius: 13px 13px 0 0;
+  color: var(--flow-accent-fg);
+}
+
+.flow-node:hover .flow-node-header {
+  filter: saturate(1.12);
+}
+
+.flow-node-icon {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  color: var(--flow-accent);
+}
+
+.flow-node-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--flow-accent-fg);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.015em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flow-node[data-kind='operation'] .flow-node-title {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.flow-node[data-kind='group'] .flow-node-title {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.flow-node-badge {
+  flex-shrink: 0;
+  border: 1px solid color-mix(in srgb, var(--flow-accent) 30%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--flow-accent) 12%, transparent);
+  color: var(--flow-accent);
+  font-size: 7.5px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  padding: 1px 4px;
+  text-transform: uppercase;
+}
+
+.flow-node-unsupported {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--warning);
+}
+
+.flow-node-body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+  overflow: hidden;
+  border-radius: 0 0 13px 13px;
+  background: linear-gradient(
+    180deg,
+    var(--surface) 0%,
+    color-mix(in srgb, var(--flow-accent) 3%, var(--surface)) 100%
+  );
+  padding: 6px 9px 7px;
+}
+
+.flow-op-body {
+  justify-content: center;
+  gap: 2px;
+}
+
+.flow-op-detail {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flow-hint {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 9px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flow-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 14px;
+}
+
+.flow-meta-text {
+  color: var(--text-muted);
+  font-size: 9px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.flow-count-badge {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--flow-accent) 22%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--flow-accent) 12%, var(--surface-2));
+  color: var(--flow-accent-fg);
+  font-size: 8.5px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 1.2;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+
+.flow-op-count {
+  flex-shrink: 0;
+  color: var(--flow-accent-fg);
+  font-size: 8.5px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.flow-icon-button {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  padding: 2px;
+  color: var(--text-muted);
+  transition:
+    background-color 140ms ease,
+    color 140ms ease;
+}
+
+.flow-icon-button:hover {
+  background: color-mix(in srgb, var(--flow-accent) 15%, transparent);
+  color: var(--flow-accent-fg);
+}
+
+.flow-status {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  border-radius: 999px;
+}
+
+.flow-status-pending {
+  border: 1.5px solid color-mix(in srgb, var(--flow-accent) 55%, var(--border));
+  opacity: 0.7;
+}
+
+.flow-status-completed {
+  border: 1px solid color-mix(in srgb, var(--success) 42%, transparent);
+  background: color-mix(in srgb, var(--success) 16%, transparent);
+  color: var(--success);
+}
+
+.flow-status-active {
+  border: 1px solid color-mix(in srgb, var(--flow-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--flow-accent) 15%, transparent);
+}
+
+.flow-status-active > span {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--flow-accent);
+  animation: flow-status-pulse 1.1s ease-in-out infinite;
+}
+
+/* Circular connection sockets: filled data ports, hollow branch ports. */
+.flow-socket {
+  position: absolute;
+  z-index: 5;
+  width: 11px;
+  height: 11px;
+  transform: translate(-50%, -50%);
+  border: 2px solid var(--surface);
+  border-radius: 999px;
+  background: var(--flow-accent);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--flow-accent) 65%, transparent),
+    0 1px 2px rgba(0, 0, 0, 0.2);
+  pointer-events: none;
+}
+
+.flow-socket[data-kind='branch'] {
+  background: var(--surface);
+  border-color: var(--flow-accent);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--flow-accent) 60%, transparent),
+    inset 0 0 0 1px color-mix(in srgb, var(--flow-accent) 55%, transparent);
+}
+
+.flow-node[data-status='active'] .flow-socket {
+  animation: flow-socket-pulse 1.4s ease-in-out infinite;
+}
+
+.flow-socket-label {
+  position: absolute;
+  z-index: 6;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  color: var(--text-muted);
+  font-size: 7px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  padding: 1.5px 3px;
+  text-transform: uppercase;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.flow-socket-label[data-side='left'] {
+  transform: translate(-100%, -50%);
+}
+.flow-socket-label[data-side='right'] {
+  transform: translate(0, -50%);
+}
+.flow-socket-label[data-side='top'] {
+  transform: translate(0, -100%);
+}
+.flow-socket-label[data-side='bottom'] {
+  transform: none;
+}
+
+.flow-socket-label[data-kind='branch'] {
+  border-color: color-mix(in srgb, var(--flow-accent) 28%, var(--border));
+  color: var(--flow-accent);
+}
+
+/* Real-row preview table. */
+.flow-preview {
+  flex-shrink: 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--flow-accent) 17%, var(--border));
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.flow-preview table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.flow-preview thead tr {
+  background: color-mix(in srgb, var(--flow-accent) 8%, var(--surface-2));
+}
+
+.flow-preview th {
+  overflow: hidden;
+  padding: 2px 5px;
+  color: var(--text-muted);
+  font-size: 8.5px;
+  font-weight: 600;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flow-preview td {
+  overflow: hidden;
+  padding: 1px 5px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flow-preview tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--surface-2) 55%, transparent);
+}
+
+.flow-empty {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed color-mix(in srgb, var(--flow-accent) 26%, var(--border));
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 9.5px;
+  padding: 4px;
+}
+
+.flow-column-list {
+  display: flex;
+  gap: 3px;
+  overflow: hidden;
+  min-height: 13px;
+}
+
+.flow-column-chip {
+  flex-shrink: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  line-height: 1.2;
+  padding: 1px 4px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flow-group-body {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+.flow-group-aggregate {
+  margin-left: auto;
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  padding: 1px 4px;
+}
+
+.flow-legend-socket {
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid var(--surface);
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--border-strong);
+}
+
+.flow-legend-socket[data-kind='branch'] {
+  border-color: var(--danger);
+  background: var(--surface);
+  box-shadow: 0 0 0 1px var(--danger);
+}
+
+/*
+  While the surface is being dragged, every child keeps the grabbing
+  cursor so moving over a node does not flicker back to a node cursor.
+*/
+.flow-canvas-panning,
+.flow-canvas-panning .flow-node,
+.flow-canvas-panning .flow-node * {
+  cursor: grabbing !important;
+}
+
+.flow-canvas-panning .flow-node {
+  /* Avoid hover lift while dragging: the pointer passes over nodes. */
+  transform: none;
+}
+
+/* Motion: nodes settle in, active stages pulse gently, active wires
+   march so their direction is readable even between packets. */
 @keyframes flow-node-in {
   from {
     opacity: 0;
@@ -141,6 +740,42 @@ body {
   to {
     opacity: 1;
     transform: none;
+  }
+}
+
+@keyframes flow-node-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 1px 2px rgba(16, 24, 40, 0.07),
+      0 0 0 0 color-mix(in srgb, var(--flow-accent) 0%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 1px 2px rgba(16, 24, 40, 0.07),
+      0 0 0 3px color-mix(in srgb, var(--flow-accent) 20%, transparent);
+  }
+}
+
+@keyframes flow-socket-pulse {
+  0%,
+  100% {
+    transform: translate(-50%, -50%) scale(1);
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(1.16);
+  }
+}
+
+@keyframes flow-status-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.1);
   }
 }
 
@@ -155,8 +790,17 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .flow-node {
+  .flow-node,
+  .flow-node[data-status='active'],
+  .flow-node[data-status='active'] .flow-socket,
+  .flow-status-active > span {
     animation: none !important;
+  }
+  .flow-node {
+    transition: none;
+  }
+  .flow-node:hover {
+    transform: none;
   }
   .flow-edge-active {
     animation: none;

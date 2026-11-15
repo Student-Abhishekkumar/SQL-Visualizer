@@ -185,4 +185,99 @@ describe('FlowCanvas', () => {
       state.packetEdgeIds.length,
     )
   })
+
+  it('renders circular sockets and cubic Bézier wires', () => {
+    renderCanvas()
+    expect(document.querySelectorAll('.flow-socket').length).toBeGreaterThan(0)
+    expect(document.querySelectorAll('.flow-socket[data-kind="branch"]').length).toBeGreaterThan(0)
+    const firstEdge = graph.edges.find((edge) => edge.kind === 'main')!
+    const path = document.getElementById(`edge-path-${firstEdge.id}`)!
+    expect(path.getAttribute('d')).toContain(' C ')
+  })
+
+  it('re-routes a wire and pushes downstream nodes down when a preview expands', () => {
+    renderCanvas()
+    const outgoing = graph.edges.find((edge) => edge.from === 'data-WHERE')!
+    const path = document.getElementById(`edge-path-${outgoing.id}`)!
+    const before = path.getAttribute('d')
+    const dataNode = screen.getByRole('button', { name: /Intermediate result after WHERE/ })
+    const selectNode = screen.getByRole('button', { name: /Operation SELECT/ })
+    const initialHeight = Number.parseFloat(dataNode.style.height)
+    const initialSelectTop = Number.parseFloat(selectNode.style.top)
+    fireEvent.click(within(dataNode).getByRole('button', { name: 'Expand preview' }))
+    const after = path.getAttribute('d')
+    expect(after).not.toBe(before)
+    // The wire still starts on the data node's (now taller) bottom socket.
+    expect(Number.parseFloat(dataNode.style.height)).toBeGreaterThan(initialHeight)
+    // The node below moves down so the expanded preview never overlaps it.
+    expect(Number.parseFloat(selectNode.style.top)).toBeGreaterThan(initialSelectTop)
+  })
+
+  it('expands a rejected branch to fit every real removed row without shifting the spine', () => {
+    const { onSelectNode } = renderCanvas()
+    const branchNode = graph.nodes.find((node) => node.kind === 'branch')!
+    expect(branchNode.removedRows).toHaveLength(4)
+    const branch = screen.getByRole('button', { name: /Rejected rows/ })
+    const selectNode = screen.getByRole('button', { name: /Operation SELECT/ })
+    const initialHeight = Number.parseFloat(branch.style.height)
+    const initialSelectTop = Number.parseFloat(selectNode.style.top)
+    expect(initialHeight).toBe(branchNode.height)
+    expect(branch.querySelectorAll('tbody tr')).toHaveLength(0)
+
+    fireEvent.click(within(branch).getByRole('button', { name: 'Expand preview' }))
+
+    // Every removed row is shown, and the node is tall enough to fit the
+    // preview table's chrome plus all of them (the collapsed node showed
+    // only a hint).
+    expect(branch.querySelectorAll('tbody tr')).toHaveLength(4)
+    const expandedHeight = Number.parseFloat(branch.style.height)
+    expect(expandedHeight).toBe(branchNode.expandedHeight)
+    expect(expandedHeight).toBeGreaterThanOrEqual(branchNode.height + 19 + 4 * 17)
+    // The branch lives in the side column, so growing it must not move the
+    // main pipeline.
+    expect(Number.parseFloat(selectNode.style.top)).toBe(initialSelectTop)
+    expect(onSelectNode).not.toHaveBeenCalled()
+  })
+
+  it('pans the surface by dragging empty canvas and keeps nodes clickable', () => {
+    const { onSelectNode } = renderCanvas()
+    const canvas = screen.getByRole('application')
+    const surface = canvas.firstElementChild as HTMLElement
+    expect(surface.style.transform).toBe('translate(0px) scale(1)')
+
+    fireEvent.pointerDown(canvas, { button: 0, pointerId: 1, clientX: 100, clientY: 100 })
+    expect(canvas.className).toContain('flow-canvas-panning')
+    fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 160, clientY: 140 })
+    expect(surface.style.transform).toContain('translate(60px, 40px)')
+    fireEvent.pointerUp(canvas, { pointerId: 1 })
+    expect(canvas.className).not.toContain('flow-canvas-panning')
+
+    // A drag that starts on a node inspects it instead of panning.
+    const before = surface.style.transform
+    const where = screen.getByRole('button', { name: /Operation WHERE/ })
+    fireEvent.pointerDown(where, { button: 0, pointerId: 2, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(canvas, { pointerId: 2, clientX: 80, clientY: 80 })
+    fireEvent.pointerUp(canvas, { pointerId: 2 })
+    expect(surface.style.transform).toBe(before)
+    fireEvent.click(where)
+    expect(onSelectNode).toHaveBeenCalledTimes(1)
+  })
+
+  it('zooms around the pointer on wheel and updates the toolbar percentage', () => {
+    renderCanvas()
+    const canvas = screen.getByRole('application')
+    const surface = canvas.firstElementChild as HTMLElement
+    expect(screen.getByText('100%')).toBeTruthy()
+
+    fireEvent.wheel(canvas, { deltaY: -100, clientX: 120, clientY: 90 })
+    expect(screen.getByText('120%')).toBeTruthy()
+    // Anchored zoom keeps the point under the cursor fixed: the surface
+    // shifts so the graph point at (120, 90) stays put after scaling.
+    expect(surface.style.transform).toContain('translate(-24px, -18px)')
+    expect(surface.style.transform).toContain('scale(1.2)')
+
+    fireEvent.wheel(canvas, { deltaY: 100, clientX: 120, clientY: 90 })
+    expect(screen.getByText('100%')).toBeTruthy()
+    expect(surface.style.transform).toBe('translate(0px) scale(1)')
+  })
 })

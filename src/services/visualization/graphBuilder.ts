@@ -11,16 +11,20 @@
  * Layout: source tables sit in a left column, aligned with the
  * operation that consumes them (so JOIN inputs visibly converge on the
  * JOIN node), and the pipeline runs down a central spine. Rejected rows
- * and GROUP BY groups fan out to a right-hand column. Coordinates are
- * computed here so they are testable; rendering is separate.
+ * and GROUP BY groups fan out to a right-hand column. Coordinates and
+ * sockets are computed here so they are testable; rendering is separate.
  */
 
 import type {
   FlowElementStatus,
+  FlowEdgeKind,
   FlowGraph,
   FlowGraphEdge,
   FlowGraphNode,
   FlowGraphState,
+  FlowSocket,
+  FlowSocketKind,
+  FlowSocketSide,
 } from '../../types/flowGraph'
 import type {
   GroupSnapshot,
@@ -28,6 +32,7 @@ import type {
   VisualizationTrace,
   VisualizedStage,
 } from '../../types/visualization'
+import { curveMidpoint, routeEdgeCurve } from './flowGeometry'
 
 /** Operations that get a dedicated operation node (FROM is the source load). */
 const OPERATION_STAGES = new Set<VisualizedStage>([
@@ -46,24 +51,30 @@ const BRANCH_STAGES = new Set<VisualizedStage>(['WHERE', 'HAVING', 'DISTINCT', '
 
 const MAX_GROUP_NODES = 8
 
+/** Preview rows shown while collapsed (expanded shows up to ten). */
+const PREVIEW_ROWS = 3
+const EXPANDED_ROWS = 10
+/** Rendered height of one extra preview row (title/table metrics). */
+const EXPANDED_ROW_HEIGHT = 17
+
 // Layout constants: left source column → central pipeline spine → right
 // branch column.
 const SOURCE_X = 0
-const SOURCE_W = 232
-const SOURCE_H = 150
+const SOURCE_W = 248
+const SOURCE_H = 152
 const SOURCE_STACK_GAP = 20
-const SPINE_X = 320
-const NODE_W = 248
-const OP_H = 76
-const DATA_H = 158
-const OP_DATA_GAP = 26
-const ROW_GAP = 34
-const SIDE_X = 640
-const SIDE_W = 224
-const BRANCH_H = 74
+const SPINE_X = 344
+const NODE_W = 260
+const OP_H = 78
+const DATA_H = 128
+const OP_DATA_GAP = 28
+const ROW_GAP = 36
+const SIDE_X = 666
+const SIDE_W = 236
+const BRANCH_H = 58
 const GROUP_H = 54
 const GROUP_GAP = 12
-const FINAL_H = 148
+const FINAL_H = 136
 const TOP = 32
 
 /** Beginner-friendly description of what each stage does. */
@@ -90,68 +101,67 @@ const DATA_LABELS: Partial<Record<VisualizedStage, string>> = {
   LIMIT: 'Limited rows',
 }
 
-const centerY = (node: { y: number; height: number }): number => node.y + node.height / 2
-
-/** Right-angle elbow route from a node's right edge to a target's left edge. */
-function elbow(
-  from: { x: number; y: number; width: number; height: number },
-  to: { x: number; y: number; width: number; height: number },
-): Array<{ x: number; y: number }> {
-  const x1 = from.x + from.width
-  const y1 = centerY(from)
-  const x2 = to.x
-  const y2 = centerY(to)
-  if (Math.abs(y1 - y2) < 1) {
-    return [
-      { x: x1, y: y1 },
-      { x: x2, y: y2 },
-    ]
-  }
-  const midX = Math.round(x1 + Math.max((x2 - x1) * 0.55, 24))
-  return [
-    { x: x1, y: y1 },
-    { x: midX, y: y1 },
-    { x: midX, y: y2 },
-    { x: x2, y: y2 },
-  ]
+/** Socket label for an operation's secondary (branch) output. */
+function branchSocketLabel(stage: VisualizedStage): string {
+  if (stage === 'DISTINCT') return 'duplicates'
+  if (stage === 'LIMIT') return 'offset'
+  return 'rejected'
 }
 
-/** Straight vertical connector (same column). */
-function vertical(
-  from: { x: number; y: number; width: number; height: number },
-  to: { x: number; y: number; width: number; height: number },
-): Array<{ x: number; y: number }> {
-  const cx = from.x + from.width / 2
-  return [
-    { x: cx, y: from.y + from.height },
-    { x: cx, y: to.y },
-  ]
+/**
+ * Extra chrome (one 3px body gap + the preview table's border and header
+ * row) revealed when a node's preview is expanded from zero rows.
+ */
+const EXPANDED_PREVIEW_CHROME = 19
+
+/**
+ * Preview expansion height, derived from the real number of rows shown.
+ *
+ * Source/data/final nodes already render three real rows when collapsed,
+ * so they only grow by the additional rows. Branch nodes show just a
+ * one-line hint when collapsed and reveal the whole preview table on
+ * expansion, so their first rows need the table chrome as well.
+ */
+function expandedHeightFor(
+  baseHeight: number,
+  rowCount: number,
+  collapsedRows: number = PREVIEW_ROWS,
+): number | undefined {
+  if (rowCount <= PREVIEW_ROWS) return undefined
+  const shown = Math.min(rowCount, EXPANDED_ROWS)
+  const chrome = collapsedRows === 0 ? EXPANDED_PREVIEW_CHROME : 0
+  return baseHeight + chrome + (shown - collapsedRows) * EXPANDED_ROW_HEIGHT
 }
 
-/** Point at the middle of a polyline, measured by arc length. */
-function midpointOf(points: Array<{ x: number; y: number }>): { x: number; y: number } {
-  if (points.length === 0) return { x: 0, y: 0 }
-  if (points.length === 1) return points[0] ?? { x: 0, y: 0 }
-  let total = 0
-  for (let i = 1; i < points.length; i++) {
-    const a = points[i - 1]
-    const b = points[i]
-    if (a === undefined || b === undefined) continue
-    total += Math.hypot(b.x - a.x, b.y - a.y)
-  }
-  let remaining = total / 2
-  for (let i = 1; i < points.length; i++) {
-    const a = points[i - 1]
-    const b = points[i]
-    if (a === undefined || b === undefined) continue
-    const length = Math.hypot(b.x - a.x, b.y - a.y)
-    if (remaining <= length) {
-      const ratio = length === 0 ? 0 : remaining / length
-      return { x: a.x + (b.x - a.x) * ratio, y: a.y + (b.y - a.y) * ratio }
-    }
-    remaining -= length
-  }
-  return points[points.length - 1] ?? { x: 0, y: 0 }
+interface SocketSpec {
+  id: string
+  direction: 'input' | 'output'
+  kind: FlowSocketKind
+  side: FlowSocketSide
+  label?: string
+}
+
+/** Build a socket anchored to a deterministic offset on a node. */
+function makeSocket(
+  spec: SocketSpec,
+  width: number,
+  height: number,
+  options: { x?: number; y?: number } = {},
+): FlowSocket {
+  const { side } = spec
+  const x =
+    options.x ??
+    (side === 'left' ? 0 : side === 'right' ? width : width / 2)
+  const y =
+    options.y ??
+    (side === 'top' ? 0 : side === 'bottom' ? height : height / 2)
+  return { ...spec, x, y }
+}
+
+interface StageRow {
+  opY: number
+  dataY: number
+  height: number
 }
 
 function branchLabel(stage: VisualizedStage, count: number): string {
@@ -168,19 +178,20 @@ function branchHint(stage: VisualizedStage): string {
   return 'These rows did not pass the condition.'
 }
 
-interface StageRow {
-  opY: number
-  dataY: number
-  height: number
+function branchEdgeLabel(stage: VisualizedStage): string {
+  if (stage === 'LIMIT') return 'offset'
+  if (stage === 'DISTINCT') return 'duplicates'
+  return 'rejected'
 }
 
 /**
  * Build the flow graph for a trace. Deterministic: the same trace
- * always yields the same nodes, edges and layout.
+ * always yields the same nodes, sockets, edges and layout.
  */
 export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
   const nodes: FlowGraphNode[] = []
   const edges: FlowGraphEdge[] = []
+  const supportedStages = new Set(trace.capability.supportedStages)
 
   const snapshotByStage = new Map<VisualizedStage, StageSnapshot>()
   for (const snapshot of trace.stageSnapshots) snapshotByStage.set(snapshot.stage, snapshot)
@@ -225,26 +236,43 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
     sourceCount > 0 ? sourceCount * SOURCE_H + (sourceCount - 1) * SOURCE_STACK_GAP : 0
   const stackTop = Math.max(16, consumerY + OP_H / 2 - stackHeight / 2)
 
-  const sourceNodes: FlowGraphNode[] = trace.sourceTables.map((table, index) => ({
-    id: `src-${index}-${table.alias ?? table.name}`,
-    kind: 'source',
-    stage: table.role === 'from' ? 'FROM' : 'JOIN',
-    label: table.name,
-    detail:
-      table.role === 'from'
-        ? `${table.alias !== null ? `alias ${table.alias} · ` : ''}${table.rowCount} row${table.rowCount === 1 ? '' : 's'} in table`
-        : `${table.joinType ?? 'JOIN'}${table.alias !== null ? ` · alias ${table.alias}` : ''} · ${table.rowCount} row${table.rowCount === 1 ? '' : 's'}`,
-    hint: table.role === 'from' ? 'Data starts here.' : 'This table feeds the join.',
-    x: SOURCE_X,
-    y: stackTop + index * (SOURCE_H + SOURCE_STACK_GAP),
-    width: SOURCE_W,
-    height: SOURCE_H,
-    table,
-    // Source tables are query inputs, not query output: they already
-    // exist in the database, so both join inputs are visible from the
-    // start and visibly converge on the JOIN node.
-    revealsAt: null,
-  }))
+  const sourceNodes: FlowGraphNode[] = trace.sourceTables.map((table, index) => {
+    const height = SOURCE_H
+    return {
+      id: `src-${index}-${table.alias ?? table.name}`,
+      kind: 'source',
+      stage: table.role === 'from' ? 'FROM' : 'JOIN',
+      label: table.name,
+      detail:
+        table.role === 'from'
+          ? `${table.alias !== null ? `alias ${table.alias} · ` : ''}${table.rowCount} row${table.rowCount === 1 ? '' : 's'} in table`
+          : `${table.joinType ?? 'JOIN'}${table.alias !== null ? ` · alias ${table.alias}` : ''} · ${table.rowCount} row${table.rowCount === 1 ? '' : 's'}`,
+      hint: table.role === 'from' ? 'Data starts here.' : 'This table feeds the join.',
+      x: SOURCE_X,
+      y: stackTop + index * (SOURCE_H + SOURCE_STACK_GAP),
+      width: SOURCE_W,
+      height,
+      sockets: [
+        makeSocket(
+          {
+            id: 'out',
+            direction: 'output',
+            kind: 'data',
+            side: 'right',
+            label: table.alias ?? 'rows',
+          },
+          SOURCE_W,
+          height,
+        ),
+      ],
+      expandedHeight: expandedHeightFor(height, table.previewRows.length),
+      // Source tables are query inputs, not query output: they already
+      // exist in the database, so both join inputs are visible from the
+      // start and visibly converge on the JOIN node.
+      revealsAt: null,
+      table,
+    }
+  })
   nodes.push(...sourceNodes)
   const mainSource = sourceNodes.find((node) => node.table?.role === 'from') ?? sourceNodes[0]
   const joinSources = sourceNodes.filter((node) => node.table?.role === 'join')
@@ -252,10 +280,29 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
   // --- phase 3: operations, datasets, branches, groups ---------------------
   let previousBottom: FlowGraphNode | null = mainSource ?? null
 
-  const addEdge = (
-    edge: Omit<FlowGraphEdge, 'labelPoint'> & { labelPoint?: { x: number; y: number } },
+  const addConnection = (
+    from: FlowGraphNode,
+    fromSocket: string,
+    to: FlowGraphNode,
+    toSocket: string,
+    kind: FlowEdgeKind,
+    stage: VisualizedStage | null,
+    label?: string,
   ): void => {
-    edges.push({ ...edge, labelPoint: edge.labelPoint ?? midpointOf(edge.points) })
+    const curve = routeEdgeCurve(from, fromSocket, to, toSocket)
+    if (curve.length < 4) return
+    edges.push({
+      id: `edge-${from.id}-${to.id}`,
+      from: from.id,
+      to: to.id,
+      kind,
+      stage,
+      fromSocket,
+      toSocket,
+      label,
+      curve,
+      labelPoint: curveMidpoint(curve),
+    })
   }
 
   for (const stage of pipelineStages) {
@@ -264,6 +311,102 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
     if (snapshot === undefined || row === undefined) continue
 
     if (OPERATION_STAGES.has(stage)) {
+      const hasBranch = BRANCH_STAGES.has(stage) && snapshot.removedRows.length > 0
+      const hasGroups = stage === 'GROUP_BY' && snapshot.groups.length > 0
+
+      // Inputs: a JOIN receives every source table laterally (Blender
+      // style), while later spine operations receive the previous
+      // dataset through a top port. A first operation reads its source
+      // through a left port.
+      const inputs: FlowSocket[] = []
+      const inputBySourceId = new Map<string, string>()
+      if (stage === 'JOIN') {
+        const joinInputs = sourceNodes.filter(
+          (source) => source === previousBottom || source.table?.role === 'join',
+        )
+        joinInputs.forEach((source, index) => {
+          const id = `in-${index}`
+          inputs.push(
+            makeSocket(
+              {
+                id,
+                direction: 'input',
+                kind: 'data',
+                side: 'left',
+                label: source.table?.alias ?? 'table',
+              },
+              NODE_W,
+              OP_H,
+              { y: (OP_H * (index + 1)) / (joinInputs.length + 1) },
+            ),
+          )
+          inputBySourceId.set(source.id, id)
+        })
+        if (previousBottom !== null && previousBottom.kind !== 'source') {
+          inputs.push(
+            makeSocket(
+              { id: 'in', direction: 'input', kind: 'data', side: 'top', label: 'in' },
+              NODE_W,
+              OP_H,
+            ),
+          )
+        }
+      } else {
+        const side: FlowSocketSide = previousBottom?.kind === 'source' ? 'left' : 'top'
+        inputs.push(
+          makeSocket(
+            { id: 'in', direction: 'input', kind: 'data', side, label: 'in' },
+            NODE_W,
+            OP_H,
+          ),
+        )
+      }
+
+      // Outputs: the main dataset leaves through the bottom; branches
+      // and group members leave through hollow right-hand ports.
+      const outputs: FlowSocket[] = [
+        makeSocket(
+          { id: 'out', direction: 'output', kind: 'data', side: 'bottom', label: 'rows' },
+          NODE_W,
+          OP_H,
+        ),
+      ]
+      const sideOutputs: FlowSocket[] = []
+      if (hasBranch) {
+        sideOutputs.push(
+          makeSocket(
+            {
+              id: 'out-branch',
+              direction: 'output',
+              kind: 'branch',
+              side: 'right',
+              label: branchSocketLabel(stage),
+            },
+            NODE_W,
+            OP_H,
+          ),
+        )
+      }
+      if (hasGroups) {
+        sideOutputs.push(
+          makeSocket(
+            {
+              id: 'out-groups',
+              direction: 'output',
+              kind: 'branch',
+              side: 'right',
+              label: 'groups',
+            },
+            NODE_W,
+            OP_H,
+          ),
+        )
+      }
+      sideOutputs.forEach((socket, index) => {
+        socket.y = (OP_H * (index + 1)) / (sideOutputs.length + 1)
+        outputs.push(socket)
+      })
+
       const opNode: FlowGraphNode = {
         id: `op-${stage}`,
         kind: 'operation',
@@ -275,38 +418,41 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
         y: row.opY,
         width: NODE_W,
         height: OP_H,
+        sockets: [...inputs, ...outputs],
+        unsupported: supportedStages.has(stage) ? undefined : true,
         snapshot,
         revealsAt: null,
       }
       nodes.push(opNode)
+
       if (previousBottom !== null) {
-        const points = elbow(previousBottom, opNode)
-        addEdge({
-          id: `edge-${previousBottom.id}-${opNode.id}`,
-          from: previousBottom.id,
-          to: opNode.id,
-          kind: 'main',
+        addConnection(
+          previousBottom,
+          'out',
+          opNode,
+          inputBySourceId.get(previousBottom.id) ?? inputs[0]?.id ?? 'in',
+          'main',
           stage,
-          points,
-        })
+        )
       }
+
       // Every join table also feeds the JOIN operation from the left.
       if (stage === 'JOIN') {
         for (const source of joinSources) {
-          addEdge({
-            id: `edge-${source.id}-${opNode.id}`,
-            from: source.id,
-            to: opNode.id,
-            kind: 'join-input',
+          addConnection(
+            source,
+            'out',
+            opNode,
+            inputBySourceId.get(source.id) ?? 'in',
+            'join-input',
             stage,
-            points: elbow(source, opNode),
-          })
+          )
         }
       }
       previousBottom = opNode
 
       // Rejected/skipped rows branch to the right.
-      if (BRANCH_STAGES.has(stage) && snapshot.removedRows.length > 0) {
+      if (hasBranch) {
         const branchNode: FlowGraphNode = {
           id: `branch-${stage}`,
           kind: 'branch',
@@ -318,27 +464,36 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
           y: row.opY + OP_H + 24,
           width: SIDE_W,
           height: BRANCH_H,
+          sockets: [
+            makeSocket(
+              { id: 'in', direction: 'input', kind: 'branch', side: 'left', label: 'in' },
+              SIDE_W,
+              BRANCH_H,
+            ),
+          ],
+          expandedHeight: expandedHeightFor(BRANCH_H, snapshot.removedRows.length, 0),
           snapshot,
           removedRows: snapshot.removedRows,
           revealsAt: stage,
           isRejected: true,
         }
         nodes.push(branchNode)
-        addEdge({
-          id: `edge-${opNode.id}-${branchNode.id}`,
-          from: opNode.id,
-          to: branchNode.id,
-          kind: 'rejected',
-          label: stage === 'LIMIT' ? 'offset' : stage === 'DISTINCT' ? 'duplicates' : 'rejected',
+        addConnection(
+          opNode,
+          'out-branch',
+          branchNode,
+          'in',
+          'rejected',
           stage,
-          points: elbow(opNode, branchNode),
-        })
+          branchEdgeLabel(stage),
+        )
       }
 
       // GROUP BY fan-out: one node per real group, bounded with an
       // honest overflow node.
-      if (stage === 'GROUP_BY' && snapshot.groups.length > 0) {
+      if (hasGroups) {
         const shown = snapshot.groups.slice(0, MAX_GROUP_NODES)
+        const groupSocket = opNode.sockets.find((socket) => socket.id === 'out-groups')
         shown.forEach((group, groupIndex) => {
           const groupNode: FlowGraphNode = {
             id: `group-${stage}-${group.index}`,
@@ -350,19 +505,19 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
             y: row.opY + OP_H + 16 + groupIndex * (GROUP_H + GROUP_GAP),
             width: SIDE_W,
             height: GROUP_H,
+            sockets: [
+              makeSocket(
+                { id: 'in', direction: 'input', kind: 'branch', side: 'left', label: 'in' },
+                SIDE_W,
+                GROUP_H,
+              ),
+            ],
             group,
             snapshot,
             revealsAt: stage,
           }
           nodes.push(groupNode)
-          addEdge({
-            id: `edge-${opNode.id}-${groupNode.id}`,
-            from: opNode.id,
-            to: groupNode.id,
-            kind: 'group-member',
-            stage,
-            points: elbow(opNode, groupNode),
-          })
+          addConnection(opNode, groupSocket?.id ?? 'out-groups', groupNode, 'in', 'group-member', stage)
         })
         if (snapshot.groups.length > MAX_GROUP_NODES) {
           const overflowCount = snapshot.groups.length - MAX_GROUP_NODES
@@ -376,17 +531,24 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
             y: row.opY + OP_H + 16 + MAX_GROUP_NODES * (GROUP_H + GROUP_GAP),
             width: SIDE_W,
             height: GROUP_H,
+            sockets: [
+              makeSocket(
+                { id: 'in', direction: 'input', kind: 'branch', side: 'left', label: 'in' },
+                SIDE_W,
+                GROUP_H,
+              ),
+            ],
             revealsAt: stage,
           }
           nodes.push(overflowNode)
-          addEdge({
-            id: `edge-${opNode.id}-${overflowNode.id}`,
-            from: opNode.id,
-            to: overflowNode.id,
-            kind: 'group-member',
+          addConnection(
+            opNode,
+            groupSocket?.id ?? 'out-groups',
+            overflowNode,
+            'in',
+            'group-member',
             stage,
-            points: elbow(opNode, overflowNode),
-          })
+          )
         }
       }
     }
@@ -401,20 +563,28 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
       y: row.dataY,
       width: NODE_W,
       height: DATA_H,
+      sockets: [
+        makeSocket(
+          { id: 'in', direction: 'input', kind: 'data', side: 'top', label: 'in' },
+          NODE_W,
+          DATA_H,
+        ),
+        makeSocket(
+          { id: 'out', direction: 'output', kind: 'data', side: 'bottom', label: 'rows' },
+          NODE_W,
+          DATA_H,
+        ),
+      ],
+      expandedHeight: expandedHeightFor(DATA_H, snapshot.rows.length),
+      unsupported: supportedStages.has(stage) ? undefined : true,
       snapshot,
       rows: snapshot.rows,
       revealsAt: stage,
     }
     nodes.push(dataNode)
-    const from = previousBottom
-    addEdge({
-      id: `edge-${from?.id ?? '?'}-${dataNode.id}`,
-      from: from?.id ?? '',
-      to: dataNode.id,
-      kind: 'main',
-      stage,
-      points: from !== null ? vertical(from, dataNode) : [],
-    })
+    if (previousBottom !== null) {
+      addConnection(previousBottom, 'out', dataNode, 'in', 'main', stage)
+    }
     previousBottom = dataNode
   }
 
@@ -432,20 +602,21 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
     y: rowTop,
     width: NODE_W,
     height: FINAL_H,
+    sockets: [
+      makeSocket(
+        { id: 'in', direction: 'input', kind: 'data', side: 'top', label: 'in' },
+        NODE_W,
+        FINAL_H,
+      ),
+    ],
+    expandedHeight: expandedHeightFor(FINAL_H, trace.finalRows.length),
     rows: trace.finalRows,
     snapshot: trace.stageSnapshots[trace.stageSnapshots.length - 1],
     revealsAt: lastStageOf(trace),
   }
   nodes.push(finalNode)
   if (previousBottom !== null) {
-    addEdge({
-      id: `edge-${previousBottom.id}-final`,
-      from: previousBottom.id,
-      to: finalNode.id,
-      kind: 'final',
-      stage: lastStageOf(trace),
-      points: vertical(previousBottom, finalNode),
-    })
+    addConnection(previousBottom, 'out', finalNode, 'in', 'final', lastStageOf(trace))
   }
 
   // Bounds come from the actual node extents so a query without branches
