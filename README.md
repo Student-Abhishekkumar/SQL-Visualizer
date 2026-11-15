@@ -13,15 +13,49 @@ The workspace now manages **multiple independent SQLite databases**, and an
 always-visible **Query ↔ Canvas** switch keeps both workspaces alive while you move
 between writing SQL and watching it run.
 
-![SQL Visualizer — dark workspace](#screenshots)
-
-![SQL Visualizer — dark workspace](#screenshots)
+![SQL Visualizer — query workspace with database explorer, Monaco editor and results](docs/screenshots/query-workspace.png)
 
 ## Screenshots
 
-> Screenshots will be added here. Meanwhile, run the app locally to see the workspace:
-> a dark, Linear/Supabase-style layout with a database explorer, Monaco SQL editor and
-> tabbed results panel.
+The image above shows the **Query workspace**: the database explorer on the left, a real
+Monaco SQL editor in the middle and a tabbed results panel below. The example query joins
+`employees` to `departments`, filters by salary and shows the five matching rows with
+inferred column types.
+
+### Canvas workspace
+
+Press **Visualize** to replay the same query as an animated flow graph. Source tables,
+JOIN inputs, intermediate results, rejected WHERE rows and the final SELECT are real
+data from the active SQLite database; the playback bar and clause strip drive the
+animation and each node exposes its rows on demand.
+
+![Canvas workspace showing the animated JOIN query pipeline](docs/screenshots/canvas-workspace.png)
+
+### Database management
+
+Every database is a separate SQLite snapshot with its own schema, stats and history.
+Switch between them from the header selector, or open the Database Manager to create,
+import, rename, duplicate, export, reset and delete databases.
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/database-selector.png" alt="Database selector listing five independent databases with the active one marked" />
+      <br />
+      <sub><strong>Database selector</strong> — switch databases without losing work; the active database and its table/row counts are always visible.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/database-manager.png" alt="Database Manager with database list on the left and actions on the right" />
+      <br />
+      <sub><strong>Database Manager</strong> — create, import, rename, duplicate, export as <code>.sqlite</code> or <code>.sql</code>, reset or delete.</sub>
+    </td>
+  </tr>
+</table>
+
+The schema viewer shows real column types, primary/foreign keys, the original
+`CREATE TABLE` statement and sample rows for any table:
+
+![Schema viewer for the employees table showing columns, keys, CREATE statement and sample rows](docs/screenshots/schema-viewer.png)
 
 ## Main features (Stage 1)
 
@@ -67,7 +101,8 @@ between writing SQL and watching it run.
 - **Database reset** — restore the active database to its template state (empty,
   example seed, or custom setup SQL) with an explicit confirmation step.
 - **Format SQL / Examples** — a robust keyword-driven SQL formatter (never fails on
-  valid input) and a dropdown of 14 executable example queries.
+  valid input) and a dropdown of 21 executable example queries — 14 core SQL
+  examples plus 7 visualization-focused queries.
 - **Theme toggle, settings, responsive layout** — dark-first design with a light
   palette, draggable editor/results divider, and a mobile drawer sidebar.
 
