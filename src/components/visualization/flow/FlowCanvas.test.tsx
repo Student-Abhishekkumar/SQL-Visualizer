@@ -155,13 +155,16 @@ describe('FlowCanvas', () => {
     const source = screen.getByRole('button', { name: /Source table employees/ })
     const rowsOf = (): number => source.querySelectorAll('tbody tr').length
     expect(rowsOf()).toBe(3)
+    expect(source.getAttribute('data-expanded')).toBeNull()
 
     fireEvent.click(within(source).getByRole('button', { name: 'Expand preview' }))
     expect(rowsOf()).toBe(6)
+    expect(source.getAttribute('data-expanded')).toBe('true')
     expect(onSelectNode).not.toHaveBeenCalled()
 
     fireEvent.click(within(source).getByRole('button', { name: 'Collapse preview' }))
     expect(rowsOf()).toBe(3)
+    expect(source.getAttribute('data-expanded')).toBeNull()
   })
 
   it('emphasizes the selected node’s edges and dims the rest', () => {

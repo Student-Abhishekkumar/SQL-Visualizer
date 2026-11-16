@@ -206,11 +206,12 @@ body {
   --flow-accent-soft: var(--node-source-soft);
   --flow-accent-fg: var(--node-source-fg);
   background: var(--surface);
-  border: 1px solid color-mix(in srgb, var(--flow-accent) 26%, var(--border));
-  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--flow-accent) 30%, var(--border));
+  border-radius: 13px;
   box-shadow:
-    0 1px 2px rgba(16, 24, 40, 0.07),
-    0 8px 20px -16px rgba(16, 24, 40, 0.35);
+    inset 0 1px 0 color-mix(in srgb, #fff 55%, transparent),
+    0 1px 2px rgba(16, 24, 40, 0.08),
+    0 10px 24px -18px rgba(16, 24, 40, 0.42);
   transition:
     border-color 160ms ease,
     box-shadow 160ms ease,
@@ -224,8 +225,9 @@ body {
 
 .dark .flow-node {
   box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.4),
-    0 12px 28px -18px rgba(0, 0, 0, 0.75);
+    inset 0 1px 0 rgba(255, 255, 255, 0.045),
+    0 1px 2px rgba(0, 0, 0, 0.45),
+    0 14px 30px -18px rgba(0, 0, 0, 0.8);
 }
 
 .flow-node[data-accent='source'] {
@@ -285,11 +287,19 @@ body {
 }
 
 .flow-node:hover {
-  border-color: color-mix(in srgb, var(--flow-accent) 58%, var(--border));
+  border-color: color-mix(in srgb, var(--flow-accent) 62%, var(--border));
   box-shadow:
-    0 2px 4px rgba(16, 24, 40, 0.08),
-    0 14px 28px -18px color-mix(in srgb, var(--flow-accent) 60%, transparent);
+    inset 0 1px 0 color-mix(in srgb, #fff 55%, transparent),
+    0 2px 4px rgba(16, 24, 40, 0.09),
+    0 16px 30px -18px color-mix(in srgb, var(--flow-accent) 62%, transparent);
   transform: translateY(-1px);
+}
+
+.dark .flow-node:hover {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 2px 5px rgba(0, 0, 0, 0.5),
+    0 18px 34px -16px color-mix(in srgb, var(--flow-accent) 42%, transparent);
 }
 
 .flow-node[data-status='pending'] {
@@ -307,11 +317,25 @@ body {
     flow-node-pulse 1.8s ease-in-out infinite;
 }
 
+.flow-node[data-status='active'] .flow-node-header {
+  border-bottom-color: var(--flow-accent);
+}
+
 .flow-node[data-selected='true'] {
   border-color: var(--accent);
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: 1px;
   box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #fff 55%, transparent),
     0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent),
-    0 14px 30px -20px color-mix(in srgb, var(--accent) 70%, transparent);
+    0 16px 32px -20px color-mix(in srgb, var(--accent) 72%, transparent);
+}
+
+.dark .flow-node[data-selected='true'] {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 0 0 2px color-mix(in srgb, var(--accent) 62%, transparent),
+    0 18px 36px -18px color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
 .flow-node:focus-visible,
@@ -337,12 +361,33 @@ body {
 
 /* Coloured title bar + dark/theme-aware data body. */
 .flow-node-surface {
+  position: relative;
   display: flex;
   height: 100%;
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
-  border-radius: 13px;
+  border-radius: 12px;
+}
+
+/* Solid operation rail: the node keeps its SQL identity even when the
+   title text is truncated or the canvas is zoomed far out. */
+.flow-node-surface::before {
+  content: '';
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3px;
+  border-radius: 12px 0 0 12px;
+  background: linear-gradient(
+    180deg,
+    var(--flow-accent) 0%,
+    color-mix(in srgb, var(--flow-accent) 52%, transparent) 100%
+  );
+  opacity: 0.9;
+  pointer-events: none;
 }
 
 .flow-node-header {
@@ -350,16 +395,34 @@ body {
   flex-shrink: 0;
   align-items: center;
   gap: 6px;
-  min-height: 27px;
-  padding: 3px 7px 3px 9px;
-  background: var(--flow-accent-soft);
-  border-bottom: 1px solid color-mix(in srgb, var(--flow-accent) 26%, transparent);
-  border-radius: 13px 13px 0 0;
+  min-height: 28px;
+  padding: 3px 7px 3px 12px;
+  background: linear-gradient(
+    90deg,
+    var(--flow-accent-soft) 0%,
+    color-mix(in srgb, var(--flow-accent-soft) 62%, var(--surface)) 100%
+  );
+  border-bottom: 1px solid color-mix(in srgb, var(--flow-accent) 34%, transparent);
+  border-radius: 12px 12px 0 0;
   color: var(--flow-accent-fg);
+  box-shadow: inset 0 -1px 0 color-mix(in srgb, #fff 18%, transparent);
+}
+
+.dark .flow-node-header {
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.18);
 }
 
 .flow-node:hover .flow-node-header {
-  filter: saturate(1.12);
+  filter: saturate(1.14) brightness(1.015);
+}
+
+.flow-node[data-status='completed'] .flow-node-header {
+  border-bottom-color: color-mix(in srgb, var(--flow-accent) 42%, transparent);
+}
+
+.flow-node[data-selected='true'] .flow-node-surface::before {
+  opacity: 1;
+  box-shadow: 0 0 8px color-mix(in srgb, var(--flow-accent) 55%, transparent);
 }
 
 .flow-node-icon {
@@ -416,13 +479,13 @@ body {
   flex-direction: column;
   gap: 3px;
   overflow: hidden;
-  border-radius: 0 0 13px 13px;
+  border-radius: 0 0 12px 12px;
   background: linear-gradient(
     180deg,
     var(--surface) 0%,
-    color-mix(in srgb, var(--flow-accent) 3%, var(--surface)) 100%
+    color-mix(in srgb, var(--flow-accent) 4%, var(--surface)) 100%
   );
-  padding: 6px 9px 7px;
+  padding: 6px 9px 7px 11px;
 }
 
 .flow-op-body {

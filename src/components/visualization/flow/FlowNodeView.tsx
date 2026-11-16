@@ -274,6 +274,7 @@ function NodeFrame({
       data-kind={node.kind}
       data-status={status}
       data-selected={selected ? 'true' : undefined}
+      data-expanded={expanded ? 'true' : undefined}
       data-unsupported={node.unsupported === true ? 'true' : undefined}
       onClick={() => onSelect(node)}
       onKeyDown={(event) => {
