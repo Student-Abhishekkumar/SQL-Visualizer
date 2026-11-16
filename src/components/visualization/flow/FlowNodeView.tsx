@@ -246,6 +246,7 @@ function NodeFrame({
   status,
   selected,
   expanded,
+  offsetX,
   offsetY,
   ariaLabel,
   onSelect,
@@ -256,6 +257,8 @@ function NodeFrame({
   status: FlowElementStatus
   selected: boolean
   expanded: boolean
+  /** Live horizontal offset applied while the user drags the node. */
+  offsetX: number
   /** Live vertical offset applied when a neighbouring preview expands. */
   offsetY: number
   ariaLabel: string
@@ -273,6 +276,7 @@ function NodeFrame({
       aria-pressed={selected}
       title={node.hint !== undefined ? `${node.label} — ${node.hint}` : node.label}
       data-accent={nodeAccentKey(node)}
+      data-node-id={node.id}
       data-kind={node.kind}
       data-status={status}
       data-selected={selected ? 'true' : undefined}
@@ -289,7 +293,7 @@ function NodeFrame({
       }}
       className="flow-node absolute cursor-pointer text-left focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
       style={{
-        left: node.x,
+        left: node.x + offsetX,
         top: node.y + offsetY,
         width: node.width,
         height: displayHeight,
@@ -314,6 +318,8 @@ interface FlowNodeViewProps {
   status: FlowElementStatus
   selected: boolean
   expanded: boolean
+  /** Horizontal offset applied while the user drags this node. */
+  offsetX?: number
   /** Vertical offset applied when an earlier preview pushes this node down. */
   offsetY?: number
   onSelect: (node: FlowGraphNode) => void
@@ -327,6 +333,7 @@ export const FlowNodeView = memo(function FlowNodeView({
   status,
   selected,
   expanded,
+  offsetX = 0,
   offsetY = 0,
   onSelect,
   onHover,
@@ -346,6 +353,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         status={status}
         selected={selected}
         expanded={expanded}
+        offsetX={offsetX}
         offsetY={offsetY}
         ariaLabel={`Source table ${node.label}, ${table.rowCount} rows`}
         onSelect={onSelect}
@@ -395,6 +403,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         status={status}
         selected={selected}
         expanded={false}
+        offsetX={offsetX}
         offsetY={offsetY}
         ariaLabel={`Operation ${node.label}: ${node.detail ?? ''}`}
         onSelect={onSelect}
@@ -436,6 +445,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         status={status}
         selected={selected}
         expanded={expanded}
+        offsetX={offsetX}
         offsetY={offsetY}
         ariaLabel={`Intermediate result after ${node.stage}, ${snapshot.outputRowCount} rows`}
         onSelect={onSelect}
@@ -480,6 +490,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         status={status}
         selected={selected}
         expanded={expanded}
+        offsetX={offsetX}
         offsetY={offsetY}
         ariaLabel={`${node.label} — removed records`}
         onSelect={onSelect}
@@ -522,6 +533,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         status={status}
         selected={selected}
         expanded={false}
+        offsetX={offsetX}
         offsetY={offsetY}
         ariaLabel={`Group ${node.label}: ${node.detail ?? ''}`}
         onSelect={onSelect}
@@ -564,6 +576,7 @@ export const FlowNodeView = memo(function FlowNodeView({
       status={status}
       selected={selected}
       expanded={expanded}
+      offsetX={offsetX}
       offsetY={offsetY}
       ariaLabel={finished ? 'Final result' : 'Final result (pending)'}
       onSelect={onSelect}

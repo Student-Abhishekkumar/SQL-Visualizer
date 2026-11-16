@@ -793,6 +793,22 @@ body {
   transform: none;
 }
 
+/* While a node itself is being dragged, every child keeps the grabbing
+   cursor and the hover lift is suppressed. */
+.flow-canvas-node-dragging,
+.flow-canvas-node-dragging .flow-node,
+.flow-canvas-node-dragging .flow-node * {
+  cursor: grabbing !important;
+}
+
+.flow-canvas-node-dragging .flow-node {
+  transform: none;
+}
+
+.flow-canvas-node-dragging .flow-node[data-status='active'] {
+  animation: none;
+}
+
 /* Motion: nodes settle in, active stages pulse gently, active wires
    march so their direction is readable even between packets. */
 @keyframes flow-node-in {

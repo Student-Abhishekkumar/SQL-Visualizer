@@ -57,6 +57,8 @@ export function socketPoint(
  * placement rather than the builder's static coordinates.
  */
 export interface FlowPlacement {
+  /** Live left position (defaults to the node's built x). */
+  x?: number
   y: number
   height: number
 }
@@ -67,7 +69,7 @@ function placementPoint(
   placement?: FlowPlacement,
 ): FlowPoint {
   const offset = socketOffset(node, socket, placement?.height ?? node.height)
-  return { x: node.x + offset.x, y: (placement?.y ?? node.y) + offset.y }
+  return { x: (placement?.x ?? node.x) + offset.x, y: (placement?.y ?? node.y) + offset.y }
 }
 
 /**

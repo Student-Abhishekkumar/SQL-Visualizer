@@ -103,6 +103,28 @@ export function FlowCanvas({
   // Pointer-hovered node, used to emphasize its real data connections
   // without requiring the user to select/inspect it first.
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null)
+  // User-dragged node offsets, keyed to the graph instance so a new trace
+  // starts from the deterministic layout again.
+  const [nodeOffsetState, setNodeOffsetState] = useState<{
+    graph: FlowGraph | null
+    offsets: ReadonlyMap<string, { x: number; y: number }>
+  }>({ graph: null, offsets: new Map() })
+  const nodeOffsets = useMemo(
+    () =>
+      nodeOffsetState.graph === graph
+        ? nodeOffsetState.offsets
+        : new Map<string, { x: number; y: number }>(),
+    [graph, nodeOffsetState],
+  )
+  const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null)
+  const nodeDragRef = useRef<{
+    nodeId: string
+    startX: number
+    startY: number
+    offsetX: number
+    offsetY: number
+    moved: boolean
+  } | null>(null)
   const panRef = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null)
   // Mirror of `zoom` for pointer-anchored maths. Reading the previous
   // zoom synchronously keeps repeated wheel ticks exact instead of
@@ -273,13 +295,29 @@ export function FlowCanvas({
 
   // Wheel/trackpad zoom is registered natively so `preventDefault` is
   // allowed (React's delegated wheel listener is passive, which would let
-  // the page scroll while zooming with a trackpad).
+  // the page scroll while zooming with a trackpad). Plain vertical wheel
+  // zooms; pinch (ctrl/meta) also zooms; shift or a dominant horizontal
+  // delta pans, which makes two-finger trackpad panning work.
   useEffect(() => {
     const container = containerRef.current
     if (container === null) return
     const handleWheel = (event: WheelEvent): void => {
-      if (event.deltaY === 0) return
+      if (event.deltaX === 0 && event.deltaY === 0) return
       event.preventDefault()
+      if (event.ctrlKey || event.metaKey) {
+        zoomAt(event.deltaY < 0 ? 1.12 : 1 / 1.12, {
+          x: event.clientX,
+          y: event.clientY,
+        })
+        return
+      }
+      const horizontal = event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)
+      if (horizontal) {
+        const dx = event.shiftKey && event.deltaX === 0 ? event.deltaY : event.deltaX
+        const dy = event.shiftKey ? 0 : event.deltaY
+        setPan((current) => ({ x: current.x - dx, y: current.y - dy }))
+        return
+      }
       // `deltaMode` 1 is line-based (Firefox mouse wheels); treat every
       // tick as one step, matching the button zoom.
       zoomAt(event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP, {
@@ -294,29 +332,87 @@ export function FlowCanvas({
   const handlePointerDown = useCallback(
     (event: React.PointerEvent) => {
       if (event.button !== 0) return
-      // Node clicks inspect them; only empty-canvas drags pan.
-      if (event.target instanceof Element && event.target.closest('.flow-node, button') !== null) {
+      // Preview controls are real buttons and must keep their click.
+      if (event.target instanceof Element && event.target.closest('button') !== null) {
+        return
+      }
+      // A drag that starts on a node moves that node; empty canvas pans.
+      const nodeElement =
+        event.target instanceof Element ? event.target.closest('.flow-node') : null
+      if (nodeElement instanceof HTMLElement) {
+        const nodeId = nodeElement.dataset.nodeId
+        const node =
+          nodeId === undefined
+            ? undefined
+            : graph.nodes.find((candidate) => candidate.id === nodeId)
+        if (node !== undefined) {
+          const current = nodeOffsets.get(node.id) ?? { x: 0, y: 0 }
+          nodeDragRef.current = {
+            nodeId: node.id,
+            startX: event.clientX,
+            startY: event.clientY,
+            offsetX: current.x,
+            offsetY: current.y,
+            moved: false,
+          }
+          event.currentTarget.setPointerCapture?.(event.pointerId)
+        }
         return
       }
       panRef.current = { startX: event.clientX, startY: event.clientY, panX: pan.x, panY: pan.y }
       setPanning(true)
       event.currentTarget.setPointerCapture?.(event.pointerId)
     },
-    [pan],
+    [graph.nodes, nodeOffsets, pan],
   )
 
-  const handlePointerMove = useCallback((event: React.PointerEvent) => {
-    const state = panRef.current
-    if (state === null) return
-    setPan({
-      x: state.panX + (event.clientX - state.startX),
-      y: state.panY + (event.clientY - state.startY),
-    })
-  }, [])
+  const handlePointerMove = useCallback(
+    (event: React.PointerEvent) => {
+      const drag = nodeDragRef.current
+      if (drag !== null) {
+        const dx = event.clientX - drag.startX
+        const dy = event.clientY - drag.startY
+        if (!drag.moved) {
+          // A tiny movement is still a click on the node.
+          if (Math.abs(dx) + Math.abs(dy) < 3) return
+          drag.moved = true
+          setDraggingNodeId(drag.nodeId)
+        }
+        const node = graph.nodes.find((candidate) => candidate.id === drag.nodeId)
+        if (node === undefined) return
+        const height = nodeDisplayHeight(node, expandedNodeIds.has(node.id))
+        // Keep the whole node inside the canvas bounds so a drag can never
+        // lose it outside the pannable surface.
+        const minX = -node.x
+        const maxX = Math.max(minX, graph.bounds.width - node.width - node.x)
+        const minY = -node.y
+        const maxY = Math.max(minY, graph.bounds.height - height - node.y)
+        const x = Math.min(maxX, Math.max(minX, drag.offsetX + dx))
+        const y = Math.min(maxY, Math.max(minY, drag.offsetY + dy))
+        setNodeOffsetState((current) => {
+          const base =
+            current.graph === graph ? current.offsets : new Map<string, { x: number; y: number }>()
+          const next = new Map(base)
+          next.set(drag.nodeId, { x, y })
+          return { graph, offsets: next }
+        })
+        return
+      }
+      const state = panRef.current
+      if (state === null) return
+      setPan({
+        x: state.panX + (event.clientX - state.startX),
+        y: state.panY + (event.clientY - state.startY),
+      })
+    },
+    [expandedNodeIds, graph],
+  )
 
   const stopPanning = useCallback(() => {
     panRef.current = null
+    nodeDragRef.current = null
     setPanning(false)
+    setDraggingNodeId(null)
   }, [])
 
   const toggleExpand = useCallback((nodeId: string) => {
@@ -338,7 +434,7 @@ export function FlowCanvas({
     const expanded = graph.nodes.filter(
       (node) => expandedNodeIds.has(node.id) && node.expandedHeight !== undefined,
     )
-    const map = new Map<string, { y: number; height: number }>()
+    const map = new Map<string, { x: number; y: number; height: number }>()
     for (const node of graph.nodes) {
       let shift = 0
       for (const grown of expanded) {
@@ -350,13 +446,15 @@ export function FlowCanvas({
           shift += (grown.expandedHeight ?? grown.height) - grown.height
         }
       }
+      const drag = nodeOffsets.get(node.id)
       map.set(node.id, {
-        y: node.y + shift,
+        x: node.x + (drag?.x ?? 0),
+        y: node.y + shift + (drag?.y ?? 0),
         height: nodeDisplayHeight(node, expandedNodeIds.has(node.id)),
       })
     }
     return map
-  }, [graph.nodes, expandedNodeIds])
+  }, [graph.nodes, expandedNodeIds, nodeOffsets])
 
   const edgeGeometry = useMemo(() => {
     const byId = new Map(graph.nodes.map((node) => [node.id, node]))
@@ -461,7 +559,7 @@ export function FlowCanvas({
           </span>
         </span>
         <span className="ml-auto hidden text-[10px] text-text-muted lg:inline">
-          Drag to pan · scroll to zoom · click a node to inspect
+          Drag to pan · scroll to zoom · shift+scroll to pan · click to inspect
         </span>
         <div className="ml-auto flex items-center gap-1 lg:ml-2">
           <button
@@ -510,8 +608,12 @@ export function FlowCanvas({
       <div
         ref={containerRef}
         className={`relative min-h-0 w-full flex-1 touch-none overflow-hidden bg-bg ${
-          panning ? 'cursor-grabbing select-none' : 'cursor-grab'
-        } ${panning ? 'flow-canvas-panning' : ''}`}
+          panning || draggingNodeId !== null
+            ? 'cursor-grabbing select-none'
+            : 'cursor-grab'
+        } ${panning ? 'flow-canvas-panning' : ''} ${
+          draggingNodeId !== null ? 'flow-canvas-node-dragging' : ''
+        }`}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={stopPanning}
@@ -676,6 +778,7 @@ export function FlowCanvas({
               status={nodeStatuses[node.id] ?? 'pending'}
               selected={selectedNodeId === node.id}
               expanded={expandedNodeIds.has(node.id)}
+              offsetX={(placements.get(node.id)?.x ?? node.x) - node.x}
               offsetY={(placements.get(node.id)?.y ?? node.y) - node.y}
               onSelect={selectNode}
               onHover={hoverNode}

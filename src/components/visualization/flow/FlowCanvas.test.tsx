@@ -301,4 +301,85 @@ describe('FlowCanvas', () => {
     expect(screen.getByText('100%')).toBeTruthy()
     expect(surface.style.transform).toBe('translate(0px) scale(1)')
   })
+
+  it('keeps the graph point under the pointer fixed after panning', () => {
+    renderCanvas()
+    const canvas = screen.getByRole('application')
+    const surface = canvas.firstElementChild as HTMLElement
+
+    fireEvent.pointerDown(canvas, { button: 0, pointerId: 41, clientX: 100, clientY: 100 })
+    fireEvent.pointerMove(canvas, { pointerId: 41, clientX: 140, clientY: 120 })
+    fireEvent.pointerUp(canvas, { pointerId: 41 })
+    expect(surface.style.transform).toContain('translate(40px, 20px)')
+
+    fireEvent.wheel(canvas, { deltaY: -100, clientX: 200, clientY: 150 })
+    // graphX = (200 - 40) = 160, graphY = (150 - 20) = 130 at scale 1;
+    // after scale 1.2 the translation is 200 - 160 * 1.2 = 8 and
+    // 150 - 130 * 1.2 = -6, keeping the same graph point anchored.
+    expect(surface.style.transform).toContain('translate(8px, -6px)')
+    expect(surface.style.transform).toContain('scale(1.2)')
+  })
+
+  it('pans with shift+wheel and horizontal trackpad deltas without zooming', () => {
+    renderCanvas()
+    const canvas = screen.getByRole('application')
+    const surface = canvas.firstElementChild as HTMLElement
+
+    fireEvent.wheel(canvas, { deltaY: 100, shiftKey: true, clientX: 100, clientY: 100 })
+    expect(screen.getByText('100%')).toBeTruthy()
+    expect(surface.style.transform).toContain('translate(-100px)')
+
+    fireEvent.wheel(canvas, { deltaX: 30, deltaY: 5, clientX: 100, clientY: 100 })
+    expect(screen.getByText('100%')).toBeTruthy()
+    expect(surface.style.transform).toContain('translate(-130px, -5px)')
+  })
+
+  it('uses context-aware cursors for canvas and node dragging', () => {
+    renderCanvas()
+    const canvas = screen.getByRole('application')
+    const where = screen.getByRole('button', { name: /Operation WHERE/ })
+    expect(canvas.className).toContain('cursor-grab')
+    expect(where.className).toContain('cursor-pointer')
+
+    fireEvent.pointerDown(canvas, { button: 0, pointerId: 21, clientX: 5, clientY: 5 })
+    expect(canvas.className).toContain('flow-canvas-panning')
+    expect(canvas.className).toContain('cursor-grabbing')
+    fireEvent.pointerUp(canvas, { pointerId: 21 })
+
+    fireEvent.pointerDown(where, { button: 0, pointerId: 22, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(canvas, { pointerId: 22, clientX: 50, clientY: 40 })
+    expect(canvas.className).toContain('flow-canvas-node-dragging')
+    expect(canvas.className).toContain('cursor-grabbing')
+    fireEvent.pointerUp(canvas, { pointerId: 22 })
+    expect(canvas.className).not.toContain('flow-canvas-node-dragging')
+    expect(canvas.className).toContain('cursor-grab')
+  })
+
+  it('drags a node and re-routes its real connections without panning the camera', () => {
+    const { onSelectNode } = renderCanvas()
+    const canvas = screen.getByRole('application')
+    const surface = canvas.firstElementChild as HTMLElement
+    const where = screen.getByRole('button', { name: /Operation WHERE/ })
+    const outgoing = graph.edges.find((edge) => edge.from === 'op-WHERE')!
+    const path = document.getElementById(`edge-path-${outgoing.id}`)!
+    const beforePath = path.getAttribute('d')
+    const beforeLeft = Number.parseFloat(where.style.left)
+    const beforeTop = Number.parseFloat(where.style.top)
+    const beforeTransform = surface.style.transform
+
+    fireEvent.pointerDown(where, { button: 0, pointerId: 31, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(canvas, { pointerId: 31, clientX: 70, clientY: 50 })
+    fireEvent.pointerUp(canvas, { pointerId: 31 })
+
+    expect(Number.parseFloat(where.style.left)).toBeCloseTo(beforeLeft + 60, 5)
+    expect(Number.parseFloat(where.style.top)).toBeCloseTo(beforeTop + 40, 5)
+    // The camera itself never moved, and the wire still follows the node.
+    expect(surface.style.transform).toBe(beforeTransform)
+    expect(document.getElementById(`edge-path-${outgoing.id}`)!.getAttribute('d')).not.toBe(
+      beforePath,
+    )
+
+    fireEvent.click(where)
+    expect(onSelectNode).toHaveBeenCalledTimes(1)
+  })
 })
