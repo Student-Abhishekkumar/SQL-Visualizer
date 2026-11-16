@@ -1,394 +1,342 @@
-# SQL Visualizer
+<h1 align="center">
+  <img src="public/favicon.svg" width="72" height="72" alt="SQL Visualizer logo" /><br />
+  SQL Visualizer
+</h1>
 
-An interactive educational platform for learning SQL by *seeing* how databases process
-queries. Stage 1 delivers a professional, fully client-side SQL playground built on a
-real SQLite engine running in your browser — no backend, no accounts, no data leaves
-your machine.
+<p align="center">
+  <b>See what your SQL actually does.</b><br />
+  An open-source SQL playground that runs real SQLite in your browser and replays supported
+  <code>SELECT</code> queries as an animated, inspectable data-flow graph.
+</p>
 
-Stage 2 adds an animated SQL execution visualizer on top of the same real query, with a
-logical execution simulator, an animated data-flow canvas, a synchronized table view,
-and a playback controller shared across every panel.
+<p align="center">
+  <img alt="Status: active development" src="https://img.shields.io/badge/status-active_development-F59E0B?style=flat-square" />
+  <img alt="319 tests passing" src="https://img.shields.io/badge/tests-319_passing-2EA043?style=flat-square" />
+  <img alt="MIT license (declared)" src="https://img.shields.io/badge/license-MIT_declared-3B82F6?style=flat-square" />
+</p>
 
-The workspace now manages **multiple independent SQLite databases**, and an
-always-visible **Query ↔ Canvas** switch keeps both workspaces alive while you move
-between writing SQL and watching it run.
+<p align="center">
+  <a href="#preview">Preview</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#documentation">Documentation</a> ·
+  <a href="#roadmap">Roadmap</a> ·
+  <a href="#contributing">Contributing</a>
+</p>
 
-![SQL Visualizer — query workspace with database explorer, Monaco editor and results](docs/screenshots/query-workspace.png)
+<p align="center">
+  <a href="#quick-start"><b>Run it locally →</b></a> &nbsp;·&nbsp;
+  <a href="docs/ARCHITECTURE.md">Read the architecture</a>
+</p>
 
-## Screenshots
+<p align="center">
+  <img src="docs/assets/query-workspace.png" alt="SQL Visualizer query workspace with database explorer, Monaco SQL editor and real SQLite results" width="100%" />
+</p>
 
-The image above shows the **Query workspace**: the database explorer on the left, a real
-Monaco SQL editor in the middle and a tabbed results panel below. The example query joins
-`employees` to `departments`, filters by salary and shows the five matching rows with
-inferred column types.
+<p align="center">
+  <sub>The Query workspace: database explorer, Monaco editor, saved queries, history and real SQLite results.</sub>
+</p>
 
-### Canvas workspace
+---
 
-Press **Visualize** to replay the same query as an animated flow graph. Source tables,
-JOIN inputs, intermediate results, rejected WHERE rows and the final SELECT are real
-data from the active SQLite database; the playback bar and clause strip drive the
-animation and each node exposes its rows on demand.
+## Why it feels different
 
-![Canvas workspace showing the animated JOIN query pipeline](docs/screenshots/canvas-workspace.png)
+| 🎬 Learn by seeing | 🔒 Local by design | ✅ Real results first |
+|:---|:---|:---|
+| Every stage of a query becomes a node with real input and output rows — including the rows a filter rejects. | SQLite runs as WebAssembly inside the tab. No backend, no account, and no query data leaves your machine. | SQLite executes the query for real. The visual simulator then checks its final result against SQLite's output instead of inventing one. |
 
-### Database management
+SQL Visualizer is not a mock database diagram. It is a working SQL workspace with an educational
+execution model layered on top: write SQL, run it against SQLite, then switch to a Blender-inspired
+canvas and watch the logical pipeline process the same data.
 
-Every database is a separate SQLite snapshot with its own schema, stats and history.
-Switch between them from the header selector, or open the Database Manager to create,
-import, rename, duplicate, export, reset and delete databases.
+## Preview
+
+<p align="center">
+  <img src="docs/assets/canvas-playback.gif" alt="Animated SQL execution playback: FROM, JOIN, WHERE and SELECT stages flowing through a node canvas" width="700" />
+</p>
+
+<p align="center">
+  <sub><b>Playback</b> — a real <code>SELECT</code> moving through FROM → JOIN → WHERE → SELECT. Rejected rows branch off at the filter.</sub>
+</p>
 
 <table>
   <tr>
-    <td width="50%" valign="top">
-      <img src="docs/screenshots/database-selector.png" alt="Database selector listing five independent databases with the active one marked" />
+    <td width="50%" align="center" valign="top">
+      <img src="docs/assets/canvas-workspace.png" alt="Animated SQL flow canvas with source tables, join, filter and final result nodes" width="100%" />
       <br />
-      <sub><strong>Database selector</strong> — switch databases without losing work; the active database and its table/row counts are always visible.</sub>
+      <sub><b>Flow canvas</b> — source tables, operations, intermediate results and a final result node.</sub>
     </td>
-    <td width="50%" valign="top">
-      <img src="docs/screenshots/database-manager.png" alt="Database Manager with database list on the left and actions on the right" />
+    <td width="50%" align="center" valign="top">
+      <img src="docs/assets/table-view.png" alt="Synchronized table view at the WHERE stage showing kept and rejected rows" width="100%" />
       <br />
-      <sub><strong>Database Manager</strong> — create, import, rename, duplicate, export as <code>.sqlite</code> or <code>.sql</code>, reset or delete.</sub>
+      <sub><b>Table view</b> — the same playback, focused on row-level transformations.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <img src="docs/assets/node-inspector.png" alt="Node inspector showing rows in and rows out for the WHERE operation" width="100%" />
+      <br />
+      <sub><b>Node inspector</b> — click any node for the exact operation, rows in and rows out.</sub>
+    </td>
+    <td width="50%" align="center" valign="top">
+      <img src="docs/assets/stage-explanation.png" alt="Synchronized explanation panel with learning levels, what happened and a knowledge check" width="100%" />
+      <br />
+      <sub><b>Synchronized theory</b> — explanations, real counts and knowledge checks follow the active stage.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <img src="docs/assets/database-manager.png" alt="Database manager with four independent SQLite databases" width="100%" />
+      <br />
+      <sub><b>Database manager</b> — create, rename, duplicate, reset, import and export independent databases.</sub>
+    </td>
+    <td width="50%" align="center" valign="top">
+      <img src="docs/assets/schema-viewer.png" alt="Schema viewer showing columns, keys, indexes and the CREATE TABLE statement" width="100%" />
+      <br />
+      <sub><b>Schema viewer</b> — columns, keys, indexes and the original DDL for every table.</sub>
     </td>
   </tr>
 </table>
 
-The schema viewer shows real column types, primary/foreign keys, the original
-`CREATE TABLE` statement and sample rows for any table:
+## Features
 
-![Schema viewer for the employees table showing columns, keys, CREATE statement and sample rows](docs/screenshots/schema-viewer.png)
+### 🎬 Visual SQL learning
 
-## Main features (Stage 1)
+| Feature | What it does |
+|:---|:---|
+| **Animated data-flow canvas** | Renders the logical query pipeline as connected nodes: sources, joins, filters, grouping, projection and the final result. |
+| **Stage-by-stage playback** | Play, pause, step, seek, restart or change speed (0.5×–2×). Snapshots carry real rows through every stage. |
+| **Synchronized table view** | Switch from Flow to Table to inspect accepted, filtered, duplicated, grouped or skipped rows for the current stage. |
+| **Node inspector** | Click a node to see its operation, input/output counts and the real rows behind them. |
+| **Synchronized explanations** | Beginner, Intermediate and Advanced explanations update with the active stage, alongside documentation links and optional knowledge checks. |
 
-- **Multi-database workspace** — create, open, switch, rename, duplicate, reset,
-  export and delete independent SQLite databases. Each database is a separate
-  `sql.js` instance with its own serialized snapshot, metadata (name, description,
-  template, created/modified dates, table/row/byte stats) and history. The active
-  database is clearly marked, and the last selected one is restored after a refresh.
-- **Database templates** — start **blank**, from the optional **Example** University
-  schema, or from **Custom SQL** setup statements (replayed on reset). New databases
-  are never seeded unless you pick the example template.
-- **Import & export** — import `.db` / `.sqlite` / `.sqlite3` files (validated with a
-  SQLite header check and `PRAGMA integrity_check`) or `.sql` scripts. Imports always
-  create a new database and never overwrite an existing one. Export a real `.sqlite`
-  file or a correctly labelled `.sql` script (`CREATE TABLE`, `INSERT`, indexes, views,
-  triggers).
-- **Strict database isolation** — switching databases clears stale results,
-  visualization traces, schema and selection state, so data from another database can
-  never leak into the workspace.
-- **Query ↔ Canvas toggle** — a segmented `Code2` / `Workflow` control (plus
-  `Ctrl/Cmd+Shift+M`) switches the visible workspace without clearing the editor,
-  re-running SQL, resetting playback, or losing node selection, zoom or pan.
-- **Real SQL execution** — SQLite compiled to WebAssembly (`sql.js`), executing in a
-  Web Worker-free but non-blocking single-page session. `SELECT`, `WHERE`, `ORDER BY`,
-  `GROUP BY`, `HAVING`, `DISTINCT`, `LIMIT`, `OFFSET`, `INNER/LEFT/RIGHT/CROSS JOIN`,
-  aggregates, subqueries, `CREATE/INSERT/UPDATE/DELETE/DROP`, PRAGMA and multiple
-  statements separated by semicolons.
-- **Example University Database** — a realistic sample dataset (employees, departments,
-  projects, employee_projects) with real primary/foreign key constraints and foreign
-  key enforcement, available as a template or created automatically on first launch.
-- **Monaco SQL editor** — local (offline) Monaco bundle with SQL syntax highlighting,
-  line numbers, bracket matching, schema-aware autocomplete (tables, columns, typed
-  from the live database), dark/light themes and `Ctrl+Enter` execution.
-- **Professional results panel** — Results / Messages / Query Information tabs,
-  sticky-header data grid with row numbers and inferred column types, horizontal
-  scrolling, NULL/BLOB formatting, empty-result and no-result-set states.
-- **Database explorer** — expandable tables, column types, PK/FK indicators, live row
-  counts, indexes and constraints, the original `CREATE TABLE` statement, views and
-  triggers, and a per-table schema viewer with sample rows.
-- **Query history & saved queries** — every execution recorded with status, duration
-  and the database it ran against; filter history to the active database or view all.
-  History and saved queries persist in IndexedDB across refreshes.
-- **Database reset** — restore the active database to its template state (empty,
-  example seed, or custom setup SQL) with an explicit confirmation step.
-- **Format SQL / Examples** — a robust keyword-driven SQL formatter (never fails on
-  valid input) and a dropdown of 21 executable example queries — 14 core SQL
-  examples plus 7 visualization-focused queries.
-- **Theme toggle, settings, responsive layout** — dark-first design with a light
-  palette, draggable editor/results divider, and a mobile drawer sidebar.
+### 🧑‍💻 SQL workspace
 
-## Visualization features (Stage 2)
+| Feature | What it does |
+|:---|:---|
+| **Monaco SQL editor** | Syntax highlighting, schema-aware autocomplete and `Ctrl/Cmd + Enter` to run. |
+| **Real SQLite execution** | Queries execute against SQLite compiled to WebAssembly — results are not simulated. |
+| **Results, messages and query info** | Tabbed output with inferred display types, row counts, execution time and error messages. |
+| **Saved queries and history** | Named queries and an execution log persist across refreshes; history can be filtered by database. |
+| **Query / Canvas toggle** | Both workspaces stay mounted, so editor state, results, zoom, selection and playback survive the switch. `Ctrl/Cmd + Shift + M`. |
 
-Press **Visualize** to animate the query in the editor. Nothing is mocked: the
-visualizer reads the same live SQLite tables, simulates the logical pipeline
-(`FROM → JOIN → WHERE → GROUP BY → HAVING → SELECT → DISTINCT → ORDER BY → LIMIT`),
-and validates its final row count against what SQLite actually returned.
+### 🗄️ Database workspace
 
-- **Persistent Query/Canvas workspaces** — both views stay mounted, so switching keeps
-  the Monaco editor, last results, playback position, selected node, zoom, pan and
-  expanded previews exactly as they were. The canvas header shows the active database
-  and warns with a **re-visualize** action when the SQL has changed since the trace was
-  generated.
-- **Flow View (default)** — a query-shaped graph of compact, tactile node modules.
-  Source tables (including JOIN inputs) show their real name, alias, row count and a
-  live preview; operation nodes show the clause and its condition/expression;
-  intermediate results show the rows produced so far; WHERE/HAVING render rejected
-  branches; JOINs show inputs converging on two labelled data sockets; GROUP BY fans
-  out into real groups; the final result node shows the actual output rows. Every
-  operation has its own accent colour (source blue, JOIN purple, WHERE orange, GROUP BY
-  teal, HAVING amber, SELECT green, DISTINCT pink, ORDER BY cyan, LIMIT red), used by
-  both its header and its outgoing wires. Nodes use circular data/branch sockets and
-  smooth curved connections that are re-routed from real socket positions whenever a
-  preview grows.
-- **Animated data flow** — directional SVG wires with arrowheads, marching dashes and
-  moving packets on the connections carrying data right now. Completed, active,
-  pending, unsupported and rejected elements are visually distinct; packets are
-  representative indicators of the simulator's real movement events, never a claim
-  about a specific row, and they stop under `prefers-reduced-motion`.
-- **Expandable previews** — table, intermediate-result and rejected-row nodes reveal
-  up to ten real rows on demand. Expanding a preview grows the node, pushes nodes
-  below it in the same column out of the way, and re-routes the affected wires without
-  moving the rest of the pipeline.
-- **Shared playback** — play, pause, resume, restart, previous/next event, timeline
-  seek and 0.5×/1×/1.5×/2× speed. Flow View and Table View share one controller, so
-  switching views preserves the current stage.
-- **Synchronized navigation** — click a clause chip, a pipeline stage or a graph node
-  to seek to that stage, highlight the matching SQL in the editor, and inspect its
-  node. The camera follows the running stage during playback and scrolls sought-to
-  stages into view.
-- **Table View** — the exact input/output rows of the active stage, with rejected rows
-  highlighted and the same playback position as Flow View.
-- **Beginner guidance** — a stage explanation panel with Beginner/Intermediate/Advanced
-  levels, plain-language hints on nodes, and knowledge checks generated from the real
-  execution data.
-- **Canvas controls** — drag empty canvas to pan, pointer-centred wheel/trackpad zoom
-  (plus toolbar zoom, fit to screen and reset view), expand/collapse real row previews,
-  and connected-edge highlighting with unrelated wires dimmed when a node is selected.
-  Cursors and toolbar zoom follow the interaction, and the camera only follows playback
-  when the running stage leaves the visible band.
-- **Accessible & responsive** — nodes are keyboard-operable buttons with ARIA labels,
-  motion is disabled under `prefers-reduced-motion`, and a container-query layout keeps
-  the canvas usable on narrow screens (the details panel becomes a full-width overlay).
+| Feature | What it does |
+|:---|:---|
+| **Multiple independent databases** | Each database has its own SQLite file, schema, history and saved queries. |
+| **Templates and custom SQL** | Start blank, load the University example, or create a database from your own setup script. |
+| **Import and export** | Import an existing SQLite file; export a database as `.sqlite` or as SQL. |
+| **Persistent and local** | Database bytes, metadata, history and saved queries live in IndexedDB in your browser. |
+| **Schema explorer** | Browse tables and columns, inspect keys and indexes, and open the original `CREATE TABLE` statement. |
 
-## Technology stack
+## How it works
 
-| Layer         | Technology                                                      |
-| ------------- | --------------------------------------------------------------- |
-| Frontend      | React 19, TypeScript, Vite 8, Tailwind CSS 4                     |
-| Editor        | `@monaco-editor/react` + `monaco-editor` (bundled, no CDN)        |
-| Database      | `sql.js` (SQLite → WebAssembly), executed fully client-side       |
-| SQL parsing   | `node-sql-parser` (SQLite dialect, non-blocking — parse failures never block execution) |
-| State         | Zustand (editor / database / history / UI stores)                 |
-| Persistence   | IndexedDB via `idb` (per-database metadata + snapshots, history, saved queries, app state) |
-| Animation     | `motion` (UI transitions) + SVG SMIL (data packets)               |
-| Icons         | `lucide-react`                                                    |
-| Tests         | Vitest, React Testing Library, `fake-indexeddb`                   |
+```mermaid
+flowchart TD
+    Q[SQL query]
 
-## Installation
+    subgraph real[Real execution]
+        SQLITE[(SQLite WASM)]
+        RESULT[Results, messages, query info]
+    end
 
-Requirements: **Node.js 20+** (tested with Node 26), npm.
+    subgraph visual[Visual explanation]
+        PARSER[SQL parser]
+        AST[Typed AST + capability check]
+        SIM[Educational logical simulator]
+        SNAP[Stage snapshots + event trace]
+        CANVAS[Animated flow canvas]
+    end
 
-```powershell
-git clone <your-repo-url> "SQL Visualizer"
-cd "SQL Visualizer"
+    Q --> SQLITE
+    SQLITE --> RESULT
+    Q --> PARSER
+    PARSER --> AST
+    AST --> SIM
+    SIM --> SNAP
+    SNAP --> CANVAS
+    SQLITE -. compares final results .-> SNAP
+```
+
+SQLite is always the source of truth. The simulator is an **educational logical model**, not SQLite's
+physical query plan: it applies the stages to real table data, records immutable snapshots, and then
+validates its final result against SQLite — ordered when `ORDER BY` fully determines the order,
+unordered otherwise. If a construct cannot be modeled faithfully, the app explains why instead of
+guessing.
+
+<details>
+<summary><b>Pipeline stages the simulator can replay</b></summary>
+
+| Stage | What it shows |
+|:---|:---|
+| `FROM` | Source rows read from the live database. |
+| `JOIN` | Matched rows from INNER, LEFT and CROSS joins. |
+| `WHERE` | Rows accepted or rejected by the filter predicate. |
+| `GROUP BY` | Rows collected into groups. |
+| `HAVING` | Groups accepted or rejected by the group predicate. |
+| `SELECT` | Projected columns and computed values. |
+| `DISTINCT` | Duplicate projected rows removed. |
+| `ORDER BY` | Rows sorted by the requested keys. |
+| `LIMIT` / `OFFSET` | Rows kept or skipped at the end of the pipeline. |
+
+</details>
+
+<details>
+<summary><b>Scope and honest limits</b></summary>
+
+- Visualization is for **single SELECT statements**. DDL and DML still execute normally in SQLite, but are not visualized.
+- Supported joins: INNER, LEFT and CROSS. Comma cross joins are not supported.
+- Supported expressions include comparisons, `AND`/`OR`/`NOT`, `IN`, `BETWEEN`, `IS NULL`, `LIKE`, arithmetic and `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`.
+- Not yet visualizable: CTEs, compound selects (`UNION` / `INTERSECT` / `EXCEPT`), subqueries, and other constructs the parser cannot model conservatively.
+- Large inputs are capped for visualization (500 rows, 2,000 events). The real SQLite result remains complete and is never truncated.
+
+See [docs/FEATURES.md](docs/FEATURES.md) for the full capability and limitation matrix.
+
+</details>
+
+## Technology
+
+| Layer | Stack |
+|:---|:---|
+| **Frontend** | <img alt="React 19" src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=0B1220" /> <img alt="TypeScript 7" src="https://img.shields.io/badge/TypeScript-7-3178C6?style=flat-square&logo=typescript&logoColor=white" /> <img alt="Vite 8" src="https://img.shields.io/badge/Vite-8-646CFF?style=flat-square&logo=vite&logoColor=white" /> <img alt="Tailwind CSS 4" src="https://img.shields.io/badge/Tailwind_CSS-4-06B6D4?style=flat-square&logo=tailwindcss&logoColor=white" /> |
+| **SQL engine** | <img alt="SQLite via sql.js" src="https://img.shields.io/badge/SQLite-sql.js_1.16-003B57?style=flat-square&logo=sqlite&logoColor=white" /> <img alt="node-sql-parser 5" src="https://img.shields.io/badge/node--sql--parser-5-4B5563?style=flat-square" /> <img alt="Monaco Editor 0.57" src="https://img.shields.io/badge/Monaco_Editor-0.57-007ACC?style=flat-square&logo=visualstudiocode&logoColor=white" /> |
+| **State and persistence** | <img alt="Zustand 5" src="https://img.shields.io/badge/Zustand-5-2D3748?style=flat-square" /> <img alt="IndexedDB via idb" src="https://img.shields.io/badge/IndexedDB-idb_8-FFCA28?style=flat-square" /> |
+| **Visualization** | <img alt="Custom flow graph" src="https://img.shields.io/badge/flow_graph-custom_SVG_%26_DOM-4F8CFF?style=flat-square" /> <img alt="Motion 14" src="https://img.shields.io/badge/Motion-14-0055FF?style=flat-square" /> <img alt="Lucide icons" src="https://img.shields.io/badge/Lucide-icons-F56565?style=flat-square&logo=lucide&logoColor=white" /> |
+| **Testing and tooling** | <img alt="Vitest 5" src="https://img.shields.io/badge/Vitest-5-6E9F18?style=flat-square&logo=vitest&logoColor=white" /> <img alt="Testing Library" src="https://img.shields.io/badge/Testing_Library-16-E33332?style=flat-square&logo=testinglibrary&logoColor=white" /> <img alt="jsdom" src="https://img.shields.io/badge/jsdom-31-323232?style=flat-square&logo=javascript&logoColor=F7DF1E" /> <img alt="oxlint" src="https://img.shields.io/badge/oxlint-1.90-1F2937?style=flat-square" /> |
+
+## Quick start
+
+**Requirements:** Node.js `20.19+` or `22.12+`, npm, and a modern browser with WebAssembly and IndexedDB.
+
+```bash
+git clone https://github.com/Student-Abhishekkumar/SQL-Visualizer.git
+cd SQL-Visualizer
 npm install
 npm run dev
 ```
 
-Open the printed URL (default `http://localhost:5173`).
+Open <http://localhost:5173>. The University example database is created on first launch.
 
-## Development commands (PowerShell / VS Code)
+| Command | What it does |
+|:---|:---|
+| `npm run dev` | Start the Vite development server. |
+| `npm run build` | Type-check and build production assets to `dist/`. |
+| `npm test` | Run the full Vitest suite (22 files, 319 tests). |
+| `npm run lint` | Lint the project with oxlint. |
+| `npm run typecheck` | Run the TypeScript project build without emitting. |
 
-| Command             | Purpose                                   |
-| ------------------- | ----------------------------------------- |
-| `npm run dev`       | Start the dev server with HMR             |
-| `npm run build`     | Type-check (`tsc -b`) + production build  |
-| `npm run preview`   | Serve the production build locally        |
-| `npm test`          | Run the Vitest suite once                 |
-| `npm run test:watch`| Run Vitest in watch mode                  |
-| `npm run typecheck` | TypeScript project check only             |
-| `npm run lint`      | oxlint                                    |
+## Project structure
 
-## Architecture
-
-```
+```text
 src/
-  app/
-    App.tsx                     # Root: bootstrap, splash/error states
-    providers/ThemeProvider.tsx # Persisted dark/light theme on <html>
-    monacoSetup.ts              # Local Monaco, themes, schema autocomplete
-    devBridge.ts                # DEV-only automation hook (tree-shaken in prod)
-  components/
-    layout/    Navbar, Sidebar, MainLayout (split + mounted views),
-               WorkspaceViewToggle, SettingsModal
-    editor/    SQLEditor (Monaco), EditorToolbar, exampleQueries.ts
-    database/  DatabaseExplorer, TableNode, SchemaViewer,
-               DatabaseSelector, DatabaseManager, CreateDatabaseForm
-    results/   ResultsPanel, ResultsTable, MessagesPanel, QueryInfo
-    history/   QueryHistory, SavedQueries
-    common/    Button, Tabs, Modal, Tooltip
-    visualization/
-      VisualizationWorkspace.tsx  # Flow/Table workspace + shared playback UI
-      PipelinePanel.tsx            # Stage list (seek)
-      TransformationPanel.tsx      # Table View for the active stage
-      ExplanationPanel.tsx         # Levels, hints, knowledge checks
-      PlaybackControls.tsx         # Play/pause/seek/speed/restart
-      RowTable.tsx                 # Shared data grid
-      ClauseStrip.tsx              # Clickable SQL clauses → stages
-      flow/
-        FlowView.tsx               # Derives playback state → canvas props
-        FlowCanvas.tsx             # Pan/zoom camera, SVG wires, packets
-        FlowNodeView.tsx           # Node modules, sockets, previews
-        nodeAccent.ts              # Operation → accent colour identity
-        NodeInspector.tsx          # Selected-node details with real rows
-  services/
-    database/
-      databaseManager.ts       # Multi-database lifecycle: create/open/switch/
-                               #   rename/duplicate/delete/reset/import/export
-      databaseInitializer.ts   # Backwards-compatible lifecycle facade
-      templates.ts             # Blank / Example / Custom starter templates
-      databaseDump.ts          # Labelled SQL script generation
-      sqliteService.ts         # SQLite WASM engine wrapper + batch executor
-      schemaService.ts         # Live schema introspection (tables/columns/
-                               #   indexes/views/triggers/CREATE SQL)
-      seedData.ts              # University schema + seed rows (example template)
-      wasmConfig.ts            # Browser WASM asset wiring
-    sql/
-      sqlParser.ts             # node-sql-parser wrapper (types, tables, errors)
-      sqlFormatter.ts          # Keyword-driven SQL pretty-printer
-    visualization/
-      simulator.ts             # Logical pipeline simulator → trace/snapshots
-      validation.ts            # Parity check against real SQLite row counts
-      graphBuilder.ts          # Deterministic flow graph + playback state
-      flowGeometry.ts          # Socket centres + cubic wire routing
-      clauseMapper.ts          # Clause spans for editor highlighting
-    persistence/
-      persistenceService.ts    # IndexedDB v2: databases/snapshots/app state,
-                               #   history + saved queries, legacy migration
-  store/
-    editorStore.ts             # Editor content (survives view switches)
-    databaseStore.ts           # Active DB, metadata list, execution, manager actions
-    historyStore.ts            # History + saved queries (database-tagged, persisted)
-    uiStore.ts                 # Theme, workspace view, modals, sidebar
-    visualizationStore.ts      # Trace + shared playback controller
-  types/
-    query.ts                   # StatementResult, QueryExecutionResult, History…
-    database.ts                # Table/Index/DatabaseSchema, DatabaseInfo…
-    visualization.ts           # Trace, events, snapshots, capability
-    flowGraph.ts               # Flow graph nodes/edges/bounds contracts
-  hooks/
-    useSQLExecution.ts         # Editor → engine → history bridge
-  utils/
-    download.ts                # Browser file downloads for exports
+├─ app/                   App shell, theme provider, Monaco setup
+├─ components/
+│  ├─ editor/             Monaco SQL editor, toolbar, example queries
+│  ├─ database/           Explorer, manager, schema viewer, database selector
+│  ├─ results/            Results table, messages, query information
+│  ├─ visualization/      Flow canvas, playback, table view, inspector, explanations
+│  └─ layout/             Navbar, sidebar, workspace toggle, settings
+├─ services/
+│  ├─ database/           SQLite WASM engine, multi-database manager, seed data
+│  ├─ sql/                Parsing and SQL formatting
+│  ├─ visualization/      AST interpreter, capability analyzer, simulator, graph builder
+│  └─ persistence/        IndexedDB persistence and migration
+├─ store/                 Zustand stores for database, editor, history, UI and playback
+├─ types/                 Shared TypeScript contracts
+└─ test/                  Test setup helpers
+docs/                     Architecture, feature reference, development guide and assets
+public/                   Static assets
 ```
 
-### Database architecture
+Only the directories that matter for orientation are shown; component-level tests live next to
+their implementation.
 
-- `sql.js` initializes once. `databaseManager` owns exactly one live
-  `SQLiteDatabase` connection at a time plus the metadata list for every known
-  database, so a query can only ever target the active database.
-- Every database has a persistent `DatabaseInfo` record (`id`, name, description,
-  template, timestamps, cached table/row/byte stats) and a serialized snapshot in
-  IndexedDB. Mutating executions re-snapshot the active database and refresh its stats.
-- Switching opens the target snapshot **before** closing the previous connection, so a
-  failed switch leaves the current database usable. A missing or corrupt snapshot is
-  rebuilt from that database's template.
-- First run creates the optional Example Database (University schema + seed) to
-  preserve the original experience. Every other new database stays exactly as created.
-- Import validates SQLite files with a header check and `PRAGMA integrity_check`, and
-  always creates a new database (unique name suffix) — it never overwrites one.
-- History and saved queries are tagged with the database id. Legacy rows from the
-  previous single-database version are migrated and tagged automatically.
-- `PRAGMA foreign_keys = ON` is applied per connection, so FK constraints are always
-  enforced — including in the playground.
+## What a query becomes
 
-### IndexedDB schema (version 2)
+```sql
+SELECT d.department_name,
+       COUNT(*)      AS employees,
+       SUM(e.salary) AS payroll
+FROM employees AS e
+JOIN departments AS d ON d.id = e.department_id
+WHERE e.salary > 30000
+GROUP BY d.department_name
+HAVING COUNT(*) >= 2
+ORDER BY payroll DESC;
+```
 
-| Store       | Key                    | Contents                                   |
-| ----------- | ---------------------- | ------------------------------------------ |
-| `databases` | `id`                   | `DatabaseInfo` metadata records            |
-| `snapshots` | database `id`          | serialized SQLite bytes per database       |
-| `app`       | `key`                  | active database id, migration marker       |
-| `history`   | `id`                   | execution log (database-tagged)            |
-| `queries`   | `id`                   | saved queries (database-tagged)            |
-| `database`  | fixed `current`        | legacy v1 snapshot (migrated, left intact) |
+SQLite returns three rows from the University example:
 
-The upgrade migrates a v1 `database/current` snapshot into a proper database record
-once (guarded by a marker) so existing users keep their data.
+| department_name | employees | payroll |
+|:---|---:|---:|
+| Marketing | 3 | 152000 |
+| Engineering | 2 | 135000 |
+| HR | 2 | 110000 |
 
-### Workspace views
+Press **Visualize** and the same query unfolds as:
 
-`MainLayout` mounts the Query and Canvas workspaces at the same time and toggles
-visibility (`absolute inset-0` + `invisible/opacity-0`). Because nothing unmounts,
-switching views cannot clear the editor, re-run SQL, reset playback, change the active
-database, or lose node selection/zoom/pan. The choice is persisted in `localStorage`.
+`FROM employees` → `JOIN departments` → `WHERE salary > 30000` → `GROUP BY department_name` → `HAVING COUNT(*) >= 2` → `SELECT` → `ORDER BY payroll DESC`
 
-### SQL execution architecture
-
-`execute(sql)` in `databaseStore`:
-
-1. Rejects empty/comment-only input with a friendly message (never fakes a run).
-2. Splits the batch on top-level semicolons (quote/comment aware).
-3. Executes each statement via `prepare/step` (so zero-row queries still expose
-   column headers) and records per-statement type, rows, `rowsModified`, and duration.
-4. Stops at the first SQLite error, surfacing the statement index and the real error
-   text in the Messages tab.
-5. Persists a snapshot and refreshes the explorer after mutating statements.
-6. Returns a normalized `QueryExecutionResult` — also mirrored as flat
-   `columns/rows/rowCount` for the primary result set.
-
-Statements that return no result set are clearly distinguished from empty result sets;
-returned-row counts are never conflated with modified-row counts.
-
-## Visualization engine (Stage 2)
-
-SQLite does not expose intermediate execution states, so the visualizer runs a
-separate **logical simulator** (`services/visualization/simulator.ts`) over the same
-real table data:
-
-1. `node-sql-parser` extracts the query structure (tables, joins, predicates, groups,
-   projections, ordering, limits) in `astInterpreter`.
-2. The simulator applies the logical pipeline to the actual rows, emitting immutable
-   per-stage snapshots (rows, removed rows, roles, groups, columns, explanations) and a
-   chronologically ordered event trace — intro → per-stage row events → stage
-   completion → final.
-3. `validation.ts` compares the simulated final row count with the row count SQLite
-   actually returned and reports any mismatch instead of hiding it.
-4. `graphBuilder.ts` turns the trace into a deterministic, query-shaped graph
-   (positions, edges, branch columns, labels, bounds) with no external graph
-   dependency, and derives the playback state (hidden/pending/active/completed) for any
-   timeline position.
-
-The simulator never mutates the database, never fabricates rows, and never special-cases
-the sample schema — row identities stay stable across stages and truncation is always
-reported.
-
-## Current limitations
-
-- **Animated packets are representative, not per-row.** A packet shows that data is
-  flowing along a real dependency; it is not a specific record.
-- **Previews are capped** (3 rows collapsed / 10 expanded, 12 per source table) and
-  group fan-out is capped at 8 group nodes plus an “and more” node, so the canvas stays
-  bounded. Caps are reported, never silently applied to results.
-- **SVG `animateMotion` packets require a Chromium-based browser**; other engines show
-  the edges, arrowheads and marching overlay without moving packets.
-- **The flow layout is deterministic, not auto-directed.** Graphs are laid out
-  top-to-bottom with a side column for branches/groups; very wide combined queries may
-  need a pan to reach the branch column (the legend, zoom and fit controls help).
-- SQLite runs on the main thread; very large result sets could briefly block the UI
-  (the service is structured so a Web Worker host can be added without UI changes).
-- Only one database connection is live at a time; others live as snapshots in
-  IndexedDB, so very large numbers of databases increase storage and switch latency.
-- Imports must fit in browser memory, and `.sql` imports are executed as written —
-  an unsupported script fails with the SQLite error rather than being partially
-  imported.
-- Monaco's bundle makes the main JS chunk large (expected for a local Monaco setup).
-- Foreign keys are enforced but `ON DELETE`/`ON UPDATE` actions beyond the schema's
-  defaults are not surfaced in the explorer UI.
-- The SQL formatter is keyword-driven — it never fails, but does not reflow every
-  possible nesting style.
-- No E2E (Playwright) tests yet; testing is unit/integration (Vitest + RTL),
-  including real SQLite-in-Node integration tests, multi-database creation/isolation/
-  import/export scenario tests, IndexedDB persistence/migration tests and canvas
-  interaction/reduced-motion tests.
+Each node carries real row counts; filtered rows branch off at the WHERE gate, grouping collects
+rows into visible groups, and the final node shows the projected result. Because `ORDER BY` fully
+determines the order, the workspace reports **Validated (ordered) vs SQLite**.
 
 ## Roadmap
 
-- Explicit execution-plan ordering hints (`EXPLAIN QUERY PLAN`) next to the logical
-  pipeline.
-- Guided lessons that chain several queries around one concept.
-- Auto-arranged edge routing for extremely wide nested queries.
-- Optional Web Worker host for SQLite and simulation.
+The roadmap is directional, not a release commitment.
+
+### ✅ Shipped
+
+- [x] Real SQLite execution in the browser via WebAssembly
+- [x] Monaco SQL editor with results, messages and query information
+- [x] Multiple independent databases with templates, custom SQL, import/export and IndexedDB persistence
+- [x] Animated logical pipeline with stage snapshots, playback and speed control
+- [x] Flow and Table views, node inspector, synchronized explanations and knowledge checks
+- [x] SQLite result-parity validation and conservative unsupported-query reporting
+
+### 🚧 In progress
+
+- [ ] Broader SELECT coverage in the simulator: subqueries, CTEs and compound selects
+- [ ] More guided exercises built on the existing explanation and knowledge-check panels
+
+### 🧭 Planned
+
+- [ ] Shareable visualization traces
+- [ ] Export a visualization as an image or recording
+- [ ] A hosted public demo build
+
+## Documentation
+
+| Document | Contents |
+|:---|:---|
+| [Architecture](docs/ARCHITECTURE.md) | Runtime paths, simulator guarantees, validation, graph/playback state and persistence. |
+| [Feature reference](docs/FEATURES.md) | Complete feature matrix, supported SQL constructs and known limitations. |
+| [Development guide](docs/DEVELOPMENT.md) | Local setup, scripts, test strategy, conventions and change checklist. |
+| [Assets](docs/assets/) | Screenshots and the playback recording used in this README. |
+
+## Contributing
+
+Contributions are welcome — especially tests, simulator coverage and accessibility fixes.
+
+1. Fork the repository and create a focused branch.
+2. Run `npm install` and `npm test` to confirm the baseline.
+3. Make the change; add tests when touching the parser, simulator, validation or playback.
+4. Run `npm run lint`, `npm run typecheck` and `npm test`.
+5. Open a pull request describing the change; include a screenshot for UI work.
+
+For larger changes, open an issue first so the approach can be discussed. See the
+[development guide](docs/DEVELOPMENT.md) for architecture conventions and a pre-PR checklist.
 
 ## License
 
-MIT — built for learning.
+**MIT** — as declared in earlier revisions of this README. A `LICENSE` file is not checked in yet;
+if you need explicit terms before reusing the code, please open an issue first.
+
+---
+
+<p align="center">
+  <sub>Built with SQLite WASM, Monaco, React and a custom flow canvas. The node editor takes visual cues from Blender.</sub><br />
+  <sub><a href="#preview">Back to top ↑</a></sub>
+</p>
