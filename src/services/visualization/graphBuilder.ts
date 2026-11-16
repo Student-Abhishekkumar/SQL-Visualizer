@@ -212,9 +212,11 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
         ? Math.min(snapshot.groups.length, MAX_GROUP_NODES) +
           (snapshot.groups.length > MAX_GROUP_NODES ? 1 : 0)
         : 0
+    // Side columns start below the operation node, so their extent must
+    // include OP_H + the 16px gap before the first branch/group.
     const sideExtent =
       groupNodes > 0
-        ? 16 + groupNodes * (GROUP_H + GROUP_GAP)
+        ? OP_H + 16 + groupNodes * GROUP_H + Math.max(0, groupNodes - 1) * GROUP_GAP
         : snapshot.removedRows.length > 0
           ? OP_H + 24 + BRANCH_H
           : 0
@@ -620,17 +622,19 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
   }
 
   // Bounds come from the actual node extents so a query without branches
-  // or groups gets a narrower (and therefore more readable) canvas. The
-  // flow width covers only the main pipeline, letting narrow screens
-  // start at a readable zoom with branch columns one pan away.
+  // or groups gets a narrower (and therefore more readable) canvas, while
+  // tall source stacks and group fan-outs are never clipped. The flow
+  // width covers only the main pipeline, letting narrow screens start at
+  // a readable zoom with branch columns one pan away.
   const rightmost = nodes.reduce((max, node) => Math.max(max, node.x + node.width), 0)
+  const bottommost = nodes.reduce((max, node) => Math.max(max, node.y + node.height), 0)
   const flowRightmost = nodes
     .filter((node) => node.kind !== 'branch' && node.kind !== 'group')
     .reduce((max, node) => Math.max(max, node.x + node.width), 0)
   const width = rightmost + 48
   // Bottom breathing room so the floating camera controls never cover
   // the final-result node when the view is scrolled to the end.
-  const height = rowTop + FINAL_H + 96
+  const height = Math.max(rowTop + FINAL_H + 96, bottommost + 48)
 
   return {
     nodes,

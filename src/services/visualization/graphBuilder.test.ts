@@ -261,6 +261,19 @@ describe('buildFlowGraph — GROUP BY fan-out', () => {
     const overflow = groupNodes.find((node) => node.group === undefined)
     expect(overflow?.label).toContain('+3 more groups')
   })
+
+  it('reserves vertical room for the full group fan-out before the next stage', () => {
+    const graph = buildFlowGraph(groupTrace)
+    const groupNodes = graph.nodes.filter((node) => node.kind === 'group')
+    const groupBottom = Math.max(...groupNodes.map((node) => node.y + node.height))
+    const nextOp = graph.nodes.find((node) => node.id === 'op-SELECT')!
+    // The next pipeline row starts below every real group node, so a
+    // fan-out can never collide with the following stage.
+    expect(nextOp.y).toBeGreaterThan(groupBottom)
+    for (const node of groupNodes) {
+      expect(node.y + node.height).toBeLessThanOrEqual(graph.bounds.height)
+    }
+  })
 })
 
 describe('buildFlowGraph — layout quality', () => {
@@ -278,6 +291,33 @@ describe('buildFlowGraph — layout quality', () => {
       // Sources are stacked around the JOIN operation's center, so the
       // two input paths visibly converge on it.
       expect(Math.abs(sourceCenter - opCenter)).toBeLessThanOrEqual(260)
+    }
+  })
+
+  it('expands canvas bounds to include a tall source stack', () => {
+    const tables = [
+      sourceTable('employees', 'from', 8),
+      ...Array.from({ length: 5 }, (_, index) =>
+        sourceTable(`lookup_${index}`, 'join', 2, 'INNER JOIN'),
+      ),
+    ]
+    const graph = buildFlowGraph(
+      makeTrace({
+        stages: ['FROM', 'JOIN', 'SELECT'],
+        sourceTables: tables,
+        stageSnapshots: [snapshot('FROM', 8), snapshot('JOIN', 8), snapshot('SELECT', 8)],
+      }),
+    )
+    const sourceBottom = Math.max(
+      ...graph.nodes
+        .filter((node) => node.kind === 'source')
+        .map((node) => node.y + node.height),
+    )
+    // Six real source tables are taller than the pipeline itself, so the
+    // canvas must grow to contain them rather than clipping the inputs.
+    expect(sourceBottom).toBeGreaterThan(graph.nodes.find((node) => node.id === 'final')!.y)
+    for (const node of graph.nodes) {
+      expect(node.y + node.height).toBeLessThanOrEqual(graph.bounds.height)
     }
   })
 
