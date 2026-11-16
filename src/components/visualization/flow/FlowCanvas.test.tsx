@@ -178,6 +178,24 @@ describe('FlowCanvas', () => {
     expect(Number(unrelatedPath.getAttribute('opacity'))).toBeLessThan(0.5)
   })
 
+  it('emphasizes a hovered node’s connections and restores them on leave', () => {
+    renderCanvas()
+    const where = screen.getByRole('button', { name: /Operation WHERE/ })
+    const connected = graph.edges.find((edge) => edge.to === 'op-WHERE')!
+    const unrelated = graph.edges.find((edge) => edge.stage === 'SELECT')!
+    const connectedPath = document.getElementById(`edge-path-${connected.id}`)!
+    const unrelatedPath = document.getElementById(`edge-path-${unrelated.id}`)!
+    expect(Number(unrelatedPath.getAttribute('opacity'))).toBeGreaterThan(0.6)
+
+    fireEvent.pointerOver(where)
+    expect(connectedPath.getAttribute('stroke')).toBe('var(--accent)')
+    expect(Number(unrelatedPath.getAttribute('opacity'))).toBeLessThan(0.5)
+
+    fireEvent.pointerOut(where)
+    expect(connectedPath.getAttribute('stroke')).not.toBe('var(--accent)')
+    expect(Number(unrelatedPath.getAttribute('opacity'))).toBeGreaterThan(0.6)
+  })
+
   it('animates only the edges carrying data and respects reduced motion', () => {
     const state = deriveFlowState(graph, new Set(['FROM', 'WHERE']), 'SELECT', false)
     renderCanvas({ packetEdgeIds: state.packetEdgeIds })

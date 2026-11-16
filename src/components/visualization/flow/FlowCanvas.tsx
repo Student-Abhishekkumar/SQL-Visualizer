@@ -100,6 +100,9 @@ export function FlowCanvas({
   const [pan, setPan] = useState({ x: 0, y: 0 })
   const [panning, setPanning] = useState(false)
   const [expandedNodeIds, setExpandedNodeIds] = useState<ReadonlySet<string>>(new Set())
+  // Pointer-hovered node, used to emphasize its real data connections
+  // without requiring the user to select/inspect it first.
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null)
   const panRef = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null)
   // Mirror of `zoom` for pointer-anchored maths. Reading the previous
   // zoom synchronously keeps repeated wheel ticks exact instead of
@@ -112,6 +115,7 @@ export function FlowCanvas({
     selectRef.current = onSelectNode
   }, [onSelectNode])
   const selectNode = useCallback((node: FlowGraphNode) => selectRef.current(node), [])
+  const hoverNode = useCallback((nodeId: string | null) => setHoveredNodeId(nodeId), [])
 
   const clampZoom = useCallback(
     (value: number): number => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value)),
@@ -383,16 +387,25 @@ export function FlowCanvas({
     [graph.nodes, nodeStatuses],
   )
 
-  // Edges connected to the selected node are emphasized; everything
-  // else is dimmed so the selected path is easy to follow.
+  // Edges connected to the selected or hovered node are emphasized;
+  // everything else is dimmed so the current data path is easy to follow.
+  // A hovered node can disappear when playback rewinds; ignore a stale
+  // hover id so the remaining wires are not all treated as unrelated.
+  const liveHoveredNodeId =
+    hoveredNodeId !== null && graph.nodes.some((node) => node.id === hoveredNodeId)
+      ? hoveredNodeId
+      : null
+  const emphasisNodeId = liveHoveredNodeId ?? selectedNodeId
   const connectedEdgeIds = useMemo(() => {
-    if (selectedNodeId === null) return null
+    if (emphasisNodeId === null) return null
     return new Set(
       graph.edges
-        .filter((edge) => edge.from === selectedNodeId || edge.to === selectedNodeId)
+        .filter((edge) => edge.from === emphasisNodeId || edge.to === emphasisNodeId)
         .map((edge) => edge.id),
     )
-  }, [graph.edges, selectedNodeId])
+  }, [graph.edges, emphasisNodeId])
+
+  const packetEdgeIdSet = useMemo(() => new Set(packetEdgeIds), [packetEdgeIds])
 
   /** Draw emphasized edges last so they sit above dimmed ones. */
   const orderedEdges = useMemo(() => {
@@ -423,7 +436,7 @@ export function FlowCanvas({
           : 'url(#flow-arrow-idle)',
       dimmed,
       active,
-      flowing: packetEdgeIds.includes(edge.id),
+      flowing: packetEdgeIdSet.has(edge.id),
     }
   }
 
@@ -567,7 +580,22 @@ export function FlowCanvas({
                   className="flow-edge"
                   data-kind={edge.kind}
                   data-status={status}
+                  data-flowing={visual.flowing ? 'true' : undefined}
+                  data-emphasized={visual.dimmed ? undefined : 'true'}
                 >
+                  {/* Soft halo under an active wire so data movement stands
+                      out without thickening the arrow itself. */}
+                  {(visual.active || visual.flowing) && (
+                    <path
+                      d={d}
+                      fill="none"
+                      stroke={accentColor(visual.accent)}
+                      strokeWidth={visual.strokeWidth + 4.5}
+                      strokeLinecap="round"
+                      opacity={visual.dimmed ? 0.03 : 0.09}
+                      aria-hidden
+                    />
+                  )}
                   <path
                     id={`edge-path-${edge.id}`}
                     d={d}
@@ -650,6 +678,7 @@ export function FlowCanvas({
               expanded={expandedNodeIds.has(node.id)}
               offsetY={(placements.get(node.id)?.y ?? node.y) - node.y}
               onSelect={selectNode}
+              onHover={hoverNode}
               onToggleExpand={toggleExpand}
             />
           ))}

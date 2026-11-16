@@ -249,6 +249,7 @@ function NodeFrame({
   offsetY,
   ariaLabel,
   onSelect,
+  onHover,
   children,
 }: {
   node: FlowGraphNode
@@ -259,6 +260,7 @@ function NodeFrame({
   offsetY: number
   ariaLabel: string
   onSelect: (node: FlowGraphNode) => void
+  onHover?: (nodeId: string | null) => void
   children: React.ReactNode
 }) {
   if (status === 'hidden') return null
@@ -277,6 +279,8 @@ function NodeFrame({
       data-expanded={expanded ? 'true' : undefined}
       data-unsupported={node.unsupported === true ? 'true' : undefined}
       onClick={() => onSelect(node)}
+      onPointerEnter={() => onHover?.(node.id)}
+      onPointerLeave={() => onHover?.(null)}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault()
@@ -313,6 +317,8 @@ interface FlowNodeViewProps {
   /** Vertical offset applied when an earlier preview pushes this node down. */
   offsetY?: number
   onSelect: (node: FlowGraphNode) => void
+  /** Emphasize the wires connected to this node while hovered. */
+  onHover?: (nodeId: string | null) => void
   onToggleExpand: (nodeId: string) => void
 }
 
@@ -323,6 +329,7 @@ export const FlowNodeView = memo(function FlowNodeView({
   expanded,
   offsetY = 0,
   onSelect,
+  onHover,
   onToggleExpand,
 }: FlowNodeViewProps) {
   const limit = expanded ? EXPANDED_ROWS : PREVIEW_ROWS
@@ -342,6 +349,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         offsetY={offsetY}
         ariaLabel={`Source table ${node.label}, ${table.rowCount} rows`}
         onSelect={onSelect}
+        onHover={onHover}
       >
         <div className="flow-node-surface">
           <NodeHeader
@@ -390,6 +398,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         offsetY={offsetY}
         ariaLabel={`Operation ${node.label}: ${node.detail ?? ''}`}
         onSelect={onSelect}
+        onHover={onHover}
       >
         <div className="flow-node-surface">
           <NodeHeader
@@ -430,6 +439,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         offsetY={offsetY}
         ariaLabel={`Intermediate result after ${node.stage}, ${snapshot.outputRowCount} rows`}
         onSelect={onSelect}
+        onHover={onHover}
       >
         <div className="flow-node-surface">
           <NodeHeader
@@ -473,6 +483,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         offsetY={offsetY}
         ariaLabel={`${node.label} — removed records`}
         onSelect={onSelect}
+        onHover={onHover}
       >
         <div className="flow-node-surface">
           <NodeHeader
@@ -514,6 +525,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         offsetY={offsetY}
         ariaLabel={`Group ${node.label}: ${node.detail ?? ''}`}
         onSelect={onSelect}
+        onHover={onHover}
       >
         <div className="flow-node-surface">
           <NodeHeader
@@ -555,6 +567,7 @@ export const FlowNodeView = memo(function FlowNodeView({
       offsetY={offsetY}
       ariaLabel={finished ? 'Final result' : 'Final result (pending)'}
       onSelect={onSelect}
+      onHover={onHover}
     >
       <div className="flow-node-surface">
         <NodeHeader icon={Sparkles} title="Final result" badge="OUTPUT" status={status}>
