@@ -352,13 +352,13 @@ describe('Flow View behavior', () => {
     render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
 
     await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
-    const inspector = screen.getByRole('complementary', { name: 'Node inspector' })
+    const inspector = screen.getByRole('dialog', { name: 'Node inspector' })
     expect(inspector).toBeInTheDocument()
     // Real snapshot rows appear inside the inspector (and the canvas node).
     expect(screen.getAllByText('Emp1').length).toBeGreaterThan(0)
     // Closing returns to the explanation panel.
     await user.click(screen.getByRole('button', { name: 'Close node inspector' }))
-    expect(screen.queryByRole('complementary', { name: 'Node inspector' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: 'Node inspector' })).not.toBeInTheDocument()
   })
 
   it('selecting a node traces its path without moving playback', async () => {
@@ -447,11 +447,11 @@ describe('Flow View behavior', () => {
     render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
     const dataNode = screen.getByLabelText(/Intermediate result after WHERE/)
     await user.click(dataNode)
-    expect(screen.getByRole('complementary', { name: 'Node inspector' })).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Node inspector' })).toBeInTheDocument()
     const selectedIndex = useVisualizationStore.getState().eventIndex
 
     await user.click(dataNode)
-    expect(screen.queryByRole('complementary', { name: 'Node inspector' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: 'Node inspector' })).not.toBeInTheDocument()
     expect(useVisualizationStore.getState().eventIndex).toBe(selectedIndex)
   })
 
@@ -467,10 +467,292 @@ describe('Flow View behavior', () => {
 
     render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
     await user.click(screen.getByLabelText('Final result (pending)'))
-    expect(screen.getByRole('complementary', { name: 'Node inspector' })).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Node inspector' })).toBeInTheDocument()
     expect(screen.queryByText('FinalOnly')).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Jump to final result' }))
     expect(screen.getAllByText('FinalOnly').length).toBeGreaterThan(0)
+  })
+})
+
+/**
+ * Floating Node Inspector integration: one draggable, resizable window
+ * over the canvas, driven by node clicks.
+ */
+
+function installWorkspaceBounds(
+  width: number,
+  height: number,
+): { resize: (w: number, h: number) => void; restore: () => void } {
+  const originalRect = Element.prototype.getBoundingClientRect
+  let size = { width, height }
+  Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
+    if (this instanceof HTMLElement && this.hasAttribute('data-inspector-layer')) {
+      return {
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: size.width,
+        bottom: size.height,
+        width: size.width,
+        height: size.height,
+        toJSON: () => ({}),
+      } as DOMRect
+    }
+    return originalRect.call(this)
+  }
+  const originalResizeObserver = globalThis.ResizeObserver
+  class ResizeObserverMock {
+    private readonly callback: ResizeObserverCallback
+    constructor(callback: ResizeObserverCallback) {
+      this.callback = callback
+    }
+    observe(): void {
+      this.callback([], this as unknown as ResizeObserver)
+    }
+    unobserve(): void {}
+    disconnect(): void {}
+  }
+  globalThis.ResizeObserver = ResizeObserverMock as unknown as typeof ResizeObserver
+  return {
+    resize: (w, h) => {
+      size = { width: w, height: h }
+      fireEvent(window, new Event('resize'))
+    },
+    restore: () => {
+      Element.prototype.getBoundingClientRect = originalRect
+      globalThis.ResizeObserver = originalResizeObserver
+    },
+  }
+}
+
+function readyWorkspace(): void {
+  const store = useVisualizationStore.getState()
+  store.loadTrace(makeTrace())
+  useVisualizationStore.setState({ status: 'ready' })
+  useVisualizationStore.getState().seekToStage('WHERE')
+}
+
+describe('Floating node inspector', () => {
+  let bounds: ReturnType<typeof installWorkspaceBounds>
+
+  beforeEach(() => {
+    bounds = installWorkspaceBounds(1000, 800)
+  })
+
+  afterEach(() => {
+    bounds.restore()
+  })
+
+  it('opens a single popup and reuses it when another node is clicked', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+    const dialogs = screen.getAllByRole('dialog', { name: 'Node inspector' })
+    expect(dialogs).toHaveLength(1)
+    expect(dialogs[0]).toHaveAttribute('data-node-id', 'data-WHERE')
+
+    await user.click(screen.getByLabelText(/Operation SELECT/))
+    const after = screen.getAllByRole('dialog', { name: 'Node inspector' })
+    expect(after).toHaveLength(1)
+    expect(after[0]).toHaveAttribute('data-node-id', 'op-SELECT')
+  })
+
+  it('closes with the close button and restores position and size on reopen', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+    const first = screen.getByRole('dialog', { name: 'Node inspector' })
+    const left = first.style.left
+    const width = first.style.width
+
+    await user.click(screen.getByRole('button', { name: 'Close node inspector' }))
+    expect(screen.queryByRole('dialog', { name: 'Node inspector' })).not.toBeInTheDocument()
+
+    await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+    const reopened = screen.getByRole('dialog', { name: 'Node inspector' })
+    expect(reopened.style.left).toBe(left)
+    expect(reopened.style.width).toBe(width)
+  })
+
+  it('keeps position and size when selecting another node', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+    const first = screen.getByRole('dialog', { name: 'Node inspector' })
+    const left = first.style.left
+    const width = first.style.width
+
+    await user.click(screen.getByLabelText(/Operation SELECT/))
+    const second = screen.getByRole('dialog', { name: 'Node inspector' })
+    expect(second.style.left).toBe(left)
+    expect(second.style.width).toBe(width)
+  })
+
+  it('drags the popup without panning the canvas or moving nodes', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+    const surface = screen.getByRole('application').firstElementChild as HTMLElement
+    const canvasTransform = surface.style.transform
+    const node = screen.getByLabelText(/Intermediate result after WHERE/)
+    const nodeLeft = node.style.left
+    const before = screen.getByRole('dialog', { name: 'Node inspector' }).style.left
+
+    const header = screen.getByTestId('node-inspector-header')
+    fireEvent.pointerDown(header, { pointerId: 3, clientX: 100, clientY: 100 })
+    fireEvent.pointerMove(header, { pointerId: 3, clientX: 140, clientY: 130 })
+    fireEvent.pointerUp(header, { pointerId: 3 })
+
+    expect(screen.getByRole('dialog', { name: 'Node inspector' }).style.left).not.toBe(before)
+    expect(surface.style.transform).toBe(canvasTransform)
+    expect(node.style.left).toBe(nodeLeft)
+  })
+
+  it('does not open the popup when a node is dragged', () => {
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+    const canvas = screen.getByRole('application')
+    const node = screen.getByLabelText(/Operation WHERE/)
+    fireEvent.pointerDown(node, { button: 0, pointerId: 9, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(canvas, { pointerId: 9, clientX: 70, clientY: 60 })
+    fireEvent.pointerUp(canvas, { pointerId: 9 })
+    fireEvent.click(node)
+    expect(screen.queryByRole('dialog', { name: 'Node inspector' })).not.toBeInTheDocument()
+  })
+
+  it('opens the popup on pointer release alone, and hovering never opens it', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+    const canvas = screen.getByRole('application')
+    const node = screen.getByLabelText(/Intermediate result after WHERE/)
+
+    fireEvent.pointerOver(node)
+    expect(screen.queryByRole('dialog', { name: 'Node inspector' })).not.toBeInTheDocument()
+
+    // A real browser retargets the compatibility click to the captured
+    // canvas, so open on the pointer release itself.
+    fireEvent.pointerDown(node, { button: 0, pointerId: 77, clientX: 10, clientY: 10 })
+    fireEvent.pointerUp(canvas, { pointerId: 77 })
+    expect(screen.getByRole('dialog', { name: 'Node inspector' })).toHaveAttribute(
+      'data-node-id',
+      'data-WHERE',
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Close node inspector' }))
+    expect(screen.queryByRole('dialog', { name: 'Node inspector' })).not.toBeInTheDocument()
+  })
+
+  it('does not pan the canvas when clicking inside the popup', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+    const surface = screen.getByRole('application').firstElementChild as HTMLElement
+    const before = surface.style.transform
+
+    const tab = screen.getByRole('tab', { name: 'Details' })
+    fireEvent.pointerDown(tab, { button: 0, pointerId: 78, clientX: 300, clientY: 220 })
+    fireEvent.pointerMove(tab, { pointerId: 78, clientX: 360, clientY: 260 })
+    fireEvent.pointerUp(tab, { pointerId: 78 })
+
+    expect(surface.style.transform).toBe(before)
+    expect(screen.getByRole('dialog', { name: 'Node inspector' })).toBeInTheDocument()
+  })
+
+  it('keeps the selected node and popup position when playback changes', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+    const before = screen.getByRole('dialog', { name: 'Node inspector' })
+    const left = before.style.left
+    const width = before.style.width
+    const eventIndex = useVisualizationStore.getState().eventIndex
+
+    act(() => {
+      useVisualizationStore.getState().seekToStage('SELECT')
+    })
+
+    const after = screen.getByRole('dialog', { name: 'Node inspector' })
+    expect(after).toHaveAttribute('data-node-id', 'data-WHERE')
+    expect(after.style.left).toBe(left)
+    expect(after.style.width).toBe(width)
+    expect(useVisualizationStore.getState().eventIndex).toBeGreaterThan(eventIndex)
+  })
+
+  it('keeps cursor-hover tracing working while the popup is open', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+    fireEvent.pointerOver(screen.getByLabelText(/Operation WHERE/))
+    const canvasEl = screen.getByRole('application')
+    expect(canvasEl.getAttribute('data-hovered-node')).toBe('op-WHERE')
+    expect(canvasEl.getAttribute('data-trace-mode')).toBe('hover')
+    expect(document.querySelector('[data-hover-path="true"]')).not.toBeNull()
+  })
+
+  it('clamps the popup inside a small workspace', async () => {
+    bounds.restore()
+    bounds = installWorkspaceBounds(500, 400)
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+    const dialog = screen.getByRole('dialog', { name: 'Node inspector' })
+    const left = Number.parseFloat(dialog.style.left)
+    const top = Number.parseFloat(dialog.style.top)
+    const width = Number.parseFloat(dialog.style.width)
+    const height = Number.parseFloat(dialog.style.height)
+    expect(width).toBeGreaterThanOrEqual(380)
+    expect(height).toBeGreaterThanOrEqual(280)
+    expect(left + width).toBeLessThanOrEqual(500)
+    expect(top + height).toBeLessThanOrEqual(400)
+  })
+
+  it('reclamps the popup when the workspace shrinks', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+    await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+    const before = screen.getByRole('dialog', { name: 'Node inspector' }).style.left
+
+    act(() => {
+      bounds.resize(420, 360)
+    })
+    const dialog = screen.getByRole('dialog', { name: 'Node inspector' })
+    const left = Number.parseFloat(dialog.style.left)
+    const width = Number.parseFloat(dialog.style.width)
+    expect(left + width).toBeLessThanOrEqual(420)
+    expect(left).not.toBe(Number.parseFloat(before))
+  })
+
+  it('uses theme tokens so light and dark rendering stay consistent', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+    await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+    const dialog = screen.getByRole('dialog', { name: 'Node inspector' })
+    expect(dialog.className).toContain('bg-surface')
+    expect(dialog.className).toContain('border-border')
+
+    document.documentElement.classList.add('dark')
+    expect(screen.getByRole('dialog', { name: 'Node inspector' })).toBeInTheDocument()
+    document.documentElement.classList.remove('dark')
   })
 })

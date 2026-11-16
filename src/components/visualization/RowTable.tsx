@@ -32,6 +32,8 @@ interface RowTableProps {
   roles?: StageSnapshot['roles']
   /** Column indexes to emphasize (the evaluated expression). */
   highlightColumns?: number[]
+  /** Offset added to the 1-based row number (for paginated slices). */
+  startIndex?: number
   animate?: boolean
 }
 
@@ -40,6 +42,7 @@ export function RowTable({
   rows,
   roles,
   highlightColumns,
+  startIndex = 0,
   animate = true,
 }: RowTableProps) {
   const reducedMotion = useReducedMotion()
@@ -87,7 +90,7 @@ export function RowTable({
                   transition={{ duration: reducedMotion ? 0 : 0.18, ease: 'easeOut' }}
                   className={`border-b border-border/50 last:border-b-0 transition-colors ${ROLE_STYLES[role]}`}
                 >
-                  <td className="px-2 py-1.5 text-[10px] text-text-muted">{index + 1}</td>
+                  <td className="px-2 py-1.5 text-[10px] text-text-muted">{startIndex + index + 1}</td>
                   {row.values.map((value, valueIndex) => (
                     <td
                       key={valueIndex}

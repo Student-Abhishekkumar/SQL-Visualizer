@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   CircleAlert,
   CircleCheck,
@@ -17,9 +17,16 @@ import { ExplanationPanel } from './ExplanationPanel'
 import { PlaybackControls } from './PlaybackControls'
 import { ClauseStrip } from './ClauseStrip'
 import { FlowView } from './flow/FlowView'
-import { NodeInspector } from './flow/NodeInspector'
-import { buildFlowGraph } from '../../services/visualization/graphBuilder'
+import { FloatingNodeInspector } from './flow/FloatingNodeInspector'
+import { buildFlowGraph, deriveFlowState } from '../../services/visualization/graphBuilder'
 import { mapQueryClauses, spanOfStage } from '../../services/visualization/clauseMapper'
+import {
+  clampRect,
+  defaultRect,
+  rectNearAnchor,
+  type WindowBounds,
+  type WindowRect,
+} from '../../services/visualization/floatingWindow'
 import { useVisualizationStore } from '../../store/visualizationStore'
 import { useEditorStore } from '../../store/editorStore'
 import type { StageSnapshot, VisualizedStage } from '../../types/visualization'
@@ -87,6 +94,12 @@ export function VisualizationWorkspace({
   // Selected flow node id — resolved against the current graph, so a
   // stale id (new trace) simply resolves to nothing selected.
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+  // Floating inspector geometry. Owned here (not by the popup) so position
+  // and size survive switching nodes, closing/reopening and playback
+  // updates for the lifetime of the workspace.
+  const workspaceLayerRef = useRef<HTMLDivElement>(null)
+  const [inspectorBounds, setInspectorBounds] = useState<WindowBounds>({ width: 0, height: 0 })
+  const [inspectorRect, setInspectorRect] = useState<WindowRect | null>(null)
 
   const completedByStage = useMemo(() => {
     const map = new Map<VisualizedStage, StageSnapshot>()
@@ -115,12 +128,47 @@ export function VisualizationWorkspace({
     [flowGraph, selectedNodeId],
   )
 
-  // The final node exists from the start, but its rows are only real once
-  // playback has produced the last stage. Keep the inspector honest if the
-  // user inspects it early.
-  const lastStage = trace?.stages[trace.stages.length - 1]
-  const finalRevealed =
-    finished || (lastStage !== undefined && completedByStage.has(lastStage))
+  // One playback classification shared by the canvas and the inspector.
+  const flowState = useMemo(() => {
+    if (flowGraph === null) return null
+    return deriveFlowState(
+      flowGraph,
+      new Set(viewState.completedStages.map((snapshot) => snapshot.stage)),
+      viewState.activeStage,
+      viewState.finished,
+    )
+  }, [flowGraph, viewState.completedStages, viewState.activeStage, viewState.finished])
+
+  // The visible rectangle is always clamped into the measured workspace so
+  // a viewport resize can never strand the popup off-screen.
+  const inspectorDisplayRect =
+    inspectorRect === null ? null : clampRect(inspectorRect, inspectorBounds)
+
+  // Track the canvas layer size so the popup can be clamped into view.
+  // Measurement runs from the observer/resize callbacks, never straight
+  // from the effect body, to avoid cascading renders on mount.
+  useEffect(() => {
+    const element = workspaceLayerRef.current
+    if (element === null) return
+    const measure = (): void => {
+      const box = element.getBoundingClientRect()
+      setInspectorBounds((previous) =>
+        previous.width === box.width && previous.height === box.height
+          ? previous
+          : { width: box.width, height: box.height },
+      )
+    }
+    window.addEventListener('resize', measure)
+    let observer: ResizeObserver | null = null
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(measure)
+      observer.observe(element)
+    }
+    return () => {
+      window.removeEventListener('resize', measure)
+      observer?.disconnect()
+    }
+  }, [status])
 
   // Clause spans of the visualized query, used by the strip and for
   // pushing the playback-synced highlight into the Monaco editor.
@@ -150,6 +198,36 @@ export function VisualizationWorkspace({
     )
   }, [syncStage, clauseSpans, trace, setStageHighlight])
 
+  /**
+   * First-open placement: prefer the space beside the clicked node, and
+   * fall back to the workspace default when the node box is unavailable
+   * (e.g. before layout has run).
+   */
+  const initialRectFor = (nodeId: string): WindowRect => {
+    const layer = workspaceLayerRef.current
+    const layerBox = layer?.getBoundingClientRect()
+    if (layer === null || layerBox === undefined) {
+      const empty = { width: 0, height: 0 }
+      return rectNearAnchor(null, defaultRect(empty), empty)
+    }
+    const bounds: WindowBounds = { width: layerBox.width, height: layerBox.height }
+    const base = defaultRect(bounds)
+    const selector = `.flow-node[data-node-id="${nodeId.replace(/["\\]/g, '\\$&')}"]`
+    const nodeElement = layer.querySelector<HTMLElement>(selector)
+    if (nodeElement === null) return rectNearAnchor(null, base, bounds)
+    const nodeBox = nodeElement.getBoundingClientRect()
+    return rectNearAnchor(
+      {
+        x: nodeBox.left - layerBox.left,
+        y: nodeBox.top - layerBox.top,
+        width: nodeBox.width,
+        height: nodeBox.height,
+      },
+      base,
+      bounds,
+    )
+  }
+
   // Clicking a graph node selects it for inspection and traces its real
   // upstream data path. Selection is inspection-only: it never seeks the
   // timeline, re-runs SQL or changes playback. Seeking stays on the
@@ -162,6 +240,9 @@ export function VisualizationWorkspace({
       // current playback position is left untouched.
       setInspectedStage(null)
       return
+    }
+    if (inspectorRect === null) {
+      setInspectorRect(initialRectFor(node.id))
     }
     // Do not force the details panel open: on narrow layouts it replaces
     // the canvas, which would hide the very upstream trace the click just
@@ -301,13 +382,17 @@ export function VisualizationWorkspace({
           />
         </div>
 
-        {/* Center: Flow View (default) or Table View — same playback. */}
-        <div className="min-w-0 flex-1 overflow-hidden">
-          {viewMode === 'flow' && flowGraph !== null ? (
+        {/* Center: Flow View (default) or Table View — same playback.
+            The floating inspector is layered over this container. */}
+        <div
+          ref={workspaceLayerRef}
+          data-inspector-layer
+          className="relative min-w-0 flex-1 overflow-hidden"
+        >
+          {viewMode === 'flow' && flowGraph !== null && flowState !== null ? (
             <FlowView
               graph={flowGraph}
-              trace={trace}
-              viewState={viewState}
+              flowState={flowState}
               selectedNodeId={selectedNodeId}
               playing={playing}
               focusStage={inspecting ? displayStage : null}
@@ -320,13 +405,33 @@ export function VisualizationWorkspace({
               inspecting={inspecting}
             />
           )}
+
+          {viewMode === 'flow' &&
+            flowState !== null &&
+            selectedNode !== null &&
+            inspectorDisplayRect !== null && (
+              <FloatingNodeInspector
+                node={selectedNode}
+                trace={trace}
+                status={flowState.nodes[selectedNode.id]}
+                revealed={
+                  selectedNode.kind !== 'final' ||
+                  flowState.nodes[selectedNode.id] === 'completed'
+                }
+                rect={inspectorDisplayRect}
+                bounds={inspectorBounds}
+                onRectChange={setInspectorRect}
+                onClose={() => setSelectedNodeId(null)}
+              />
+            )}
         </div>
 
         {/* Narrow layout: the details panel replaces the canvas (above). */}
 
-        {/* Right: node inspector (when a node is selected) or explanation.
-            On narrow containers this becomes a full-size panel so the
-            details stay readable instead of covering half the canvas. */}
+        {/* Right: stage explanation. Node data lives in the floating
+            inspector over the canvas, not in this panel. On narrow
+            containers this becomes a full-size panel so the explanation
+            stays readable instead of covering half the canvas. */}
         <div
           className={`${
             detailsOpen ? 'flex' : 'hidden'
@@ -334,25 +439,13 @@ export function VisualizationWorkspace({
         >
           <button
             type="button"
-            onClick={() => {
-              setDetailsOpen(false)
-              setSelectedNodeId(null)
-            }}
+            onClick={() => setDetailsOpen(false)}
             aria-label="Close details"
             className="absolute top-1.5 right-1.5 z-50 rounded-md p-1 text-text-muted transition-colors hover:bg-surface-2 hover:text-text-primary @4xl:hidden"
           >
             <X className="size-3.5" aria-hidden />
           </button>
-          {selectedNode !== null ? (
-            <NodeInspector
-              node={selectedNode}
-              trace={trace}
-              revealed={selectedNode.kind !== 'final' || finalRevealed}
-              onClose={() => setSelectedNodeId(null)}
-            />
-          ) : (
-            <ExplanationPanel stage={displayStage} snapshot={displaySnapshot} />
-          )}
+          <ExplanationPanel stage={displayStage} snapshot={displaySnapshot} />
         </div>
       </div>
 

@@ -41,6 +41,12 @@ const MIN_ZOOM = 0.22
 const MAX_ZOOM = 2.2
 const ZOOM_STEP = 1.2
 const PACKETS_PER_EDGE = 3
+/**
+ * Pointer travel (px) that still counts as a click rather than a drag.
+ * Pointer capture retargets the compatibility `click` event to the canvas,
+ * so node selection must be decided on pointer release instead.
+ */
+const CLICK_MOVE_THRESHOLD = 5
 /** Stable empty collections so memoized values keep their identity. */
 const EMPTY_POSITIONS: ReadonlyMap<string, { x: number; y: number }> = new Map()
 const EMPTY_IDS: ReadonlySet<string> = new Set()
@@ -172,8 +178,14 @@ export function FlowCanvas({
   const [panning, setPanning] = useState(false)
   const [expandedNodeIds, setExpandedNodeIds] = useState<ReadonlySet<string>>(new Set())
   // Pointer-hovered node, used to emphasize its real data connections
-  // without requiring the user to select/inspect it first.
-  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null)
+  // without requiring the user to select/inspect it first. Keyed to the
+  // graph instance so a new trace drops any stale hover instead of
+  // painting a hover path for a pointer that has not moved.
+  const [hoverState, setHoverState] = useState<{
+    graph: FlowGraph | null
+    id: string | null
+  }>({ graph: null, id: null })
+  const hoveredNodeId = hoverState.graph === graph ? hoverState.id : null
   // Absolute node positions chosen by dragging/settling, keyed to the
   // graph instance so a new trace returns to the deterministic layout.
   const [placementState, setPlacementState] = useState<{
@@ -226,8 +238,8 @@ export function FlowCanvas({
     // for nodes passed under the cursor must not swap the inspected route
     // mid-drag.
     if (nodeDragRef.current !== null) return
-    setHoveredNodeId(nodeId)
-  }, [])
+    setHoverState({ graph, id: nodeId })
+  }, [graph])
 
   const commitPositions = useCallback(
     (positions: ReadonlyMap<string, { x: number; y: number }>) => {
@@ -543,16 +555,19 @@ export function FlowCanvas({
         const dy = event.clientY - drag.startY
         if (!drag.moved) {
           // A tiny movement is still a click on the node.
-          if (Math.abs(dx) + Math.abs(dy) < 3) return
+          if (Math.abs(dx) + Math.abs(dy) < CLICK_MOVE_THRESHOLD) return
           drag.moved = true
         }
         // The node follows the pointer exactly. Positions are absolute
-        // in graph space, so the layout can grow and the camera never
-        // has to move to keep the node under the cursor.
+        // in graph space while the surface is scaled by `zoom`, so the
+        // screen-space delta is converted back into graph space. The
+        // layout can grow and the camera never has to move to keep the
+        // node under the cursor.
+        const scale = zoomRef.current
         moveNode(
           drag.nodeId,
-          Math.max(FLOW_LAYOUT_MARGIN, drag.positionX + dx),
-          Math.max(FLOW_LAYOUT_MARGIN, drag.positionY + dy),
+          Math.max(FLOW_LAYOUT_MARGIN, drag.positionX + dx / scale),
+          Math.max(FLOW_LAYOUT_MARGIN, drag.positionY + dy / scale),
         )
         return
       }
@@ -624,11 +639,22 @@ export function FlowCanvas({
   const stopInteraction = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
       const drag = nodeDragRef.current
-      if (drag !== null && drag.moved) {
-        settleNodeDrag(drag.nodeId)
-        // Swallow the compatibility click that follows this drag. It is
-        // the only click suppressed; the next press clears the flag.
-        suppressClickRef.current = true
+      // A cancelled pointer never produces a click, so it must not select.
+      const cancelled = event.type === 'pointercancel'
+      if (drag !== null) {
+        if (drag.moved) {
+          settleNodeDrag(drag.nodeId)
+        } else if (!cancelled) {
+          // A press that never moved past the threshold is a genuine click.
+          // Select here rather than relying on the compatibility `click`
+          // event: pointer capture retargets it to the canvas, so the node's
+          // own onClick never fires in a real browser.
+          const node = graph.nodes.find((candidate) => candidate.id === drag.nodeId)
+          if (node !== undefined) selectNode(node)
+        }
+        // Swallow the compatibility click that follows this interaction so it
+        // cannot toggle the selection a second time. The next press clears it.
+        if (!cancelled) suppressClickRef.current = true
       }
       nodeDragRef.current = null
       panRef.current = null
@@ -636,7 +662,7 @@ export function FlowCanvas({
       setDraggingNodeId(null)
       releasePointerCapture(event.currentTarget, event.pointerId)
     },
-    [settleNodeDrag],
+    [graph.nodes, selectNode, settleNodeDrag],
   )
 
   const handleClickCapture = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
@@ -993,8 +1019,6 @@ export function FlowCanvas({
                   className="flow-edge"
                   data-kind={edge.kind}
                   data-status={status}
-                  data-flowing={visual.flowing ? 'true' : undefined}
-                  data-emphasized={visual.dimmed ? undefined : 'true'}
                   data-selected-path={
                     visual.onTrace && traceMode === 'selection' ? 'true' : undefined
                   }
@@ -1078,7 +1102,7 @@ export function FlowCanvas({
                 the selected upstream trace and live playback always move
                 in the true data-flow direction. */}
             {!reducedMotion && packetGroups.length > 0 && (
-              <g className="flow-packets" data-layer="packets" aria-hidden>
+              <g className="flow-packets" aria-hidden>
                 {packetGroups.map(({ edge, mode }) => {
                   const accent = edgeAccent(edge)
                   const tracePacket = mode === 'hover' || mode === 'selection'
@@ -1088,7 +1112,6 @@ export function FlowCanvas({
                     <g
                       key={edge.id}
                       data-edge-id={edge.id}
-                      data-accent={accent}
                       data-mode={mode}
                       // Keep playback visible during a pinned selection
                       // without competing with the brighter trace packets.
@@ -1098,7 +1121,6 @@ export function FlowCanvas({
                         <circle
                           key={packetIndex}
                           className="flow-packet"
-                          data-primary={packetIndex === 0 ? 'true' : undefined}
                           r={
                             tracePacket
                               ? packetIndex === 0

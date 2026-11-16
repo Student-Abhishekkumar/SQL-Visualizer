@@ -965,6 +965,25 @@ describe('FlowCanvas', () => {
     expect(canvas.className).toContain('cursor-grab')
   })
 
+  it('keeps a dragged node under the cursor at a non-default zoom', () => {
+    renderCanvas()
+    const canvas = screen.getByRole('application')
+    const where = screen.getByRole('button', { name: /Operation WHERE/ })
+    // The surface is scaled, so a screen-space drag must be converted into
+    // graph space; 120 screen px at 120% zoom is 100 graph px.
+    fireEvent.wheel(canvas, { deltaY: -100, clientX: 120, clientY: 90 })
+    expect(screen.getByText('120%')).toBeTruthy()
+    const beforeLeft = Number.parseFloat(where.style.left)
+    const beforeTop = Number.parseFloat(where.style.top)
+
+    fireEvent.pointerDown(where, { button: 0, pointerId: 301, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(canvas, { pointerId: 301, clientX: 130, clientY: 130 })
+    fireEvent.pointerUp(canvas, { pointerId: 301 })
+
+    expect(Number.parseFloat(where.style.left)).toBeCloseTo(beforeLeft + 100, 5)
+    expect(Number.parseFloat(where.style.top)).toBeCloseTo(beforeTop + 100, 5)
+  })
+
   it('drags a node and re-routes its real connections without panning the camera', () => {
     const { onSelectNode } = renderCanvas()
     const canvas = screen.getByRole('application')
@@ -1370,6 +1389,37 @@ describe('FlowCanvas', () => {
     fireEvent.click(where)
     expect(onSelectNode).toHaveBeenCalledTimes(1)
     expect(canvas.className).not.toContain('flow-canvas-node-dragging')
+  })
+
+  it('selects on pointer release with no click event (pointer capture retargets it)', () => {
+    const { onSelectNode } = renderCanvas()
+    const canvas = screen.getByRole('application')
+    const where = screen.getByRole('button', { name: /Operation WHERE/ })
+    fireEvent.pointerDown(where, { button: 0, pointerId: 212, clientX: 10, clientY: 10 })
+    // No `click` is fired: in a real browser the container's pointer capture
+    // retargets it away from the node, so selection cannot depend on onClick.
+    fireEvent.pointerUp(canvas, { pointerId: 212 })
+    expect(onSelectNode).toHaveBeenCalledTimes(1)
+    expect(onSelectNode.mock.calls[0]?.[0]?.id).toBe('op-WHERE')
+  })
+
+  it('does not select when the pointer moves beyond the click threshold', () => {
+    const { onSelectNode } = renderCanvas()
+    const canvas = screen.getByRole('application')
+    const where = screen.getByRole('button', { name: /Operation WHERE/ })
+    fireEvent.pointerDown(where, { button: 0, pointerId: 213, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(canvas, { pointerId: 213, clientX: 40, clientY: 40 })
+    fireEvent.pointerUp(canvas, { pointerId: 213 })
+    expect(onSelectNode).not.toHaveBeenCalled()
+  })
+
+  it('does not select when the pointer interaction is cancelled', () => {
+    const { onSelectNode } = renderCanvas()
+    const canvas = screen.getByRole('application')
+    const where = screen.getByRole('button', { name: /Operation WHERE/ })
+    fireEvent.pointerDown(where, { button: 0, pointerId: 214, clientX: 10, clientY: 10 })
+    fireEvent.pointerCancel(canvas, { pointerId: 214 })
+    expect(onSelectNode).not.toHaveBeenCalled()
   })
 
   it('resets node drag offsets when a new graph is rendered', () => {
