@@ -15,6 +15,11 @@ import {
   nodeDisplayHeight,
   routeEdgeCurve,
 } from '../../../services/visualization/flowGeometry'
+import {
+  FLOW_LAYOUT_MARGIN,
+  measureFlowLayout,
+  resolveFlowLayout,
+} from '../../../services/visualization/flowLayout'
 import { FlowNodeView } from './FlowNodeView'
 import {
   accentColor,
@@ -35,6 +40,71 @@ const MIN_ZOOM = 0.22
 const MAX_ZOOM = 2.2
 const ZOOM_STEP = 1.2
 const PACKETS_PER_EDGE = 3
+/** Stable empty collections so memoized values keep their identity. */
+const EMPTY_POSITIONS: ReadonlyMap<string, { x: number; y: number }> = new Map()
+const EMPTY_IDS: ReadonlySet<string> = new Set()
+
+/** Release a pointer capture without throwing when the browser already did. */
+function releasePointerCapture(element: HTMLElement, pointerId: number): void {
+  try {
+    if (element.releasePointerCapture === undefined) return
+    if (
+      element.hasPointerCapture === undefined ||
+      element.hasPointerCapture(pointerId)
+    ) {
+      element.releasePointerCapture(pointerId)
+    }
+  } catch {
+    // The browser releases capture automatically after pointerup/cancel.
+  }
+}
+
+interface NodePlacement {
+  x: number
+  y: number
+  height: number
+}
+
+/**
+ * Live node placements from the current user positions. Expanding a
+ * preview grows a node, so its bottom socket moves and the nodes below it
+ * in the same column are pushed down. Shared by rendering and the drop
+ * layout so both always agree, even before React paints the latest move.
+ */
+function computePlacements(
+  graph: FlowGraph,
+  positions: ReadonlyMap<string, { x: number; y: number }>,
+  expandedNodeIds: ReadonlySet<string>,
+): Map<string, NodePlacement> {
+  const currentX = (node: FlowGraphNode): number =>
+    positions.get(node.id)?.x ?? node.x
+  const currentY = (node: FlowGraphNode): number =>
+    positions.get(node.id)?.y ?? node.y
+  const expanded = graph.nodes.filter(
+    (node) => expandedNodeIds.has(node.id) && node.expandedHeight !== undefined,
+  )
+  const map = new Map<string, NodePlacement>()
+  for (const node of graph.nodes) {
+    let shift = 0
+    for (const grown of expanded) {
+      if (grown.id === node.id) continue
+      // Only nodes in the same live column and fully below the grown node
+      // move; other columns keep their slot.
+      if (
+        Math.abs(currentX(node) - currentX(grown)) < 1 &&
+        currentY(node) >= currentY(grown) + grown.height
+      ) {
+        shift += (grown.expandedHeight ?? grown.height) - grown.height
+      }
+    }
+    map.set(node.id, {
+      x: currentX(node),
+      y: currentY(node) + shift,
+      height: nodeDisplayHeight(node, expandedNodeIds.has(node.id)),
+    })
+  }
+  return map
+}
 
 /**
  * Wire colour identity. Main/final wires use their owning stage accent;
@@ -103,29 +173,42 @@ export function FlowCanvas({
   // Pointer-hovered node, used to emphasize its real data connections
   // without requiring the user to select/inspect it first.
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null)
-  // User-dragged node offsets, keyed to the graph instance so a new trace
-  // starts from the deterministic layout again.
-  const [nodeOffsetState, setNodeOffsetState] = useState<{
+  // Absolute node positions chosen by dragging/settling, keyed to the
+  // graph instance so a new trace returns to the deterministic layout.
+  const [placementState, setPlacementState] = useState<{
     graph: FlowGraph | null
-    offsets: ReadonlyMap<string, { x: number; y: number }>
-  }>({ graph: null, offsets: new Map() })
-  const nodeOffsets = useMemo(
-    () =>
-      nodeOffsetState.graph === graph
-        ? nodeOffsetState.offsets
-        : new Map<string, { x: number; y: number }>(),
-    [graph, nodeOffsetState],
-  )
+    positions: ReadonlyMap<string, { x: number; y: number }>
+  }>({ graph: null, positions: EMPTY_POSITIONS })
+  const placementRef = useRef(placementState)
+  const nodePositions =
+    placementState.graph === graph ? placementState.positions : EMPTY_POSITIONS
+  // Nodes the user has deliberately placed. Collision resolution prefers
+  // to move nodes that have not been hand-positioned.
+  const [manualState, setManualState] = useState<{
+    graph: FlowGraph | null
+    ids: ReadonlySet<string>
+  }>({ graph: null, ids: EMPTY_IDS })
   const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null)
   const nodeDragRef = useRef<{
     nodeId: string
+    pointerId: number
     startX: number
     startY: number
-    offsetX: number
-    offsetY: number
+    positionX: number
+    positionY: number
     moved: boolean
   } | null>(null)
-  const panRef = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null)
+  const panRef = useRef<{
+    pointerId: number
+    startX: number
+    startY: number
+    panX: number
+    panY: number
+  } | null>(null)
+  // A drag ends with a compatibility `click`; swallow exactly that click
+  // so dragging a node never selects or toggles it. The flag is reset on
+  // the next pointerdown, so the following intentional click works.
+  const suppressClickRef = useRef(false)
   // Mirror of `zoom` for pointer-anchored maths. Reading the previous
   // zoom synchronously keeps repeated wheel ticks exact instead of
   // depending on React's batching.
@@ -139,9 +222,62 @@ export function FlowCanvas({
   const selectNode = useCallback((node: FlowGraphNode) => selectRef.current(node), [])
   const hoverNode = useCallback((nodeId: string | null) => setHoveredNodeId(nodeId), [])
 
+  const commitPositions = useCallback(
+    (positions: ReadonlyMap<string, { x: number; y: number }>) => {
+      const next = { graph, positions }
+      placementRef.current = next
+      setPlacementState(next)
+    },
+    [graph],
+  )
+
+  const moveNode = useCallback(
+    (nodeId: string, x: number, y: number) => {
+      const current = placementRef.current
+      const base = current.graph === graph ? current.positions : EMPTY_POSITIONS
+      const next = new Map(base)
+      next.set(nodeId, { x, y })
+      commitPositions(next)
+    },
+    [commitPositions, graph],
+  )
+
   const clampZoom = useCallback(
     (value: number): number => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value)),
     [],
+  )
+
+  /**
+   * Live placement. Expanding a preview grows a node, so its bottom
+   * socket moves; nodes below it in the same column are pushed down to
+   * make room instead of overlapping. Wires are re-routed from the same
+   * deterministic socket geometry using these live positions, never
+   * re-measured from the DOM.
+   */
+  const placements = useMemo(
+    () => computePlacements(graph, nodePositions, expandedNodeIds),
+    [graph, nodePositions, expandedNodeIds],
+  )
+
+  // The SVG surface follows the real node extents, so a node can always
+  // be dragged or settled outside the builder's original bounds without
+  // being clipped. The builder bounds stay as a minimum.
+  const canvasBounds = useMemo(
+    () =>
+      measureFlowLayout(
+        graph.nodes.map((node) => {
+          const placement = placements.get(node.id)
+          return {
+            x: placement?.x ?? node.x,
+            y: placement?.y ?? node.y,
+            width: node.width,
+            height: placement?.height ?? node.height,
+            side: node.kind === 'branch' || node.kind === 'group',
+          }
+        }),
+        graph.bounds,
+      ),
+    [graph.bounds, graph.nodes, placements],
   )
 
   /** Position the camera: full fit, or width-fit anchored at the top. */
@@ -153,36 +289,36 @@ export function FlowCanvas({
       if (clientWidth === 0 || clientHeight === 0) return
       const padding = 30
       const fitScale = Math.min(
-        (clientWidth - padding * 2) / graph.bounds.width,
-        (clientHeight - padding * 2) / graph.bounds.height,
+        (clientWidth - padding * 2) / canvasBounds.width,
+        (clientHeight - padding * 2) / canvasBounds.height,
       )
-      const widthScale = (clientWidth - padding * 2) / Math.max(graph.bounds.flowWidth, 1)
+      const widthScale = (clientWidth - padding * 2) / Math.max(canvasBounds.flowWidth, 1)
       const nextZoom = clampZoom(mode === 'fit' ? fitScale : Math.min(widthScale, 1))
-      const contentWidth = mode === 'fit' ? graph.bounds.width : graph.bounds.flowWidth
+      const contentWidth = mode === 'fit' ? canvasBounds.width : canvasBounds.flowWidth
       zoomRef.current = nextZoom
       setZoom(nextZoom)
       setPan({
         x: Math.max((clientWidth - contentWidth * nextZoom) / 2, 8),
         y:
           mode === 'fit'
-            ? Math.max((clientHeight - graph.bounds.height * nextZoom) / 2, 8)
+            ? Math.max((clientHeight - canvasBounds.height * nextZoom) / 2, 8)
             : 12,
       })
     },
-    [graph.bounds, clampZoom],
+    [canvasBounds, clampZoom],
   )
 
   const fitToScreen = useCallback(() => applyCamera('fit'), [applyCamera])
 
   // Fit the graph the first time it is measurable (width-fit so labels
-  // stay readable), and again when a new trace produces different bounds.
-  const fittedKeyRef = useRef<string | null>(null)
+  // stay readable). Keyed to the graph instance, not the live bounds, so
+  // dragging or settling a node never yanks the camera.
+  const fittedGraphRef = useRef<FlowGraph | null>(null)
   useEffect(() => {
-    const key = `${graph.bounds.width}x${graph.bounds.height}x${graph.bounds.flowWidth}`
-    if (fittedKeyRef.current === key) return
+    if (fittedGraphRef.current === graph) return
     const container = containerRef.current
     if (container === null || container.clientWidth === 0) return
-    fittedKeyRef.current = key
+    fittedGraphRef.current = graph
     applyCamera('top')
   })
 
@@ -198,22 +334,24 @@ export function FlowCanvas({
     [graph.nodes, nodeStatuses],
   )
   useEffect(() => {
-    if (!following || activeNodeKey === '') return
+    if (!following || activeNodeKey === '' || draggingNodeId !== null) return
     const container = containerRef.current
     if (container === null || container.clientHeight === 0) return
     const ids = new Set(activeNodeKey.split('|'))
     const active = graph.nodes.find((node) => ids.has(node.id))
     if (active === undefined) return
+    const placement = placements.get(active.id)
+    if (placement === undefined) return
     const height = container.clientHeight
     const margin = Math.min(90, height * 0.22)
     setPan((current) => {
-      const top = current.y + active.y * zoom
-      const bottom = current.y + (active.y + active.height) * zoom
+      const top = current.y + placement.y * zoom
+      const bottom = current.y + (placement.y + placement.height) * zoom
       if (top >= margin && bottom <= height - margin) return current
-      if (top < margin) return { ...current, y: margin - active.y * zoom }
-      return { ...current, y: height - margin - (active.y + active.height) * zoom }
+      if (top < margin) return { ...current, y: margin - placement.y * zoom }
+      return { ...current, y: height - margin - (placement.y + placement.height) * zoom }
     })
-  }, [activeNodeKey, following, graph.nodes, zoom])
+  }, [activeNodeKey, draggingNodeId, following, graph.nodes, placements, zoom])
 
   // When the final result appears, make sure it is on screen once — the
   // tour ends on the produced rows, not on the last operation.
@@ -224,20 +362,24 @@ export function FlowCanvas({
       finalFocusedRef.current = null
       return
     }
+    // Never move the camera out from under an active node drag.
+    if (draggingNodeId !== null) return
     const key = `${graph.bounds.width}x${graph.bounds.height}`
     if (finalFocusedRef.current === key) return
     const container = containerRef.current
     if (container === null || container.clientHeight === 0) return
     const finalNode = graph.nodes.find((node) => node.id === 'final')
     if (finalNode === undefined) return
+    const placement = placements.get(finalNode.id)
+    if (placement === undefined) return
     finalFocusedRef.current = key
     const height = container.clientHeight
     setPan((current) => {
-      const bottom = current.y + (finalNode.y + finalNode.height) * zoom
+      const bottom = current.y + (placement.y + placement.height) * zoom
       if (bottom <= height - 20) return current
-      return { ...current, y: height - 20 - (finalNode.y + finalNode.height) * zoom }
+      return { ...current, y: height - 20 - (placement.y + placement.height) * zoom }
     })
-  }, [finalCompleted, graph.nodes, graph.bounds, zoom])
+  }, [draggingNodeId, finalCompleted, graph.nodes, graph.bounds, placements, zoom])
 
   // Seeking to a stage (clause strip, pipeline, node click) should bring the
   // node that produced it into view. Only the first matching operation node
@@ -255,17 +397,19 @@ export function FlowCanvas({
       (node) => node.stage === focusStage && node.kind === 'operation',
     )
     if (target === undefined) return
+    const placement = placements.get(target.id)
+    if (placement === undefined) return
     focusRef.current = { stage: focusStage, zoom }
     const height = container.clientHeight
     const margin = Math.min(90, height * 0.22)
     setPan((current) => {
-      const top = current.y + target.y * zoom
-      const bottom = current.y + (target.y + target.height) * zoom
+      const top = current.y + placement.y * zoom
+      const bottom = current.y + (placement.y + placement.height) * zoom
       if (top >= margin && bottom <= height - margin) return current
-      if (top < margin) return { ...current, y: margin - target.y * zoom }
-      return { ...current, y: height - margin - (target.y + target.height) * zoom }
+      if (top < margin) return { ...current, y: margin - placement.y * zoom }
+      return { ...current, y: height - margin - (placement.y + placement.height) * zoom }
     })
-  }, [focusStage, graph.nodes, zoom])
+  }, [focusStage, graph.nodes, placements, zoom])
 
   const zoomAt = useCallback(
     (factor: number, anchor?: { x: number; y: number }) => {
@@ -330,8 +474,10 @@ export function FlowCanvas({
   }, [zoomAt])
 
   const handlePointerDown = useCallback(
-    (event: React.PointerEvent) => {
+    (event: React.PointerEvent<HTMLDivElement>) => {
       if (event.button !== 0) return
+      // A stale suppression flag must never eat the next deliberate click.
+      suppressClickRef.current = false
       // Preview controls are real buttons and must keep their click.
       if (event.target instanceof Element && event.target.closest('button') !== null) {
         return
@@ -346,73 +492,151 @@ export function FlowCanvas({
             ? undefined
             : graph.nodes.find((candidate) => candidate.id === nodeId)
         if (node !== undefined) {
-          const current = nodeOffsets.get(node.id) ?? { x: 0, y: 0 }
+          // Stop native text selection / HTML drag before it can start.
+          // This is scoped to node drags: canvas panning is handled below.
+          event.preventDefault()
+          const placement = placementRef.current
+          const stored =
+            placement.graph === graph ? placement.positions.get(node.id) : undefined
+          const position = stored ?? { x: node.x, y: node.y }
           nodeDragRef.current = {
             nodeId: node.id,
+            pointerId: event.pointerId,
             startX: event.clientX,
             startY: event.clientY,
-            offsetX: current.x,
-            offsetY: current.y,
+            positionX: position.x,
+            positionY: position.y,
             moved: false,
           }
+          setDraggingNodeId(node.id)
           event.currentTarget.setPointerCapture?.(event.pointerId)
         }
         return
       }
-      panRef.current = { startX: event.clientX, startY: event.clientY, panX: pan.x, panY: pan.y }
+      event.preventDefault()
+      panRef.current = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        panX: pan.x,
+        panY: pan.y,
+      }
       setPanning(true)
       event.currentTarget.setPointerCapture?.(event.pointerId)
     },
-    [graph.nodes, nodeOffsets, pan],
+    [graph, pan],
   )
 
   const handlePointerMove = useCallback(
-    (event: React.PointerEvent) => {
+    (event: React.PointerEvent<HTMLDivElement>) => {
       const drag = nodeDragRef.current
       if (drag !== null) {
+        if (drag.pointerId !== event.pointerId) return
         const dx = event.clientX - drag.startX
         const dy = event.clientY - drag.startY
         if (!drag.moved) {
           // A tiny movement is still a click on the node.
           if (Math.abs(dx) + Math.abs(dy) < 3) return
           drag.moved = true
-          setDraggingNodeId(drag.nodeId)
         }
-        const node = graph.nodes.find((candidate) => candidate.id === drag.nodeId)
-        if (node === undefined) return
-        const height = nodeDisplayHeight(node, expandedNodeIds.has(node.id))
-        // Keep the whole node inside the canvas bounds so a drag can never
-        // lose it outside the pannable surface.
-        const minX = -node.x
-        const maxX = Math.max(minX, graph.bounds.width - node.width - node.x)
-        const minY = -node.y
-        const maxY = Math.max(minY, graph.bounds.height - height - node.y)
-        const x = Math.min(maxX, Math.max(minX, drag.offsetX + dx))
-        const y = Math.min(maxY, Math.max(minY, drag.offsetY + dy))
-        setNodeOffsetState((current) => {
-          const base =
-            current.graph === graph ? current.offsets : new Map<string, { x: number; y: number }>()
-          const next = new Map(base)
-          next.set(drag.nodeId, { x, y })
-          return { graph, offsets: next }
-        })
+        // The node follows the pointer exactly. Positions are absolute
+        // in graph space, so the layout can grow and the camera never
+        // has to move to keep the node under the cursor.
+        moveNode(
+          drag.nodeId,
+          Math.max(FLOW_LAYOUT_MARGIN, drag.positionX + dx),
+          Math.max(FLOW_LAYOUT_MARGIN, drag.positionY + dy),
+        )
         return
       }
       const state = panRef.current
-      if (state === null) return
+      if (state === null || state.pointerId !== event.pointerId) return
       setPan({
         x: state.panX + (event.clientX - state.startX),
         y: state.panY + (event.clientY - state.startY),
       })
     },
-    [expandedNodeIds, graph],
+    [moveNode],
   )
 
-  const stopPanning = useCallback(() => {
-    panRef.current = null
-    nodeDragRef.current = null
-    setPanning(false)
-    setDraggingNodeId(null)
+  /**
+   * On release, resolve only the collisions the drop created. The dragged
+   * node is pinned, so its chosen position survives; affected neighbours
+   * move just enough to restore the minimum spacing.
+   */
+  const settleNodeDrag = useCallback(
+    (draggedId: string) => {
+      const current = placementRef.current
+      const positions =
+        current.graph === graph ? current.positions : EMPTY_POSITIONS
+      const manual = manualState.graph === graph ? manualState.ids : EMPTY_IDS
+      // Expanded previews change a node's real height, so collision
+      // resolution uses the same live placement the canvas renders.
+      // Recomputed from the position ref (not the last render) so the
+      // final pointer move is always included.
+      const livePlacements = computePlacements(graph, positions, expandedNodeIds)
+      const offsets = new Map<string, { x: number; y: number }>()
+      const boxes = graph.nodes.map((node) => {
+        const user = positions.get(node.id) ?? { x: node.x, y: node.y }
+        const placement =
+          livePlacements.get(node.id) ?? { x: user.x, y: user.y, height: node.height }
+        offsets.set(node.id, {
+          x: placement.x - user.x,
+          y: placement.y - user.y,
+        })
+        return {
+          id: node.id,
+          x: placement.x,
+          y: placement.y,
+          width: node.width,
+          height: placement.height,
+          column: node.x,
+          manual: manual.has(node.id),
+        }
+      })
+      const resolved = resolveFlowLayout(boxes, { pinnedId: draggedId })
+      const next = new Map(positions)
+      for (const [id, position] of resolved) {
+        const offset = offsets.get(id) ?? { x: 0, y: 0 }
+        next.set(id, { x: position.x - offset.x, y: position.y - offset.y })
+      }
+      commitPositions(next)
+      setManualState((existing) => {
+        const base = existing.graph === graph ? existing.ids : EMPTY_IDS
+        if (base.has(draggedId)) {
+          return existing.graph === graph ? existing : { graph, ids: base }
+        }
+        const ids = new Set(base)
+        ids.add(draggedId)
+        return { graph, ids }
+      })
+    },
+    [commitPositions, expandedNodeIds, graph, manualState],
+  )
+
+  const stopInteraction = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const drag = nodeDragRef.current
+      if (drag !== null && drag.moved) {
+        settleNodeDrag(drag.nodeId)
+        // Swallow the compatibility click that follows this drag. It is
+        // the only click suppressed; the next press clears the flag.
+        suppressClickRef.current = true
+      }
+      nodeDragRef.current = null
+      panRef.current = null
+      setPanning(false)
+      setDraggingNodeId(null)
+      releasePointerCapture(event.currentTarget, event.pointerId)
+    },
+    [settleNodeDrag],
+  )
+
+  const handleClickCapture = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (!suppressClickRef.current) return
+    suppressClickRef.current = false
+    event.preventDefault()
+    event.stopPropagation()
   }, [])
 
   const toggleExpand = useCallback((nodeId: string) => {
@@ -423,38 +647,6 @@ export function FlowCanvas({
       return next
     })
   }, [])
-
-  /**
-   * Live placement. Expanding a preview grows a node, so its bottom
-   * socket moves; nodes below it are pushed down to make room instead of
-   * overlapping. Wires are re-routed from the same deterministic socket
-   * geometry using these live positions, never re-measured from the DOM.
-   */
-  const placements = useMemo(() => {
-    const expanded = graph.nodes.filter(
-      (node) => expandedNodeIds.has(node.id) && node.expandedHeight !== undefined,
-    )
-    const map = new Map<string, { x: number; y: number; height: number }>()
-    for (const node of graph.nodes) {
-      let shift = 0
-      for (const grown of expanded) {
-        if (grown.id === node.id) continue
-        // Only nodes in the same column and fully below the grown node
-        // move; other columns keep their slot, so a growing preview never
-        // shifts an unrelated pipeline branch.
-        if (node.x === grown.x && node.y >= grown.y + grown.height) {
-          shift += (grown.expandedHeight ?? grown.height) - grown.height
-        }
-      }
-      const drag = nodeOffsets.get(node.id)
-      map.set(node.id, {
-        x: node.x + (drag?.x ?? 0),
-        y: node.y + shift + (drag?.y ?? 0),
-        height: nodeDisplayHeight(node, expandedNodeIds.has(node.id)),
-      })
-    }
-    return map
-  }, [graph.nodes, expandedNodeIds, nodeOffsets])
 
   const edgeGeometry = useMemo(() => {
     const byId = new Map(graph.nodes.map((node) => [node.id, node]))
@@ -559,7 +751,7 @@ export function FlowCanvas({
           </span>
         </span>
         <span className="ml-auto hidden text-[10px] text-text-muted lg:inline">
-          Drag to pan · scroll to zoom · shift+scroll to pan · click to inspect
+          Drag nodes · drag canvas to pan · scroll to zoom · shift+scroll to pan
         </span>
         <div className="ml-auto flex items-center gap-1 lg:ml-2">
           <button
@@ -616,23 +808,25 @@ export function FlowCanvas({
         }`}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
-        onPointerUp={stopPanning}
-        onPointerCancel={stopPanning}
+        onPointerUp={stopInteraction}
+        onPointerCancel={stopInteraction}
+        onClickCapture={handleClickCapture}
+        onDragStart={(event) => event.preventDefault()}
         role="application"
         aria-label="Animated SQL data-flow canvas"
       >
         <div
           className="absolute origin-top-left"
           style={{
-            width: graph.bounds.width,
-            height: graph.bounds.height,
+            width: canvasBounds.width,
+            height: canvasBounds.height,
             transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
           }}
         >
           <svg
             className="pointer-events-none absolute inset-0"
-            width={graph.bounds.width}
-            height={graph.bounds.height}
+            width={canvasBounds.width}
+            height={canvasBounds.height}
             aria-hidden
           >
             <defs>
@@ -778,6 +972,7 @@ export function FlowCanvas({
               status={nodeStatuses[node.id] ?? 'pending'}
               selected={selectedNodeId === node.id}
               expanded={expandedNodeIds.has(node.id)}
+              dragging={draggingNodeId === node.id}
               offsetX={(placements.get(node.id)?.x ?? node.x) - node.x}
               offsetY={(placements.get(node.id)?.y ?? node.y) - node.y}
               onSelect={selectNode}

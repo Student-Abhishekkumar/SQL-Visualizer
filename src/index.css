@@ -205,6 +205,11 @@ body {
   --flow-accent: var(--node-source);
   --flow-accent-soft: var(--node-source-soft);
   --flow-accent-fg: var(--node-source-fg);
+  /* Node surfaces are drag handles, never editable text. This is scoped
+     to the graph: the editor, inspector and result tables keep their
+     normal text selection. */
+  -webkit-user-select: none;
+  user-select: none;
   background: var(--surface);
   border: 1px solid color-mix(in srgb, var(--flow-accent) 30%, var(--border));
   border-radius: 13px;
@@ -809,6 +814,26 @@ body {
 
 .flow-canvas-node-dragging .flow-node[data-status='active'] {
   animation: none;
+}
+
+/* The grabbed node lifts above every other node and keeps its tactile
+   shadow without the hover translate. */
+.flow-node[data-dragging='true'] {
+  cursor: grabbing;
+  transform: none;
+  transition: none;
+  border-color: var(--flow-accent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #fff 55%, transparent),
+    0 2px 4px rgba(16, 24, 40, 0.12),
+    0 22px 40px -20px color-mix(in srgb, var(--flow-accent) 75%, transparent);
+}
+
+.dark .flow-node[data-dragging='true'] {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 3px 6px rgba(0, 0, 0, 0.55),
+    0 26px 46px -20px color-mix(in srgb, var(--flow-accent) 55%, transparent);
 }
 
 /* Interactive controls inside the canvas always advertise a pointer. */

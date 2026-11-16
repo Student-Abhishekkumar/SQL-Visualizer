@@ -246,6 +246,7 @@ function NodeFrame({
   status,
   selected,
   expanded,
+  dragging,
   offsetX,
   offsetY,
   ariaLabel,
@@ -257,6 +258,8 @@ function NodeFrame({
   status: FlowElementStatus
   selected: boolean
   expanded: boolean
+  /** True while this node is under an active pointer drag. */
+  dragging: boolean
   /** Live horizontal offset applied while the user drags the node. */
   offsetX: number
   /** Live vertical offset applied when a neighbouring preview expands. */
@@ -281,8 +284,14 @@ function NodeFrame({
       data-status={status}
       data-selected={selected ? 'true' : undefined}
       data-expanded={expanded ? 'true' : undefined}
+      data-dragging={dragging ? 'true' : undefined}
       data-unsupported={node.unsupported === true ? 'true' : undefined}
-      onClick={() => onSelect(node)}
+      onClick={(event) => {
+        // A double-click is still one inspection action, never a select
+        // followed by an accidental deselect.
+        if (event.detail > 1) return
+        onSelect(node)
+      }}
       onPointerEnter={() => onHover?.(node.id)}
       onPointerLeave={() => onHover?.(null)}
       onKeyDown={(event) => {
@@ -291,13 +300,13 @@ function NodeFrame({
           onSelect(node)
         }
       }}
-      className="flow-node absolute cursor-pointer text-left focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
+      className="flow-node absolute cursor-pointer select-none text-left focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
       style={{
         left: node.x + offsetX,
         top: node.y + offsetY,
         width: node.width,
         height: displayHeight,
-        zIndex: expanded ? 30 : selected ? 20 : 1,
+        zIndex: dragging ? 40 : expanded ? 30 : selected ? 20 : 1,
       }}
     >
       {node.sockets.map((socket) => (
@@ -318,6 +327,8 @@ interface FlowNodeViewProps {
   status: FlowElementStatus
   selected: boolean
   expanded: boolean
+  /** True while this node is being dragged by the pointer. */
+  dragging?: boolean
   /** Horizontal offset applied while the user drags this node. */
   offsetX?: number
   /** Vertical offset applied when an earlier preview pushes this node down. */
@@ -333,6 +344,7 @@ export const FlowNodeView = memo(function FlowNodeView({
   status,
   selected,
   expanded,
+  dragging = false,
   offsetX = 0,
   offsetY = 0,
   onSelect,
@@ -353,6 +365,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         status={status}
         selected={selected}
         expanded={expanded}
+        dragging={dragging}
         offsetX={offsetX}
         offsetY={offsetY}
         ariaLabel={`Source table ${node.label}, ${table.rowCount} rows`}
@@ -403,6 +416,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         status={status}
         selected={selected}
         expanded={false}
+        dragging={dragging}
         offsetX={offsetX}
         offsetY={offsetY}
         ariaLabel={`Operation ${node.label}: ${node.detail ?? ''}`}
@@ -445,6 +459,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         status={status}
         selected={selected}
         expanded={expanded}
+        dragging={dragging}
         offsetX={offsetX}
         offsetY={offsetY}
         ariaLabel={`Intermediate result after ${node.stage}, ${snapshot.outputRowCount} rows`}
@@ -490,6 +505,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         status={status}
         selected={selected}
         expanded={expanded}
+        dragging={dragging}
         offsetX={offsetX}
         offsetY={offsetY}
         ariaLabel={`${node.label} — removed records`}
@@ -533,6 +549,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         status={status}
         selected={selected}
         expanded={false}
+        dragging={dragging}
         offsetX={offsetX}
         offsetY={offsetY}
         ariaLabel={`Group ${node.label}: ${node.detail ?? ''}`}
@@ -576,6 +593,7 @@ export const FlowNodeView = memo(function FlowNodeView({
       status={status}
       selected={selected}
       expanded={expanded}
+      dragging={dragging}
       offsetX={offsetX}
       offsetY={offsetY}
       ariaLabel={finished ? 'Final result' : 'Final result (pending)'}

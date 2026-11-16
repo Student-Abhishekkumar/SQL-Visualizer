@@ -2,6 +2,7 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildFlowGraph, deriveFlowState } from '../../../services/visualization/graphBuilder'
+import { flowBoxesOverlap } from '../../../services/visualization/flowLayout'
 import type { StageSnapshot, VisualizationTrace } from '../../../types/visualization'
 import { FlowCanvas } from './FlowCanvas'
 
@@ -105,6 +106,36 @@ function renderCanvas(overrides: {
   return { onSelectNode }
 }
 
+interface RenderedBox {
+  id: string
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/** Read the live geometry a user actually sees in the canvas. */
+function renderedBoxes(): RenderedBox[] {
+  return Array.from(document.querySelectorAll<HTMLElement>('.flow-node')).map((element) => ({
+    id: element.dataset.nodeId ?? '',
+    x: Number.parseFloat(element.style.left),
+    y: Number.parseFloat(element.style.top),
+    width: Number.parseFloat(element.style.width),
+    height: Number.parseFloat(element.style.height),
+  }))
+}
+
+function expectSettled(boxes: RenderedBox[]): void {
+  for (let i = 0; i < boxes.length; i += 1) {
+    for (let j = i + 1; j < boxes.length; j += 1) {
+      const a = boxes[i]
+      const b = boxes[j]
+      if (a === undefined || b === undefined) continue
+      expect(flowBoxesOverlap(a, b), `${a.id} overlaps ${b.id}`).toBe(false)
+    }
+  }
+}
+
 beforeEach(() => {
   Object.defineProperty(window, 'matchMedia', {
     writable: true,
@@ -158,6 +189,10 @@ describe('FlowCanvas', () => {
     expect(onSelectNode).toHaveBeenCalledTimes(2)
 
     fireEvent.keyDown(where, { key: ' ' })
+    expect(onSelectNode).toHaveBeenCalledTimes(3)
+
+    // The second click of a double-click must not toggle it back off.
+    fireEvent.click(where, { detail: 2 })
     expect(onSelectNode).toHaveBeenCalledTimes(3)
   })
 
@@ -284,13 +319,20 @@ describe('FlowCanvas', () => {
     fireEvent.pointerUp(canvas, { pointerId: 1 })
     expect(canvas.className).not.toContain('flow-canvas-panning')
 
-    // A drag that starts on a node inspects it instead of panning.
+    // A drag that starts on a node moves it and never selects it.
     const before = surface.style.transform
     const where = screen.getByRole('button', { name: /Operation WHERE/ })
     fireEvent.pointerDown(where, { button: 0, pointerId: 2, clientX: 10, clientY: 10 })
     fireEvent.pointerMove(canvas, { pointerId: 2, clientX: 80, clientY: 80 })
     fireEvent.pointerUp(canvas, { pointerId: 2 })
     expect(surface.style.transform).toBe(before)
+    // The compatibility click that follows the drag is swallowed.
+    fireEvent.click(where)
+    expect(onSelectNode).not.toHaveBeenCalled()
+
+    // A fresh press still inspects the node.
+    fireEvent.pointerDown(where, { button: 0, pointerId: 3, clientX: 10, clientY: 10 })
+    fireEvent.pointerUp(canvas, { pointerId: 3 })
     fireEvent.click(where)
     expect(onSelectNode).toHaveBeenCalledTimes(1)
   })
@@ -390,8 +432,99 @@ describe('FlowCanvas', () => {
       beforePath,
     )
 
+    // The click that follows the drag is swallowed; a fresh press still
+    // inspects the node.
+    fireEvent.click(where)
+    expect(onSelectNode).not.toHaveBeenCalled()
+    fireEvent.pointerDown(where, { button: 0, pointerId: 32, clientX: 10, clientY: 10 })
+    fireEvent.pointerUp(canvas, { pointerId: 32 })
     fireEvent.click(where)
     expect(onSelectNode).toHaveBeenCalledTimes(1)
+  })
+
+  it('prevents native text selection and HTML drag on node surfaces', () => {
+    renderCanvas()
+    const canvas = screen.getByRole('application')
+    const where = screen.getByRole('button', { name: /Operation WHERE/ })
+    // Scoped user-select rule on draggable nodes, not a global reset.
+    expect(where.className).toContain('select-none')
+    // The pointerdown that starts a node drag is default-prevented so the
+    // browser never begins a text selection or drag.
+    expect(
+      fireEvent.pointerDown(where, { button: 0, pointerId: 61, clientX: 10, clientY: 10 }),
+    ).toBe(false)
+    expect(fireEvent.dragStart(where)).toBe(false)
+    fireEvent.pointerUp(canvas, { pointerId: 61 })
+  })
+
+  it('captures the pointer for a node drag and releases it on drop', () => {
+    renderCanvas()
+    const canvas = screen.getByRole('application')
+    const where = screen.getByRole('button', { name: /Operation WHERE/ })
+    const setCapture = vi.fn()
+    const releaseCapture = vi.fn()
+    Object.defineProperty(canvas, 'setPointerCapture', { configurable: true, value: setCapture })
+    Object.defineProperty(canvas, 'releasePointerCapture', {
+      configurable: true,
+      value: releaseCapture,
+    })
+    Object.defineProperty(canvas, 'hasPointerCapture', {
+      configurable: true,
+      value: () => true,
+    })
+
+    fireEvent.pointerDown(where, { button: 0, pointerId: 71, clientX: 10, clientY: 10 })
+    expect(setCapture).toHaveBeenCalledWith(71)
+    fireEvent.pointerMove(canvas, { pointerId: 71, clientX: 40, clientY: 30 })
+    fireEvent.pointerUp(canvas, { pointerId: 71 })
+    expect(releaseCapture).toHaveBeenCalledWith(71)
+    expect(canvas.className).not.toContain('flow-canvas-node-dragging')
+  })
+
+  it('settles collisions after a drop while keeping the dragged node in place', () => {
+    renderCanvas()
+    const canvas = screen.getByRole('application')
+    const where = screen.getByRole('button', { name: /Operation WHERE/ })
+    const selectNode = screen.getByRole('button', { name: /Operation SELECT/ })
+    const source = screen.getByRole('button', { name: /Source table employees/ })
+    const outgoing = graph.edges.find((edge) => edge.from === 'op-WHERE')!
+    const beforePath = document.getElementById(`edge-path-${outgoing.id}`)!.getAttribute('d')
+    const whereBase = graph.nodes.find((node) => node.id === 'op-WHERE')!
+    const selectBase = graph.nodes.find((node) => node.id === 'op-SELECT')!
+    const sourceTop = Number.parseFloat(source.style.top)
+    const dropY = selectBase.y - whereBase.y
+
+    fireEvent.pointerDown(where, { button: 0, pointerId: 81, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(canvas, { pointerId: 81, clientX: 10, clientY: 10 + dropY })
+    fireEvent.pointerUp(canvas, { pointerId: 81 })
+
+    // The manually chosen position survives the layout pass.
+    expect(Number.parseFloat(where.style.top)).toBeCloseTo(selectBase.y, 5)
+    // The overlapped stage moved out of the way and the whole visible
+    // graph is now overlap-free at the required spacing.
+    expect(Number.parseFloat(selectNode.style.top)).toBeGreaterThan(selectBase.y)
+    expectSettled(renderedBoxes())
+    // Unrelated source and the wired connection are handled correctly.
+    expect(Number.parseFloat(source.style.top)).toBe(sourceTop)
+    expect(document.getElementById(`edge-path-${outgoing.id}`)!.getAttribute('d')).not.toBe(
+      beforePath,
+    )
+  })
+
+  it('grows the canvas bounds when a node is dragged beyond them', () => {
+    renderCanvas()
+    const canvas = screen.getByRole('application')
+    const surface = canvas.firstElementChild as HTMLElement
+    const source = screen.getByRole('button', { name: /Source table employees/ })
+    const beforeWidth = Number.parseFloat(surface.style.width)
+
+    fireEvent.pointerDown(source, { button: 0, pointerId: 91, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(canvas, { pointerId: 91, clientX: 1210, clientY: 10 })
+    fireEvent.pointerUp(canvas, { pointerId: 91 })
+
+    expect(Number.parseFloat(source.style.left)).toBeCloseTo(1200, 5)
+    expect(Number.parseFloat(surface.style.width)).toBeGreaterThan(beforeWidth)
+    expect(Number.parseFloat(surface.style.width)).toBeGreaterThanOrEqual(1200 + 248 + 48)
   })
 
   it('resets node drag offsets when a new graph is rendered', () => {
