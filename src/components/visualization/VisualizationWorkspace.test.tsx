@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { act, cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type {
   StageSnapshot,
@@ -373,5 +373,55 @@ describe('Flow View behavior', () => {
     await user.click(screen.getByRole('tab', { name: /flow/i }))
     // Playback position untouched by view switching.
     expect(useVisualizationStore.getState().eventIndex).toBe(4)
+  })
+
+  it('timeline seeking and jump-to-end clear a pinned stage inspection', async () => {
+    const user = userEvent.setup()
+    const store = useVisualizationStore.getState()
+    store.loadTrace(makeTrace())
+    useVisualizationStore.setState({ status: 'ready' })
+    useVisualizationStore.getState().jumpToEnd()
+
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+    await user.click(screen.getByRole('tab', { name: /table/i }))
+
+    const inspectWhere = async (): Promise<void> => {
+      const pipeline = screen.getByRole('navigation', { name: 'Execution pipeline' })
+      const whereButton = Array.from(pipeline.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('WHERE'),
+      )
+      await user.click(whereButton!)
+    }
+
+    await inspectWhere()
+    expect(screen.getByText(/inspecting/)).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Timeline position'), { target: { value: '2' } })
+    expect(useVisualizationStore.getState().eventIndex).toBe(2)
+    expect(screen.queryByText(/inspecting/)).not.toBeInTheDocument()
+
+    await inspectWhere()
+    expect(screen.getByText(/inspecting/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Jump to final result' }))
+    expect(useVisualizationStore.getState().finished).toBe(true)
+    expect(screen.queryByText(/inspecting/)).not.toBeInTheDocument()
+  })
+
+  it('clicking the selected node again deselects it without moving playback', async () => {
+    const user = userEvent.setup()
+    const store = useVisualizationStore.getState()
+    store.loadTrace(makeTrace())
+    useVisualizationStore.setState({ status: 'ready' })
+    useVisualizationStore.getState().seekToStage('WHERE')
+
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+    const dataNode = screen.getByLabelText(/Intermediate result after WHERE/)
+    await user.click(dataNode)
+    expect(screen.getByRole('complementary', { name: 'Node inspector' })).toBeInTheDocument()
+    const selectedIndex = useVisualizationStore.getState().eventIndex
+
+    await user.click(dataNode)
+    expect(screen.queryByRole('complementary', { name: 'Node inspector' })).not.toBeInTheDocument()
+    expect(useVisualizationStore.getState().eventIndex).toBe(selectedIndex)
   })
 })

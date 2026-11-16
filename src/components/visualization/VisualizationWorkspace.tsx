@@ -149,7 +149,13 @@ export function VisualizationWorkspace({
   const handleNodeSelect = (node: { stage: VisualizedStage | null; id: string }): void => {
     const deselecting = selectedNodeId === node.id
     setSelectedNodeId(deselecting ? null : node.id)
-    if (!deselecting) setDetailsOpen(true)
+    if (deselecting) {
+      // Clicking the selected node again only clears the inspection; the
+      // playback position it moved to stays where it is.
+      setInspectedStage(null)
+      return
+    }
+    setDetailsOpen(true)
     if (node.stage === null) {
       setInspectedStage(null)
       setStageHighlight(null)
@@ -360,8 +366,14 @@ export function VisualizationWorkspace({
           setInspectedStage(null)
           next()
         }}
-        onJumpToEnd={jumpToEnd}
-        onSeek={seek}
+        onJumpToEnd={() => {
+          setInspectedStage(null)
+          jumpToEnd()
+        }}
+        onSeek={(eventIndex) => {
+          setInspectedStage(null)
+          seek(eventIndex)
+        }}
         onSpeedChange={setSpeed}
       />
     </section>
