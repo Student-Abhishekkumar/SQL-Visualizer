@@ -372,6 +372,9 @@ describe('Flow View behavior', () => {
 
     render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
     await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+    // The click leaves the pointer over the node, which shows the temporary
+    // hover trace. Leaving restores the pinned selection trace.
+    fireEvent.pointerLeave(screen.getByLabelText(/Intermediate result after WHERE/))
 
     // Selection is inspection-only: the simulator never advances.
     expect(useVisualizationStore.getState().eventIndex).toBe(before)

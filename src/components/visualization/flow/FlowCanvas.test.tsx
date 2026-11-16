@@ -210,6 +210,37 @@ function readPath(edgeId: string): SVGPathElement {
   return path as unknown as SVGPathElement
 }
 
+/** Edge ids of the active hover trace, in paint order. */
+function hoverPacketEdgeIds(): string[] {
+  return [...document.querySelectorAll('.flow-packets g[data-mode="hover"]')].map(
+    (group) => group.getAttribute('data-edge-id')!,
+  )
+}
+
+/** Edge ids that the default full-pipeline animation should cover. */
+function flowableEdgeIds(
+  targetGraph: FlowGraph,
+  state: ReturnType<typeof deriveFlowState>,
+): string[] {
+  return targetGraph.edges
+    .filter(
+      (edge) => state.edges[edge.id] === 'completed' || state.edges[edge.id] === 'active',
+    )
+    .map((edge) => edge.id)
+}
+
+/** Every hover packet must ride exactly one real edge path. */
+function expectHoverPacketsOn(packetIds: string[]): void {
+  for (const edgeId of packetIds) {
+    const group = document.querySelector(
+      `.flow-packets g[data-edge-id="${edgeId}"][data-mode="hover"]`,
+    )
+    expect(group, `missing hover packet for ${edgeId}`).not.toBeNull()
+    expect(group!.querySelector('mpath')?.getAttribute('href')).toBe(`#edge-path-${edgeId}`)
+    expect(group!.querySelectorAll('circle.flow-packet')).toHaveLength(3)
+  }
+}
+
 /**
  * Regression guard for the "connections disappeared" report: every edge
  * must be a real cubic curve with a directional arrowhead, a readable
@@ -365,15 +396,321 @@ describe('FlowCanvas', () => {
     expect(Number(unrelatedPath.getAttribute('opacity'))).toBeGreaterThan(0.6)
   })
 
-  it('animates only the edges carrying data and respects reduced motion', () => {
+  it('stops the flow at a hovered WHERE and leaves downstream nodes still', () => {
+    const state = deriveFlowState(graph, new Set(['FROM', 'WHERE']), 'SELECT', false)
+    renderGraph(graph, state)
+    const where = screen.getByRole('button', { name: /Operation WHERE/ })
+    fireEvent.pointerOver(where)
+
+    const expected = traceUpstreamPath(graph, 'op-WHERE')
+    expect(expected.edgeIds.size).toBeGreaterThan(0)
+    expect(hoverPacketEdgeIds().sort()).toEqual([...expected.edgeIds].sort())
+    expectHoverPacketsOn(hoverPacketEdgeIds())
+    // Hover suppresses the default pipeline animation everywhere else.
+    expect(document.querySelectorAll('.flow-packets g[data-mode="playback"]')).toHaveLength(0)
+
+    // FROM → WHERE animates; the accepted branch out of WHERE must not.
+    const incoming = graph.edges.find((edge) => edge.to === 'op-WHERE')!
+    expect(readPath(incoming.id).parentElement?.getAttribute('data-hover-path')).toBe('true')
+    const outgoing = graph.edges.find(
+      (edge) => edge.from === 'op-WHERE' && edge.kind === 'main',
+    )!
+    expect(expected.edgeIds.has(outgoing.id)).toBe(false)
+    expect(readPath(outgoing.id).parentElement?.getAttribute('data-hover-path')).toBeNull()
+    expect(hoverPacketEdgeIds()).not.toContain(outgoing.id)
+
+    // The hovered node is prominent and is the trace destination.
+    expect(where.getAttribute('data-hovered')).toBe('true')
+    const canvas = screen.getByRole('application')
+    expect(canvas.getAttribute('data-hovered-node')).toBe('op-WHERE')
+    expect(canvas.getAttribute('data-trace-mode')).toBe('hover')
+    // Downstream nodes stay visible, just unanimated.
+    expect(
+      screen.getByRole('button', { name: /Intermediate result after WHERE/ }),
+    ).toBeInTheDocument()
+  })
+
+  it('animates every incoming branch when a JOIN is hovered', () => {
+    const state = deriveFlowState(joinGraph, new Set(['FROM', 'JOIN', 'SELECT']), null, false)
+    renderGraph(joinGraph, state)
+    fireEvent.pointerOver(screen.getByRole('button', { name: /Operation JOIN/ }))
+
+    const expected = traceUpstreamPath(joinGraph, 'op-JOIN')
+    const inputs = joinGraph.edges.filter((edge) => edge.to === 'op-JOIN')
+    expect(inputs).toHaveLength(2)
+    for (const edge of inputs) {
+      expect(expected.edgeIds.has(edge.id)).toBe(true)
+      expect(readPath(edge.id).parentElement?.getAttribute('data-hover-path')).toBe('true')
+    }
+    expect(hoverPacketEdgeIds().sort()).toEqual([...expected.edgeIds].sort())
+    for (const source of joinGraph.nodes.filter((node) => node.kind === 'source')) {
+      expect(
+        screen
+          .getByRole('button', { name: new RegExp(`Source table ${source.label}`) })
+          .getAttribute('data-upstream'),
+      ).toBe('true')
+    }
+  })
+
+  it('animates the rejected branch only when the rejected node is hovered', () => {
+    const state = deriveFlowState(graph, new Set(['FROM', 'WHERE']), 'SELECT', false)
+    renderGraph(graph, state)
+    const rejectedNode = screen.getByRole('button', { name: /Rejected rows/ })
+    fireEvent.pointerOver(rejectedNode)
+
+    const rejected = graph.edges.find((edge) => edge.kind === 'rejected')!
+    const accepted = graph.edges.find(
+      (edge) => edge.from === 'op-WHERE' && edge.kind === 'main',
+    )!
+    const incoming = graph.edges.find((edge) => edge.to === 'op-WHERE')!
+    expect(readPath(rejected.id).parentElement?.getAttribute('data-hover-path')).toBe('true')
+    expect(readPath(accepted.id).parentElement?.getAttribute('data-hover-path')).toBeNull()
+    expect(hoverPacketEdgeIds()).toEqual(
+      expect.arrayContaining([incoming.id, rejected.id]),
+    )
+    expect(hoverPacketEdgeIds()).not.toContain(accepted.id)
+    expect(rejectedNode.getAttribute('data-hovered')).toBe('true')
+    expect(rejectedNode.getAttribute('data-accent')).toBe('rejected')
+  })
+
+  it('animates only the accepted route when the accepted-rows node is hovered', () => {
+    const state = deriveFlowState(graph, new Set(['FROM', 'WHERE']), 'SELECT', false)
+    renderGraph(graph, state)
+    const acceptedNode = screen.getByRole('button', { name: /Intermediate result after WHERE/ })
+    fireEvent.pointerOver(acceptedNode)
+
+    const expected = traceUpstreamPath(graph, 'data-WHERE')
+    const accepted = graph.edges.find(
+      (edge) => edge.from === 'op-WHERE' && edge.kind === 'main',
+    )!
+    const rejected = graph.edges.find((edge) => edge.kind === 'rejected')!
+    expect(expected.edgeIds.has(accepted.id)).toBe(true)
+    expect(expected.edgeIds.has(rejected.id)).toBe(false)
+    expect(readPath(accepted.id).parentElement?.getAttribute('data-hover-path')).toBe('true')
+    expect(readPath(rejected.id).parentElement?.getAttribute('data-hover-path')).toBeNull()
+    expect(hoverPacketEdgeIds()).not.toContain(rejected.id)
+    expect(acceptedNode.getAttribute('data-hovered')).toBe('true')
+  })
+
+  it('rises through GROUP BY and HAVING upstream paths without duplicates', () => {
+    const state = deriveFlowState(groupGraph, groupStages, null, false)
+    renderGraph(groupGraph, state)
+    const groupBy = screen.getByRole('button', { name: /Operation GROUP BY/ })
+    fireEvent.pointerOver(groupBy)
+
+    const groupExpected = traceUpstreamPath(groupGraph, 'op-GROUP_BY')
+    expect(hoverPacketEdgeIds().sort()).toEqual([...groupExpected.edgeIds].sort())
+    // Fan-out group members are downstream of GROUP BY, not upstream.
+    for (const edge of groupGraph.edges.filter((edge) => edge.kind === 'group-member')) {
+      expect(hoverPacketEdgeIds()).not.toContain(edge.id)
+    }
+
+    // Moving directly onto HAVING swaps the route in one update.
+    const having = screen.getByRole('button', { name: /Operation HAVING/ })
+    fireEvent.pointerOver(having)
+    const havingExpected = traceUpstreamPath(groupGraph, 'op-HAVING')
+    expect(havingExpected.edgeIds.size).toBeGreaterThan(groupExpected.edgeIds.size)
+    expect(hoverPacketEdgeIds().sort()).toEqual([...havingExpected.edgeIds].sort())
+    expectHoverPacketsOn(hoverPacketEdgeIds())
+    expect(groupBy.getAttribute('data-hovered')).toBeNull()
+    expect(having.getAttribute('data-hovered')).toBe('true')
+    // The old route is replaced, never painted twice.
+    expect(document.querySelectorAll('.flow-packets g[data-mode="hover"]')).toHaveLength(
+      havingExpected.edgeIds.size,
+    )
+  })
+
+  it('animates the complete pipeline when the final result is hovered', () => {
+    const state = deriveFlowState(groupGraph, groupStages, null, false)
+    renderGraph(groupGraph, state)
+    fireEvent.pointerOver(screen.getByRole('button', { name: /Final result/ }))
+
+    const expected = traceUpstreamPath(groupGraph, 'final')
+    const mainEdges = groupGraph.edges.filter(
+      (edge) => edge.kind === 'main' || edge.kind === 'final',
+    )
+    expect([...expected.edgeIds].sort()).toEqual(mainEdges.map((edge) => edge.id).sort())
+    for (const edge of mainEdges) {
+      expect(readPath(edge.id).parentElement?.getAttribute('data-hover-path')).toBe('true')
+    }
+    const sideEdges = groupGraph.edges.filter(
+      (edge) => edge.kind === 'rejected' || edge.kind === 'group-member',
+    )
+    expect(sideEdges.length).toBeGreaterThan(0)
+    for (const edge of sideEdges) {
+      expect(readPath(edge.id).parentElement?.getAttribute('data-hover-path')).toBeNull()
+      expect(hoverPacketEdgeIds()).not.toContain(edge.id)
+    }
+    expect(screen.getByRole('button', { name: /Final result/ }).getAttribute('data-hovered')).toBe(
+      'true',
+    )
+  })
+
+  it('restores the full pipeline when the pointer leaves a node', () => {
+    const state = deriveFlowState(graph, new Set(['FROM', 'WHERE']), 'SELECT', false)
+    renderGraph(graph, state)
+    const where = screen.getByRole('button', { name: /Operation WHERE/ })
+    fireEvent.pointerOver(where)
+    expect(hoverPacketEdgeIds().length).toBeGreaterThan(0)
+
+    fireEvent.pointerOut(where)
+    expect(hoverPacketEdgeIds()).toHaveLength(0)
+    expect(document.querySelectorAll('.flow-packets g[data-mode="playback"]')).toHaveLength(
+      flowableEdgeIds(graph, state).length,
+    )
+    const canvas = screen.getByRole('application')
+    expect(canvas.getAttribute('data-hovered-node')).toBeNull()
+    expect(canvas.getAttribute('data-trace-mode')).toBeNull()
+    expect(where.getAttribute('data-hovered')).toBeNull()
+  })
+
+  it('keeps the hover route stable while dragging a node', () => {
+    const state = deriveFlowState(graph, new Set(['FROM', 'WHERE']), 'SELECT', false)
+    renderGraph(graph, state)
+    const canvas = screen.getByRole('application')
+    const where = screen.getByRole('button', { name: /Operation WHERE/ })
+    fireEvent.pointerOver(where)
+    const expected = traceUpstreamPath(graph, 'op-WHERE')
+
+    fireEvent.pointerDown(where, { button: 0, pointerId: 71, clientX: 10, clientY: 10 })
+    // Crossing another node mid-drag must not steal the inspected route.
+    fireEvent.pointerOver(
+      screen.getByRole('button', { name: /Intermediate result after WHERE/ }),
+    )
+    expect(canvas.getAttribute('data-hovered-node')).toBe('op-WHERE')
+    expect(hoverPacketEdgeIds().sort()).toEqual([...expected.edgeIds].sort())
+
+    fireEvent.pointerMove(canvas, { pointerId: 71, clientX: 10, clientY: 90 })
+    fireEvent.pointerUp(canvas, { pointerId: 71 })
+    expect(canvas.getAttribute('data-hovered-node')).toBe('op-WHERE')
+    expect(hoverPacketEdgeIds().sort()).toEqual([...expected.edgeIds].sort())
+  })
+
+  it('keeps the hover trace when the pointer enters an interactive child', () => {
+    const state = deriveFlowState(graph, new Set(['FROM', 'WHERE']), 'SELECT', false)
+    renderGraph(graph, state)
+    const source = screen.getByRole('button', { name: /Source table employees/ })
+    const sourceId = source.getAttribute('data-node-id')!
+    fireEvent.pointerOver(source)
+    const expected = traceUpstreamPath(graph, sourceId)
+    expect(expected.hasSelection).toBe(true)
+
+    const expand = within(source).getByRole('button', { name: 'Expand preview' })
+    fireEvent.pointerOver(expand)
+    fireEvent.click(expand)
+    expect(
+      document.querySelector('[role="application"]')?.getAttribute('data-hovered-node'),
+    ).toBe(sourceId)
+    expect(source.getAttribute('data-hovered')).toBe('true')
+    expect(hoverPacketEdgeIds()).toHaveLength(0)
+  })
+
+  it('lets hover override a pinned selection and restores it on leave', () => {
+    renderCanvas({ selectedNodeId: 'op-WHERE', completedStages: ['FROM', 'WHERE'] })
+    const canvas = screen.getByRole('application')
+    expect(canvas.getAttribute('data-trace-mode')).toBe('selection')
+
+    const acceptedNode = screen.getByRole('button', { name: /Intermediate result after WHERE/ })
+    fireEvent.pointerOver(acceptedNode)
+    const hoverExpected = traceUpstreamPath(graph, 'data-WHERE')
+    expect(canvas.getAttribute('data-trace-mode')).toBe('hover')
+    expect(document.querySelectorAll('[data-selected-path]')).toHaveLength(0)
+    expect(hoverPacketEdgeIds().sort()).toEqual([...hoverExpected.edgeIds].sort())
+    // Pinned selection is remembered, not destroyed.
+    expect(canvas.getAttribute('data-selected-node')).toBe('op-WHERE')
+
+    fireEvent.pointerOut(acceptedNode)
+    const selectionExpected = traceUpstreamPath(graph, 'op-WHERE')
+    expect(canvas.getAttribute('data-trace-mode')).toBe('selection')
+    expect(hoverPacketEdgeIds()).toHaveLength(0)
+    for (const edgeId of selectionExpected.edgeIds) {
+      expect(readPath(edgeId).parentElement?.getAttribute('data-selected-path')).toBe('true')
+    }
+  })
+
+  it('keeps playback-driven animation while a node is hovered and restores it after', () => {
+    const state = deriveFlowState(graph, new Set(['FROM', 'WHERE']), 'SELECT', false)
+    renderGraph(graph, state)
+    const where = screen.getByRole('button', { name: /Operation WHERE/ })
+    fireEvent.pointerOver(where)
+
+    const expected = traceUpstreamPath(graph, 'op-WHERE')
+    expect(hoverPacketEdgeIds().sort()).toEqual([...expected.edgeIds].sort())
+    // Playback's marching dashes still follow the simulator's active stage.
+    expect(document.querySelectorAll('.flow-edge-active')).toHaveLength(
+      state.packetEdgeIds.length,
+    )
+    for (const activeId of state.packetEdgeIds) {
+      expect(hoverPacketEdgeIds()).not.toContain(activeId)
+    }
+
+    fireEvent.pointerOut(where)
+    expect(document.querySelectorAll('.flow-packets g[data-mode="playback"]')).toHaveLength(
+      flowableEdgeIds(graph, state).length,
+    )
+    for (const activeId of state.packetEdgeIds) {
+      expect(
+        document.querySelector(
+          `.flow-packets g[data-edge-id="${activeId}"][data-mode="playback"]`,
+        ),
+      ).not.toBeNull()
+    }
+  })
+
+  it('keeps hover animation working when playback is paused', () => {
+    // Playback paused between stages: nothing is active, yet hovering a node
+    // must still animate its upstream route.
+    const state = deriveFlowState(graph, new Set(['FROM', 'WHERE']), null, false)
+    renderGraph(graph, state)
+    expect(state.packetEdgeIds).toHaveLength(0)
+
+    const where = screen.getByRole('button', { name: /Operation WHERE/ })
+    fireEvent.pointerOver(where)
+    const expected = traceUpstreamPath(graph, 'op-WHERE')
+    expect(expected.edgeIds.size).toBeGreaterThan(0)
+    expect(hoverPacketEdgeIds().sort()).toEqual([...expected.edgeIds].sort())
+    expectHoverPacketsOn(hoverPacketEdgeIds())
+    // With no active stage there are neither playback streams nor marches.
+    expect(document.querySelectorAll('.flow-packets g[data-mode="playback"]')).toHaveLength(0)
+    expect(document.querySelectorAll('.flow-edge-active')).toHaveLength(0)
+  })
+
+  it('animates every connection that has produced data and respects reduced motion', () => {
     const state = deriveFlowState(graph, new Set(['FROM', 'WHERE']), 'SELECT', false)
     renderCanvas({ packetEdgeIds: state.packetEdgeIds })
-    // One active packet indicator per packet edge (3 staggered packets each).
-    const packets = document.querySelectorAll('svg animateMotion')
-    expect(packets.length).toBe(state.packetEdgeIds.length * 3)
+    const flowable = graph.edges.filter(
+      (edge) => state.edges[edge.id] === 'completed' || state.edges[edge.id] === 'active',
+    )
+    // The whole executed pipeline is alive, not just the active stage.
+    expect(flowable.length).toBeGreaterThan(state.packetEdgeIds.length)
+    expect(document.querySelectorAll('svg animateMotion').length).toBe(flowable.length * 3)
+    // Marching dashes remain tied to the simulator's active stage.
     expect(document.querySelectorAll('.flow-edge-active').length).toBe(
       state.packetEdgeIds.length,
     )
+  })
+
+  it('keeps pending connections visible but still until playback reaches them', () => {
+    // FROM and JOIN have produced data, so both endpoints of the wire into
+    // the not-yet-run SELECT exist. It must render as a connection without
+    // animating ahead of the simulator.
+    const state = deriveFlowState(joinGraph, new Set(['FROM', 'JOIN']), null, false)
+    renderGraph(joinGraph, state)
+    const pending = joinGraph.edges.filter((edge) => state.edges[edge.id] === 'pending')
+    expect(pending.length).toBeGreaterThan(0)
+    for (const edge of pending) {
+      const path = readPath(edge.id)
+      expect(path).toBeTruthy()
+      expect(
+        document.querySelector(`.flow-packets g[data-edge-id="${edge.id}"]`),
+      ).toBeNull()
+    }
+    // Completed connections still animate in the same render.
+    const flowable = joinGraph.edges.filter(
+      (edge) => state.edges[edge.id] === 'completed' || state.edges[edge.id] === 'active',
+    )
+    expect(flowable.length).toBeGreaterThan(0)
+    expect(document.querySelectorAll('svg animateMotion').length).toBe(flowable.length * 3)
   })
 
   it('renders circular sockets and cubic Bézier wires', () => {
@@ -445,7 +782,10 @@ describe('FlowCanvas', () => {
     expect(packetIndex).toBeGreaterThan(lastEdgeIndex)
 
     const groups = [...packetLayer!.querySelectorAll('g[data-edge-id]')]
-    expect(groups).toHaveLength(state.packetEdgeIds.length)
+    const flowable = graph.edges.filter(
+      (edge) => state.edges[edge.id] === 'completed' || state.edges[edge.id] === 'active',
+    )
+    expect(groups).toHaveLength(flowable.length)
     for (const group of groups) {
       const edgeId = group.getAttribute('data-edge-id')!
       expect(readPath(edgeId)).toBeTruthy()
@@ -910,8 +1250,11 @@ describe('FlowCanvas', () => {
     rerender(ui(null))
     expect(document.querySelector('[data-selected-path]')).toBeNull()
     expect(document.querySelectorAll('.flow-packets g[data-mode="selection"]')).toHaveLength(0)
+    const flowable = graph.edges.filter(
+      (edge) => state.edges[edge.id] === 'completed' || state.edges[edge.id] === 'active',
+    )
     expect(document.querySelectorAll('.flow-packets g[data-mode="playback"]')).toHaveLength(
-      state.packetEdgeIds.length,
+      flowable.length,
     )
     expect(Number(readPath(active.id).getAttribute('opacity'))).toBeGreaterThan(0.6)
     expect(

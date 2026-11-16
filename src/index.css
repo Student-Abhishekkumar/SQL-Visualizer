@@ -349,8 +349,28 @@ body {
     0 18px 36px -18px color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
-/* Upstream nodes on the selected trace get a subtle accent rim. Kept
-   quieter than the selected-node treatment above so the destination is
+/* Hover is a temporary trace destination; it gets a prominent accent
+   ring without permanently marking the node as selected. */
+.flow-node[data-hovered='true'] {
+  border-color: var(--accent);
+  outline: 2px solid color-mix(in srgb, var(--accent) 48%, transparent);
+  outline-offset: 1px;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #fff 55%, transparent),
+    0 0 0 2px color-mix(in srgb, var(--accent) 42%, transparent),
+    0 14px 30px -20px color-mix(in srgb, var(--accent) 62%, transparent);
+  transform: translateY(-1px);
+}
+
+.dark .flow-node[data-hovered='true'] {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 0 0 2px color-mix(in srgb, var(--accent) 52%, transparent),
+    0 16px 32px -18px color-mix(in srgb, var(--accent) 48%, transparent);
+}
+
+/* Upstream nodes on a hover or selection trace get a subtle accent rim.
+   Kept quieter than the destination treatments above so the target is
    still obvious at a glance. */
 .flow-node[data-upstream='true'] {
   border-color: color-mix(in srgb, var(--accent) 52%, var(--border));
@@ -370,6 +390,7 @@ body {
 /* Sockets on the traced route glow so the path visibly enters and leaves
    every upstream node at the real port. */
 .flow-node[data-upstream='true'] .flow-socket,
+.flow-node[data-hovered='true'] .flow-socket,
 .flow-node[data-selected='true'] .flow-socket {
   box-shadow:
     0 0 0 1px color-mix(in srgb, var(--accent) 72%, transparent),
@@ -957,6 +978,9 @@ body {
     transition: none;
   }
   .flow-node:hover {
+    transform: none;
+  }
+  .flow-node[data-hovered='true'] {
     transform: none;
   }
   .flow-edge-active {

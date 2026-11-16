@@ -245,6 +245,7 @@ function NodeFrame({
   node,
   status,
   selected,
+  hovered,
   upstream,
   expanded,
   dragging,
@@ -258,7 +259,9 @@ function NodeFrame({
   node: FlowGraphNode
   status: FlowElementStatus
   selected: boolean
-  /** True when this node feeds the selected node (upstream trace). */
+  /** True when this node is the hovered upstream-trace destination. */
+  hovered: boolean
+  /** True when this node feeds the active trace destination. */
   upstream: boolean
   expanded: boolean
   /** True while this node is under an active pointer drag. */
@@ -286,6 +289,7 @@ function NodeFrame({
       data-kind={node.kind}
       data-status={status}
       data-selected={selected ? 'true' : undefined}
+      data-hovered={hovered ? 'true' : undefined}
       data-upstream={upstream ? 'true' : undefined}
       data-expanded={expanded ? 'true' : undefined}
       data-dragging={dragging ? 'true' : undefined}
@@ -310,7 +314,17 @@ function NodeFrame({
         top: node.y + offsetY,
         width: node.width,
         height: displayHeight,
-        zIndex: dragging ? 40 : expanded ? 30 : selected ? 20 : upstream ? 2 : 1,
+        zIndex: dragging
+          ? 40
+          : expanded
+            ? 30
+            : selected
+              ? 20
+              : hovered
+                ? 18
+                : upstream
+                  ? 2
+                  : 1,
       }}
     >
       {node.sockets.map((socket) => (
@@ -330,7 +344,9 @@ interface FlowNodeViewProps {
   node: FlowGraphNode
   status: FlowElementStatus
   selected: boolean
-  /** True when this node feeds the selected node (upstream trace). */
+  /** True when this node is the hovered upstream-trace destination. */
+  hovered?: boolean
+  /** True when this node feeds the active trace destination. */
   upstream?: boolean
   expanded: boolean
   /** True while this node is being dragged by the pointer. */
@@ -349,6 +365,7 @@ export const FlowNodeView = memo(function FlowNodeView({
   node,
   status,
   selected,
+  hovered = false,
   upstream = false,
   expanded,
   dragging = false,
@@ -371,6 +388,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         node={node}
         status={status}
         selected={selected}
+        hovered={hovered}
         upstream={upstream}
         expanded={expanded}
         dragging={dragging}
@@ -423,6 +441,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         node={node}
         status={status}
         selected={selected}
+        hovered={hovered}
         upstream={upstream}
         expanded={false}
         dragging={dragging}
@@ -467,6 +486,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         node={node}
         status={status}
         selected={selected}
+        hovered={hovered}
         upstream={upstream}
         expanded={expanded}
         dragging={dragging}
@@ -514,6 +534,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         node={node}
         status={status}
         selected={selected}
+        hovered={hovered}
         upstream={upstream}
         expanded={expanded}
         dragging={dragging}
@@ -559,6 +580,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         node={node}
         status={status}
         selected={selected}
+        hovered={hovered}
         upstream={upstream}
         expanded={false}
         dragging={dragging}
@@ -604,6 +626,7 @@ export const FlowNodeView = memo(function FlowNodeView({
       node={node}
       status={status}
       selected={selected}
+      hovered={hovered}
       upstream={upstream}
       expanded={expanded}
       dragging={dragging}

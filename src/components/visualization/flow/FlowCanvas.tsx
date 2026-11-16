@@ -221,7 +221,13 @@ export function FlowCanvas({
     selectRef.current = onSelectNode
   }, [onSelectNode])
   const selectNode = useCallback((node: FlowGraphNode) => selectRef.current(node), [])
-  const hoverNode = useCallback((nodeId: string | null) => setHoveredNodeId(nodeId), [])
+  const hoverNode = useCallback((nodeId: string | null) => {
+    // A node drag keeps its own hovered path stable. Pointer-enter events
+    // for nodes passed under the cursor must not swap the inspected route
+    // mid-drag.
+    if (nodeDragRef.current !== null) return
+    setHoveredNodeId(nodeId)
+  }, [])
 
   const commitPositions = useCallback(
     (positions: ReadonlyMap<string, { x: number; y: number }>) => {
@@ -678,96 +684,117 @@ export function FlowCanvas({
     [graph.nodes, nodeStatuses],
   )
 
-  // Selection traces the complete upstream route, not just the immediate
-  // neighbours. Traversal is memoized on graph + selection, so dragging,
-  // panning and animation frames reuse the result instead of re-walking
-  // the graph. The traversal itself protects against cycles.
-  const upstreamPath = useMemo(
+  // Click selection pins an upstream trace. Hover peeks at another node's
+  // upstream route and always wins while the pointer is inside a node;
+  // leaving restores the pinned trace, or the full pipeline when nothing
+  // is selected. Both traversals are memoized on graph + id so dragging,
+  // panning and animation frames never re-walk the graph.
+  const selectionPath = useMemo(
     () => traceUpstreamPath(graph, selectedNodeId),
     [graph, selectedNodeId],
   )
-  // A selection can outlive a rewind that hides its node. Keep the
-  // selection state, but only trace while the node is actually visible.
+  const hoverPath = useMemo(
+    () => traceUpstreamPath(graph, hoveredNodeId),
+    [graph, hoveredNodeId],
+  )
+  // A selection or hover can outlive a rewind that hides its node. Keep
+  // the state, but only trace while the node is actually visible.
   const selectionActive =
     selectedNodeId !== null &&
-    upstreamPath.hasSelection &&
+    selectionPath.hasSelection &&
     nodeStatuses[selectedNodeId] !== 'hidden'
-  const selectionEdgeIds = selectionActive ? upstreamPath.edgeIds : null
-  const selectionNodeIds = selectionActive ? upstreamPath.nodeIds : null
-
-  // Edges on the selected route use the trace colour; unrelated edges stay
-  // visible but dimmed. Hover still emphasizes immediate connections when
-  // nothing is selected, and never overrides a selected trace. A hovered
-  // node can disappear when playback rewinds, so stale hover ids are
-  // ignored rather than treating every remaining wire as unrelated.
-  const liveHoveredNodeId =
-    hoveredNodeId !== null && graph.nodes.some((node) => node.id === hoveredNodeId)
-      ? hoveredNodeId
+  const hoverActive =
+    hoveredNodeId !== null &&
+    hoverPath.hasSelection &&
+    nodeStatuses[hoveredNodeId] !== 'hidden'
+  const traceMode: 'hover' | 'selection' | null = hoverActive
+    ? 'hover'
+    : selectionActive
+      ? 'selection'
       : null
-  const hoverEdgeIds = useMemo(() => {
-    if (selectionActive || liveHoveredNodeId === null) return null
-    return new Set(
-      graph.edges
-        .filter(
-          (edge) => edge.from === liveHoveredNodeId || edge.to === liveHoveredNodeId,
-        )
-        .map((edge) => edge.id),
-    )
-  }, [graph.edges, liveHoveredNodeId, selectionActive])
-  const connectedEdgeIds = selectionEdgeIds ?? hoverEdgeIds
+  const tracePath =
+    traceMode === 'hover' ? hoverPath : traceMode === 'selection' ? selectionPath : null
+  const traceEdgeIds = tracePath?.edgeIds ?? null
+  const traceNodeIds = tracePath?.nodeIds ?? null
+  const traceTargetId =
+    traceMode === 'hover' ? hoveredNodeId : traceMode === 'selection' ? selectedNodeId : null
 
   const packetEdgeIdSet = useMemo(() => new Set(packetEdgeIds), [packetEdgeIds])
 
-  /** Draw emphasized edges last so they sit above dimmed ones. */
-  const orderedEdges = useMemo(() => {
-    if (connectedEdgeIds === null) return visibleEdges
-    return [...visibleEdges].sort((a, b) => {
-      const aConnected = connectedEdgeIds.has(a.id) ? 1 : 0
-      const bConnected = connectedEdgeIds.has(b.id) ? 1 : 0
-      return aConnected - bConnected
-    })
-  }, [visibleEdges, connectedEdgeIds])
-
-  // One packet stream per edge. A selection packet wins when the edge is
-  // on the traced path and also carrying live playback data, so the same
-  // connection never renders two overlapping sets of particles. Edges that
-  // are only playing back keep moving while a selection is active.
-  const packetGroups = useMemo(() => {
+  // Default mode keeps every connection that has already carried data
+  // alive. Pending edges stay visible but do not animate ahead of the
+  // simulator, so the pulse always follows playback events.
+  const pipelineEdgeIds = useMemo(() => {
     const ids = new Set<string>()
-    for (const id of selectionEdgeIds ?? []) ids.add(id)
-    for (const id of packetEdgeIdSet) ids.add(id)
-    const groups: Array<{ edge: FlowGraphEdge; mode: 'selection' | 'playback' }> = []
-    if (ids.size === 0) return groups
+    for (const edge of visibleEdges) {
+      const status = edgeStatuses[edge.id]
+      if (status === 'completed' || status === 'active') ids.add(edge.id)
+    }
+    return ids
+  }, [visibleEdges, edgeStatuses])
+
+  /** Draw traced edges last so they sit above dimmed ones. */
+  const orderedEdges = useMemo(() => {
+    if (traceEdgeIds === null) return visibleEdges
+    return [...visibleEdges].sort((a, b) => {
+      const aTraced = traceEdgeIds.has(a.id) ? 1 : 0
+      const bTraced = traceEdgeIds.has(b.id) ? 1 : 0
+      return aTraced - bTraced
+    })
+  }, [visibleEdges, traceEdgeIds])
+
+  // One packet stream per edge.
+  // - Hover: strictly the upstream route; downstream wires stay visible
+  //   but carry no particles.
+  // - Selection: the pinned route plus live playback streams (dimmed) so
+  //   the existing selection behaviour is preserved.
+  // - Default: every completed/active connection animates.
+  const packetGroups = useMemo(() => {
+    const groups: Array<{ edge: FlowGraphEdge; mode: 'hover' | 'selection' | 'playback' }> =
+      []
+    if (traceMode === 'hover') {
+      if (traceEdgeIds === null) return groups
+      for (const edge of orderedEdges) {
+        if (traceEdgeIds.has(edge.id)) groups.push({ edge, mode: 'hover' })
+      }
+      return groups
+    }
+    if (traceMode === 'selection') {
+      const ids = new Set<string>()
+      for (const id of traceEdgeIds ?? []) ids.add(id)
+      for (const id of packetEdgeIdSet) ids.add(id)
+      for (const edge of orderedEdges) {
+        if (!ids.has(edge.id)) continue
+        groups.push({
+          edge,
+          mode: traceEdgeIds?.has(edge.id) === true ? 'selection' : 'playback',
+        })
+      }
+      return groups
+    }
     for (const edge of orderedEdges) {
-      if (!ids.has(edge.id)) continue
-      groups.push({
-        edge,
-        mode: selectionEdgeIds?.has(edge.id) === true ? 'selection' : 'playback',
-      })
+      if (pipelineEdgeIds.has(edge.id)) groups.push({ edge, mode: 'playback' })
     }
     return groups
-  }, [orderedEdges, packetEdgeIdSet, selectionEdgeIds])
+  }, [orderedEdges, packetEdgeIdSet, pipelineEdgeIds, traceEdgeIds, traceMode])
 
-  // Small per-edge phase offsets keep the traced streams from moving in
-  // lockstep; the ordering is nearest-to-selected first, so the result
+  // Small per-edge phase offsets keep a traced stream from moving in
+  // lockstep; the ordering is nearest-to-target first, so the result
   // reads as a continuous pulse rather than a single flashing line.
-  const selectionPacketPhase = useMemo(() => {
+  const tracePacketPhase = useMemo(() => {
     const phases = new Map<string, number>()
-    if (selectionEdgeIds === null) return phases
-    upstreamPath.orderedEdgeIds.forEach((edgeId, index) => {
+    if (tracePath === null) return phases
+    tracePath.orderedEdgeIds.forEach((edgeId, index) => {
       phases.set(edgeId, index * 0.16)
     })
     return phases
-  }, [selectionEdgeIds, upstreamPath.orderedEdgeIds])
+  }, [tracePath])
 
   const edgeVisual = (edge: FlowGraphEdge, status: FlowElementStatus | undefined) => {
     const active = status === 'active'
     const completed = status === 'completed'
-    const onTrace = selectionEdgeIds?.has(edge.id) ?? false
-    // Hover emphasis only applies while nothing is selected.
-    const hovered = selectionEdgeIds === null && (connectedEdgeIds?.has(edge.id) ?? false)
-    const emphasized = onTrace || hovered
-    const dimmed = connectedEdgeIds !== null && !emphasized
+    const onTrace = traceEdgeIds?.has(edge.id) ?? false
+    const dimmed = traceEdgeIds !== null && !onTrace
     const accent = edgeAccent(edge)
     // Pending wires must still read as connections. `--border-strong` is a
     // hairline divider token and disappears against the canvas background;
@@ -777,14 +804,12 @@ export function FlowCanvas({
     const baseWidth = active ? 2.6 : completed ? 2 : 1.7
     return {
       accent,
-      stroke: emphasized ? 'var(--accent)' : color,
+      stroke: onTrace ? 'var(--accent)' : color,
       // The traced route is a little heavier than the same edge's normal
       // state, so the path reads as one continuous electrical trace.
       strokeWidth: onTrace ? baseWidth + 0.3 : baseWidth,
       opacity: dimmed
-        ? selectionEdgeIds !== null
-          ? 0.24
-          : 0.32
+        ? 0.24
         : onTrace
           ? 1
           : active
@@ -793,7 +818,7 @@ export function FlowCanvas({
               ? 0.92
               : 0.72,
       strokeDasharray: isDashedEdge(edge.kind) ? '5 4' : undefined,
-      markerEnd: emphasized
+      markerEnd: onTrace
         ? 'url(#flow-arrow-selected)'
         : active || completed
           ? `url(#flow-arrow-${accent})`
@@ -890,6 +915,8 @@ export function FlowCanvas({
         role="application"
         aria-label="Animated SQL data-flow canvas"
         data-selected-node={selectedNodeId ?? undefined}
+        data-hovered-node={hoverActive && hoveredNodeId !== null ? hoveredNodeId : undefined}
+        data-trace-mode={traceMode ?? undefined}
       >
         <div
           className="absolute origin-top-left"
@@ -968,7 +995,12 @@ export function FlowCanvas({
                   data-status={status}
                   data-flowing={visual.flowing ? 'true' : undefined}
                   data-emphasized={visual.dimmed ? undefined : 'true'}
-                  data-selected-path={visual.onTrace ? 'true' : undefined}
+                  data-selected-path={
+                    visual.onTrace && traceMode === 'selection' ? 'true' : undefined
+                  }
+                  data-hover-path={
+                    visual.onTrace && traceMode === 'hover' ? 'true' : undefined
+                  }
                 >
                   {/* Soft halo under an active or traced wire so data
                       movement stands out without thickening the arrow. */}
@@ -1049,20 +1081,18 @@ export function FlowCanvas({
               <g className="flow-packets" data-layer="packets" aria-hidden>
                 {packetGroups.map(({ edge, mode }) => {
                   const accent = edgeAccent(edge)
-                  const selectionPacket = mode === 'selection'
-                  const duration = selectionPacket ? 1.25 : 1.6
-                  const phase = selectionPacket
-                    ? (selectionPacketPhase.get(edge.id) ?? 0)
-                    : 0
+                  const tracePacket = mode === 'hover' || mode === 'selection'
+                  const duration = mode === 'hover' ? 1.15 : tracePacket ? 1.25 : 1.6
+                  const phase = tracePacket ? (tracePacketPhase.get(edge.id) ?? 0) : 0
                   return (
                     <g
                       key={edge.id}
                       data-edge-id={edge.id}
                       data-accent={accent}
                       data-mode={mode}
-                      // Keep playback visible during a trace without
-                      // competing with the brighter selection particles.
-                      opacity={selectionActive && !selectionPacket ? 0.65 : 1}
+                      // Keep playback visible during a pinned selection
+                      // without competing with the brighter trace packets.
+                      opacity={traceMode === 'selection' && !tracePacket ? 0.65 : 1}
                     >
                       {Array.from({ length: PACKETS_PER_EDGE }, (_, packetIndex) => (
                         <circle
@@ -1070,7 +1100,7 @@ export function FlowCanvas({
                           className="flow-packet"
                           data-primary={packetIndex === 0 ? 'true' : undefined}
                           r={
-                            selectionPacket
+                            tracePacket
                               ? packetIndex === 0
                                 ? 4.5
                                 : 3
@@ -1078,9 +1108,9 @@ export function FlowCanvas({
                                 ? 4.2
                                 : 2.8
                           }
-                          fill={selectionPacket ? 'var(--accent)' : accentColor(accent)}
+                          fill={tracePacket ? 'var(--accent)' : accentColor(accent)}
                           opacity={
-                            selectionPacket
+                            tracePacket
                               ? packetIndex === 0
                                 ? 1
                                 : 0.6
@@ -1114,10 +1144,11 @@ export function FlowCanvas({
               node={node}
               status={nodeStatuses[node.id] ?? 'pending'}
               selected={selectedNodeId === node.id}
+              hovered={traceMode === 'hover' && hoveredNodeId === node.id}
               upstream={
-                selectionNodeIds !== null &&
-                selectionNodeIds.has(node.id) &&
-                selectedNodeId !== node.id
+                traceNodeIds !== null &&
+                traceNodeIds.has(node.id) &&
+                node.id !== traceTargetId
               }
               expanded={expandedNodeIds.has(node.id)}
               dragging={draggingNodeId === node.id}
