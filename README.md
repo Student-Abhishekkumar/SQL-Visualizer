@@ -5,14 +5,13 @@
 
 <p align="center">
   <b>See what your SQL actually does.</b><br />
-  An open-source SQL playground that runs real SQLite in your browser and replays supported
+  A browser-based SQL playground that runs real SQLite locally and replays supported
   <code>SELECT</code> queries as an animated, inspectable data-flow graph.
 </p>
 
 <p align="center">
   <img alt="Status: active development" src="https://img.shields.io/badge/status-active_development-F59E0B?style=flat-square" />
   <img alt="319 tests passing" src="https://img.shields.io/badge/tests-319_passing-2EA043?style=flat-square" />
-  <img alt="MIT license (declared)" src="https://img.shields.io/badge/license-MIT_declared-3B82F6?style=flat-square" />
 </p>
 
 <p align="center">
@@ -44,7 +43,7 @@
 
 | 🎬 Learn by seeing | 🔒 Local by design | ✅ Real results first |
 |:---|:---|:---|
-| Every stage of a query becomes a node with real input and output rows — including the rows a filter rejects. | SQLite runs as WebAssembly inside the tab. No backend, no account, and no query data leaves your machine. | SQLite executes the query for real. The visual simulator then checks its final result against SQLite's output instead of inventing one. |
+| Every stage of a query becomes a node you can step through, with real row counts and inspectable snapshots — including the rows a filter rejects. | SQLite runs as WebAssembly inside the tab. No backend, no account, and no query data leaves your machine. | SQLite executes the query for real. The visual simulator then checks its final result against SQLite's output instead of inventing one. |
 
 SQL Visualizer is not a mock database diagram. It is a working SQL workspace with an educational
 execution model layered on top: write SQL, run it against SQLite, then switch to a Blender-inspired
@@ -77,7 +76,7 @@ canvas and watch the logical pipeline process the same data.
     <td width="50%" align="center" valign="top">
       <img src="docs/assets/node-inspector.png" alt="Node inspector showing rows in and rows out for the WHERE operation" width="100%" />
       <br />
-      <sub><b>Node inspector</b> — click any node for the exact operation, rows in and rows out.</sub>
+      <sub><b>Node inspector</b> — click a node for its clause, row counts and, where available, the underlying rows.</sub>
     </td>
     <td width="50%" align="center" valign="top">
       <img src="docs/assets/stage-explanation.png" alt="Synchronized explanation panel with learning levels, what happened and a knowledge check" width="100%" />
@@ -108,7 +107,7 @@ canvas and watch the logical pipeline process the same data.
 | **Animated data-flow canvas** | Renders the logical query pipeline as connected nodes: sources, joins, filters, grouping, projection and the final result. |
 | **Stage-by-stage playback** | Play, pause, step, seek, restart or change speed (0.5×–2×). Snapshots carry real rows through every stage. |
 | **Synchronized table view** | Switch from Flow to Table to inspect accepted, filtered, duplicated, grouped or skipped rows for the current stage. |
-| **Node inspector** | Click a node to see its operation, input/output counts and the real rows behind them. |
+| **Node inspector** | Click a node to see its operation and input/output counts, plus row previews for source, intermediate, branch, group and final nodes. |
 | **Synchronized explanations** | Beginner, Intermediate and Advanced explanations update with the active stage, alongside documentation links and optional knowledge checks. |
 
 ### 🧑‍💻 SQL workspace
@@ -125,7 +124,7 @@ canvas and watch the logical pipeline process the same data.
 
 | Feature | What it does |
 |:---|:---|
-| **Multiple independent databases** | Each database has its own SQLite file, schema, history and saved queries. |
+| **Multiple independent databases** | Each database has its own SQLite file and schema. History and saved queries are tagged with the database they belong to, and history can be filtered to the active database. |
 | **Templates and custom SQL** | Start blank, load the University example, or create a database from your own setup script. |
 | **Import and export** | Import an existing SQLite file; export a database as `.sqlite` or as SQL. |
 | **Persistent and local** | Database bytes, metadata, history and saved queries live in IndexedDB in your browser. |
@@ -200,11 +199,11 @@ See [docs/FEATURES.md](docs/FEATURES.md) for the full capability and limitation 
 
 | Layer | Stack |
 |:---|:---|
-| **Frontend** | <img alt="React 19" src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=0B1220" /> <img alt="TypeScript 7" src="https://img.shields.io/badge/TypeScript-7-3178C6?style=flat-square&logo=typescript&logoColor=white" /> <img alt="Vite 8" src="https://img.shields.io/badge/Vite-8-646CFF?style=flat-square&logo=vite&logoColor=white" /> <img alt="Tailwind CSS 4" src="https://img.shields.io/badge/Tailwind_CSS-4-06B6D4?style=flat-square&logo=tailwindcss&logoColor=white" /> |
-| **SQL engine** | <img alt="SQLite via sql.js" src="https://img.shields.io/badge/SQLite-sql.js_1.16-003B57?style=flat-square&logo=sqlite&logoColor=white" /> <img alt="node-sql-parser 5" src="https://img.shields.io/badge/node--sql--parser-5-4B5563?style=flat-square" /> <img alt="Monaco Editor 0.57" src="https://img.shields.io/badge/Monaco_Editor-0.57-007ACC?style=flat-square&logo=visualstudiocode&logoColor=white" /> |
-| **State and persistence** | <img alt="Zustand 5" src="https://img.shields.io/badge/Zustand-5-2D3748?style=flat-square" /> <img alt="IndexedDB via idb" src="https://img.shields.io/badge/IndexedDB-idb_8-FFCA28?style=flat-square" /> |
-| **Visualization** | <img alt="Custom flow graph" src="https://img.shields.io/badge/flow_graph-custom_SVG_%26_DOM-4F8CFF?style=flat-square" /> <img alt="Motion 14" src="https://img.shields.io/badge/Motion-14-0055FF?style=flat-square" /> <img alt="Lucide icons" src="https://img.shields.io/badge/Lucide-icons-F56565?style=flat-square&logo=lucide&logoColor=white" /> |
-| **Testing and tooling** | <img alt="Vitest 5" src="https://img.shields.io/badge/Vitest-5-6E9F18?style=flat-square&logo=vitest&logoColor=white" /> <img alt="Testing Library" src="https://img.shields.io/badge/Testing_Library-16-E33332?style=flat-square&logo=testinglibrary&logoColor=white" /> <img alt="jsdom" src="https://img.shields.io/badge/jsdom-31-323232?style=flat-square&logo=javascript&logoColor=F7DF1E" /> <img alt="oxlint" src="https://img.shields.io/badge/oxlint-1.90-1F2937?style=flat-square" /> |
+| **Frontend** | React 19.3 · TypeScript 7.0 · Vite 8.3 · Tailwind CSS 4.3 |
+| **SQL engine** | SQLite via sql.js 1.16 (WebAssembly) · node-sql-parser 5.4 · Monaco Editor 0.57 with `@monaco-editor/react` 4.7 |
+| **State and persistence** | Zustand 5.1 · idb 8.0 (IndexedDB) |
+| **Visualization** | Custom SVG/DOM flow canvas · Motion 14.12 · Lucide React 1.72 |
+| **Testing and tooling** | Vitest 5.1 · Testing Library 16.3 · jsdom 31.0 · oxlint 1.90 |
 
 ## Quick start
 
@@ -331,8 +330,9 @@ For larger changes, open an issue first so the approach can be discussed. See th
 
 ## License
 
-**MIT** — as declared in earlier revisions of this README. A `LICENSE` file is not checked in yet;
-if you need explicit terms before reusing the code, please open an issue first.
+No `LICENSE` file is currently included in this repository, so no reuse license is granted by
+default. The source is publicly available for reading and learning. If you would like to reuse the
+code, please open an issue to discuss terms first.
 
 ---
 

@@ -126,7 +126,7 @@ s.createDatabase({ name, description, template, setupSql })
 s.run('SELECT * FROM employees;')
 s.getSchema()
 s.setView('canvas')           // 'query' | 'canvas'
-s.getPlayback()               // event index, stage, playing, finished, validation owner
+s.getPlayback()               // event index, stage, playing, finished, trace database
 ```
 
 Use it for debugging and repeatable captures; do not make production UI behavior depend on it.

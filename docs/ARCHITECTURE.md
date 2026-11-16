@@ -187,7 +187,7 @@ be migrated into a normal database record without data loss.
 The visualization workspace distinguishes:
 
 - `idle` — nothing has been visualized yet,
-- `ready` — a trace is loaded and validated,
+- `ready` — a trace is loaded; the validation outcome, if one was produced, is available,
 - `unsupported` — the query cannot be modeled faithfully; reasons are listed,
 - `unavailable` — no database or no query is available.
 

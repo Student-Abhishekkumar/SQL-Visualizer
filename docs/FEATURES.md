@@ -28,19 +28,19 @@ partially, and what it does not do yet. The [README](../README.md) is the short 
 | Query information | ✅ | Statement types, total time, rows returned, rows modified, query length, referenced tables and SQLite version. |
 | Query history | ✅ | Persists across refreshes, capped at 200 entries; stores SQL and metadata, never result sets. |
 | History filtering | ✅ | Filter by the active database or show all databases. |
-| Saved queries | ✅ | Named queries persisted in IndexedDB, optionally associated with a database. |
+| Saved queries | ✅ | Named queries persisted in IndexedDB and tagged with the active database when one is open. |
 | History maintenance | ✅ | Delete individual entries or clear all history from Settings. |
 
 ## Database workspace
 
 | Capability | Status | Details |
 |:---|:---:|:---|
-| Multiple databases | ✅ | Independent SQLite files with their own schema, history and saved queries. |
+| Multiple databases | ✅ | Independent SQLite files with their own schema. History and saved queries are tagged with the database they belong to. |
 | Create from template | ✅ | Blank, University example, or custom setup SQL. |
 | Open / switch | ✅ | The active database is remembered across reloads. |
 | Rename / duplicate | ✅ | Metadata-only rename and a full copy of the database bytes. |
 | Reset | ✅ | Replays the setup state for template databases; clears imported databases to empty. |
-| Delete | ✅ | Removes metadata, stored bytes and associated records. |
+| Delete | ✅ | Removes database metadata and stored bytes. Existing history and saved queries remain tagged to the deleted database. |
 | Export SQLite | ✅ | Downloads the database as a `.sqlite` file. |
 | Export SQL | ✅ | Downloads a `.sql` script that recreates the exported database. |
 | Import | ✅ | Accepts `.db`, `.sqlite`, `.sqlite3` and `.sql` scripts. |
@@ -51,7 +51,7 @@ partially, and what it does not do yet. The [README](../README.md) is the short 
   <img src="assets/database-selector.png" alt="Database selector listing four independent databases" width="720" />
 </p>
 
-<p align="center"><sub>Switching databases keeps each workspace's schema and history separate.</sub></p>
+<p align="center"><sub>Switching databases keeps schemas separate; history entries and saved queries stay tagged to the database they came from.</sub></p>
 
 ## Visualization
 
@@ -59,12 +59,12 @@ partially, and what it does not do yet. The [README](../README.md) is the short 
 |:---|:---:|:---|
 | Single `SELECT` visualization | ◐ | Other statements execute normally but cannot be visualized. |
 | Logical pipeline | ✅ | `FROM`, `JOIN`, `WHERE`, `GROUP BY`, `HAVING`, `SELECT`, `DISTINCT`, `ORDER BY`, `LIMIT` / `OFFSET`. |
-| Stage snapshots | ✅ | Immutable input/output rows per stage, including filtered and skipped rows. |
+| Stage snapshots | ✅ | Immutable snapshots with output rows, removed rows and input/output counts, including filtered and skipped rows. |
 | Playback | ✅ | Play, pause, previous, next, seek, restart and jump to end. |
 | Speed control | ✅ | 0.5×, 1×, 1.5× and 2×. |
 | Flow view | ✅ | Blender-inspired nodes, sockets, animated wires and status colours. |
 | Table view | ✅ | Row-level transformation view driven by the same playback position. |
-| Node inspector | ✅ | Operation details, rows in/out and the actual rows behind the counts. |
+| Node inspector | ✅ | Operation details and rows in/out, plus row previews for source, intermediate, branch, group and final nodes. |
 | Clause strip | ✅ | Query clauses are clickable and jump playback to the matching stage. |
 | Editor synchronization | ✅ | The active SQL clause is highlighted in Monaco during playback. |
 | Pan / zoom / fit | ✅ | Drag to pan, scroll to zoom, fit-to-screen and reset controls. |
@@ -77,7 +77,7 @@ partially, and what it does not do yet. The [README](../README.md) is the short 
 | Capability | Status | Details |
 |:---|:---:|:---|
 | Learning levels | ✅ | Beginner, Intermediate and Advanced explanations. |
-| Stage explanations | ✅ | Concept, what actually happened with real counts, and common pitfalls. |
+| Stage explanations | ✅ | Concept, why the stage matters, what actually happened with real counts, and the snapshot's detailed explanation. |
 | Knowledge checks | ✅ | Multiple-choice checks where available for the active stage. |
 | Documentation links | ✅ | Curated SQLite documentation links per stage. |
 | Inspector / explanation switch | ✅ | Selecting a node shows its inspector; otherwise the explanation panel follows the active stage. |
@@ -91,7 +91,7 @@ partially, and what it does not do yet. The [README](../README.md) is the short 
 | Reset active database | ✅ | Available from Settings and the editor toolbar. |
 | Clear history | ✅ | Confirmation-protected action in Settings. |
 | Engine information | ✅ | Displays the SQLite library version reported by the running engine. |
-| Sidebar | ✅ | Collapsible on smaller layouts and a drawer below the desktop breakpoint. |
+| Sidebar | ✅ | Static on desktop and an overlay drawer below the `md` breakpoint. |
 
 ## SQL support for visualization
 
