@@ -607,7 +607,7 @@ export function FlowCanvas({
 
       <div
         ref={containerRef}
-        className={`relative min-h-0 w-full flex-1 touch-none overflow-hidden bg-bg ${
+        className={`flow-canvas relative min-h-0 w-full flex-1 touch-none overflow-hidden bg-bg ${
           panning || draggingNodeId !== null
             ? 'cursor-grabbing select-none'
             : 'cursor-grab'

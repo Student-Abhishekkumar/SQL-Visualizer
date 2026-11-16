@@ -12,6 +12,11 @@ import type { StageSnapshot, VisualizationTrace } from '../../../types/visualiza
 interface NodeInspectorProps {
   node: FlowGraphNode
   trace: VisualizationTrace
+  /**
+   * False when the node's real data has not been produced by playback yet
+   * (only the always-visible final node can be inspected early).
+   */
+  revealed?: boolean
   onClose: () => void
 }
 
@@ -22,7 +27,7 @@ function inputSnapshotOf(trace: VisualizationTrace, stage: FlowGraphNode['stage'
   return trace.stageSnapshots[index - 1] ?? null
 }
 
-export function NodeInspector({ node, trace, onClose }: NodeInspectorProps) {
+export function NodeInspector({ node, trace, revealed = true, onClose }: NodeInspectorProps) {
   const header = (() => {
     switch (node.kind) {
       case 'source':
@@ -203,11 +208,15 @@ export function NodeInspector({ node, trace, onClose }: NodeInspectorProps) {
             The logical simulation’s final rows — validated against SQLite’s real result when the
             trace reports validation.
           </div>
-          <RowTable
-            columns={node.snapshot?.columns ?? trace.finalColumns}
-            rows={node.rows ?? trace.finalRows}
-            animate={false}
-          />
+          {revealed ? (
+            <RowTable
+              columns={node.snapshot?.columns ?? trace.finalColumns}
+              rows={node.rows ?? trace.finalRows}
+              animate={false}
+            />
+          ) : (
+            <div className="flow-empty">not produced yet</div>
+          )}
         </>
       )}
     </aside>

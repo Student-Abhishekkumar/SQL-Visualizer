@@ -128,6 +128,17 @@ describe('FlowCanvas', () => {
     expect(screen.getByRole('button', { name: /Operation WHERE/ })).toBeTruthy()
     expect(screen.getByRole('button', { name: /Intermediate result after WHERE/ })).toBeTruthy()
     expect(screen.getByRole('button', { name: /Rejected rows/ })).toBeTruthy()
+    // Each node exposes its theme accent key rather than a hard-coded
+    // colour, so light/dark styling stays consistent for every operation.
+    expect(
+      screen.getByRole('button', { name: /Source table employees/ }).getAttribute('data-accent'),
+    ).toBe('source')
+    expect(
+      screen.getByRole('button', { name: /Operation WHERE/ }).getAttribute('data-accent'),
+    ).toBe('where')
+    expect(
+      screen.getByRole('button', { name: /Rejected rows/ }).getAttribute('data-accent'),
+    ).toBe('rejected')
     for (const label of ['completed', 'active', 'pending', 'rejected', 'groups']) {
       expect(screen.getAllByText(label).length).toBeGreaterThan(0)
     }
@@ -381,5 +392,42 @@ describe('FlowCanvas', () => {
 
     fireEvent.click(where)
     expect(onSelectNode).toHaveBeenCalledTimes(1)
+  })
+
+  it('resets node drag offsets when a new graph is rendered', () => {
+    const state = deriveFlowState(graph, new Set(['FROM', 'WHERE']), 'SELECT', false)
+    const onSelectNode = vi.fn()
+    const nextGraph = buildFlowGraph(makeTrace())
+    const nextState = deriveFlowState(nextGraph, new Set(['FROM', 'WHERE']), 'SELECT', false)
+    const canvas = (target: typeof graph, targetState: typeof state) => (
+      <div style={{ width: 900, height: 700 }}>
+        <FlowCanvas
+          graph={target}
+          nodeStatuses={targetState.nodes}
+          edgeStatuses={targetState.edges}
+          packetEdgeIds={targetState.packetEdgeIds}
+          selectedNodeId={null}
+          onSelectNode={onSelectNode}
+        />
+      </div>
+    )
+
+    const { rerender } = render(canvas(graph, state))
+    const originalLeft = Number.parseFloat(
+      screen.getByRole('button', { name: /Operation WHERE/ }).style.left,
+    )
+    const application = screen.getByRole('application')
+    const where = screen.getByRole('button', { name: /Operation WHERE/ })
+    fireEvent.pointerDown(where, { button: 0, pointerId: 51, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(application, { pointerId: 51, clientX: 70, clientY: 40 })
+    fireEvent.pointerUp(application, { pointerId: 51 })
+    expect(
+      Number.parseFloat(screen.getByRole('button', { name: /Operation WHERE/ }).style.left),
+    ).toBeCloseTo(originalLeft + 60, 5)
+
+    rerender(canvas(nextGraph, nextState))
+    expect(
+      Number.parseFloat(screen.getByRole('button', { name: /Operation WHERE/ }).style.left),
+    ).toBeCloseTo(originalLeft, 5)
   })
 })

@@ -424,4 +424,23 @@ describe('Flow View behavior', () => {
     expect(screen.queryByRole('complementary', { name: 'Node inspector' })).not.toBeInTheDocument()
     expect(useVisualizationStore.getState().eventIndex).toBe(selectedIndex)
   })
+
+  it('does not reveal final rows in the inspector before playback produces them', async () => {
+    const user = userEvent.setup()
+    const store = useVisualizationStore.getState()
+    store.loadTrace({
+      ...makeTrace(),
+      finalRows: [{ id: 'f1', values: ['FinalOnly', 99999] }],
+      finalColumns: ['name', 'salary'],
+    })
+    useVisualizationStore.setState({ status: 'ready' })
+
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+    await user.click(screen.getByLabelText('Final result (pending)'))
+    expect(screen.getByRole('complementary', { name: 'Node inspector' })).toBeInTheDocument()
+    expect(screen.queryByText('FinalOnly')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Jump to final result' }))
+    expect(screen.getAllByText('FinalOnly').length).toBeGreaterThan(0)
+  })
 })

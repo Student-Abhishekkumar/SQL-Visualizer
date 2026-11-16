@@ -115,6 +115,13 @@ export function VisualizationWorkspace({
     [flowGraph, selectedNodeId],
   )
 
+  // The final node exists from the start, but its rows are only real once
+  // playback has produced the last stage. Keep the inspector honest if the
+  // user inspects it early.
+  const lastStage = trace?.stages[trace.stages.length - 1]
+  const finalRevealed =
+    finished || (lastStage !== undefined && completedByStage.has(lastStage))
+
   // Clause spans of the visualized query, used by the strip and for
   // pushing the playback-synced highlight into the Monaco editor.
   const clauseSpans = useMemo(
@@ -335,7 +342,12 @@ export function VisualizationWorkspace({
             <X className="size-3.5" aria-hidden />
           </button>
           {selectedNode !== null ? (
-            <NodeInspector node={selectedNode} trace={trace} onClose={() => setSelectedNodeId(null)} />
+            <NodeInspector
+              node={selectedNode}
+              trace={trace}
+              revealed={selectedNode.kind !== 'final' || finalRevealed}
+              onClose={() => setSelectedNodeId(null)}
+            />
           ) : (
             <ExplanationPanel stage={displayStage} snapshot={displaySnapshot} />
           )}

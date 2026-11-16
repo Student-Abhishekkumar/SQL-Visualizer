@@ -803,10 +803,21 @@ body {
 
 .flow-canvas-node-dragging .flow-node {
   transform: none;
+  /* Follow the pointer exactly instead of easing top/height changes. */
+  transition: none;
 }
 
 .flow-canvas-node-dragging .flow-node[data-status='active'] {
   animation: none;
+}
+
+/* Interactive controls inside the canvas always advertise a pointer. */
+.flow-canvas button:not(:disabled) {
+  cursor: pointer;
+}
+
+.flow-canvas button:disabled {
+  cursor: default;
 }
 
 /* Motion: nodes settle in, active stages pulse gently, active wires
