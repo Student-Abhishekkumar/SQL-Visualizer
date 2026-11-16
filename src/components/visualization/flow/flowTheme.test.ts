@@ -38,4 +38,18 @@ describe('flow theme tokens', () => {
       expect(css).toContain(`.flow-node[data-accent='${key}']`)
     }
   })
+
+  it('defines a dedicated high-contrast wire token in both themes', () => {
+    function tokenValue(block: string, name: string): string | undefined {
+      return block.match(new RegExp(`${name}:\\s*([^;]+);`))?.[1]?.trim()
+    }
+    for (const block of [lightTheme, darkTheme]) {
+      const wire = tokenValue(block, '--flow-wire')
+      const border = tokenValue(block, '--border-strong')
+      expect(wire).toBeDefined()
+      expect(border).toBeDefined()
+      // A hairline divider colour is not a readable connection colour.
+      expect(wire).not.toBe(border)
+    }
+  })
 })

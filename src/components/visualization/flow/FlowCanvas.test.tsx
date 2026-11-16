@@ -3,6 +3,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildFlowGraph, deriveFlowState } from '../../../services/visualization/graphBuilder'
 import { flowBoxesOverlap } from '../../../services/visualization/flowLayout'
+import type { FlowGraph } from '../../../types/flowGraph'
 import type { StageSnapshot, VisualizationTrace } from '../../../types/visualization'
 import { FlowCanvas } from './FlowCanvas'
 
@@ -84,17 +85,67 @@ function makeTrace(): VisualizationTrace {
 
 const graph = buildFlowGraph(makeTrace())
 
+/** Two real source tables merging into a JOIN, for input-wire coverage. */
+function makeJoinTrace(): VisualizationTrace {
+  const base = makeTrace()
+  const stages: VisualizationTrace['stages'] = ['FROM', 'JOIN', 'SELECT']
+  return {
+    ...base,
+    query:
+      'SELECT e.name, d.department_name FROM employees e INNER JOIN departments d ON d.id = e.department_id',
+    stages,
+    capability: {
+      ...base.capability,
+      supportedStages: stages,
+      hasJoin: true,
+    },
+    stageSnapshots: [snapshot('FROM', 8), snapshot('JOIN', 8), snapshot('SELECT', 8)],
+    sourceTables: [
+      base.sourceTables[0]!,
+      {
+        name: 'departments',
+        alias: 'd',
+        columns: ['id', 'department_name'],
+        rowCount: 3,
+        previewRows: Array.from({ length: 3 }, (_, index) => ({
+          id: `dept#${index + 1}`,
+          values: [index + 1, `dept ${index + 1}`],
+        })),
+        role: 'join',
+        joinType: 'INNER JOIN',
+        on: 'd.id = e.department_id',
+      },
+    ],
+  }
+}
+
+const joinGraph = buildFlowGraph(makeJoinTrace())
+
 function renderCanvas(overrides: {
   selectedNodeId?: string | null
   packetEdgeIds?: string[]
+  completedStages?: StageSnapshot['stage'][]
+  activeStage?: StageSnapshot['stage'] | null
 } = {}) {
-  // FROM + WHERE complete → the WHERE branch and both data nodes exist.
-  const state = deriveFlowState(graph, new Set(['FROM', 'WHERE']), 'SELECT', false)
+  const state = deriveFlowState(
+    graph,
+    new Set(overrides.completedStages ?? ['FROM', 'WHERE']),
+    overrides.activeStage === undefined ? 'SELECT' : overrides.activeStage,
+    false,
+  )
+  return renderGraph(graph, state, overrides)
+}
+
+function renderGraph(
+  targetGraph: FlowGraph,
+  state: ReturnType<typeof deriveFlowState>,
+  overrides: { selectedNodeId?: string | null; packetEdgeIds?: string[] } = {},
+) {
   const onSelectNode = vi.fn()
   render(
     <div style={{ width: 900, height: 700 }}>
       <FlowCanvas
-        graph={graph}
+        graph={targetGraph}
         nodeStatuses={state.nodes}
         edgeStatuses={state.edges}
         packetEdgeIds={overrides.packetEdgeIds ?? state.packetEdgeIds}
@@ -104,6 +155,31 @@ function renderCanvas(overrides: {
     </div>,
   )
   return { onSelectNode }
+}
+
+function readPath(edgeId: string): SVGPathElement {
+  const path = document.getElementById(`edge-path-${edgeId}`)
+  expect(path, `missing SVG path for ${edgeId}`).not.toBeNull()
+  return path as unknown as SVGPathElement
+}
+
+/**
+ * Regression guard for the "connections disappeared" report: every edge
+ * must be a real cubic curve with a directional arrowhead, a readable
+ * stroke and a zoom-independent width. The old `--border-strong` hairline
+ * at 42% opacity was invisible against the canvas.
+ */
+function expectReadableWire(path: SVGPathElement): void {
+  const d = path.getAttribute('d') ?? ''
+  expect(d).toMatch(/^M\s-?[\d.]+/)
+  expect(d).toContain(' C ')
+  expect(d).not.toContain('NaN')
+  expect(d).not.toContain('undefined')
+  expect(path.getAttribute('marker-end')).toMatch(/^url\(#flow-arrow-/)
+  expect(Number(path.getAttribute('opacity'))).toBeGreaterThanOrEqual(0.6)
+  expect(Number(path.getAttribute('stroke-width'))).toBeGreaterThanOrEqual(1.5)
+  expect(path.getAttribute('stroke')).not.toBe('var(--border-strong)')
+  expect(path.getAttribute('vector-effect')).toBe('non-scaling-stroke')
 }
 
 interface RenderedBox {
@@ -260,6 +336,100 @@ describe('FlowCanvas', () => {
     const firstEdge = graph.edges.find((edge) => edge.kind === 'main')!
     const path = document.getElementById(`edge-path-${firstEdge.id}`)!
     expect(path.getAttribute('d')).toContain(' C ')
+  })
+
+  it('renders every visible edge as a readable cubic connection', () => {
+    renderCanvas()
+    const state = deriveFlowState(graph, new Set(['FROM', 'WHERE']), 'SELECT', false)
+    const visible = graph.edges.filter((edge) => state.edges[edge.id] !== 'hidden')
+    expect(visible.length).toBeGreaterThan(0)
+    for (const edge of visible) {
+      expectReadableWire(readPath(edge.id))
+    }
+  })
+
+  it('keeps pending JOIN inputs visible with directional arrowheads', () => {
+    // Both source tables are visible from the start, so JOIN inputs exist
+    // before the JOIN stage runs — exactly when the old faint hairline
+    // made the graph look disconnected.
+    const state = deriveFlowState(joinGraph, new Set(), null, false)
+    renderGraph(joinGraph, state)
+    const inputs = joinGraph.edges.filter((edge) => edge.to === 'op-JOIN')
+    expect(inputs).toHaveLength(2)
+    for (const edge of inputs) {
+      expect(state.edges[edge.id]).toBe('pending')
+      const path = readPath(edge.id)
+      expectReadableWire(path)
+      expect(path.getAttribute('stroke')).toBe('var(--flow-wire)')
+      expect(path.getAttribute('marker-end')).toBe('url(#flow-arrow-idle)')
+    }
+  })
+
+  it('keeps accepted and rejected WHERE branches visually distinct', () => {
+    renderCanvas()
+    const accepted = graph.edges.find(
+      (edge) => edge.from === 'op-WHERE' && edge.kind === 'main',
+    )!
+    const rejected = graph.edges.find((edge) => edge.kind === 'rejected')!
+    const acceptedPath = readPath(accepted.id)
+    const rejectedPath = readPath(rejected.id)
+    expectReadableWire(acceptedPath)
+    expectReadableWire(rejectedPath)
+    expect(acceptedPath.getAttribute('stroke')).toBe('var(--node-where)')
+    expect(rejectedPath.getAttribute('stroke')).toBe('var(--node-rejected)')
+    expect(rejectedPath.getAttribute('stroke-dasharray')).toBe('5 4')
+  })
+
+  it('paints animated packets above every wire and binds them to the real path', () => {
+    const state = deriveFlowState(graph, new Set(['FROM', 'WHERE']), 'SELECT', false)
+    expect(state.packetEdgeIds.length).toBeGreaterThan(0)
+    renderCanvas({ packetEdgeIds: state.packetEdgeIds })
+
+    const svg = document.querySelector('[role="application"] svg')!
+    const packetLayer = svg.querySelector('.flow-packets')
+    expect(packetLayer).not.toBeNull()
+    // The packet layer must come after every edge group in paint order.
+    const children = [...svg.children]
+    const packetIndex = children.indexOf(packetLayer as Element)
+    const lastEdgeIndex = children.reduce(
+      (last, child, index) => (child.classList.contains('flow-edge') ? index : last),
+      -1,
+    )
+    expect(packetIndex).toBeGreaterThan(lastEdgeIndex)
+
+    const groups = [...packetLayer!.querySelectorAll('g[data-edge-id]')]
+    expect(groups).toHaveLength(state.packetEdgeIds.length)
+    for (const group of groups) {
+      const edgeId = group.getAttribute('data-edge-id')!
+      expect(readPath(edgeId)).toBeTruthy()
+      const mpath = group.querySelector('mpath')!
+      expect(mpath.getAttribute('href')).toBe(`#edge-path-${edgeId}`)
+      expect(group.querySelectorAll('circle.flow-packet')).toHaveLength(3)
+    }
+  })
+
+  it('keeps connections readable through dragging, settling and zoom', () => {
+    renderCanvas()
+    const state = deriveFlowState(graph, new Set(['FROM', 'WHERE']), 'SELECT', false)
+    const visible = graph.edges.filter((edge) => state.edges[edge.id] !== 'hidden')
+    const before = new Map(visible.map((edge) => [edge.id, readPath(edge.id).getAttribute('d')]))
+
+    const canvas = screen.getByRole('application')
+    const where = screen.getByRole('button', { name: /Operation WHERE/ })
+    fireEvent.pointerDown(where, { button: 0, pointerId: 51, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(canvas, { pointerId: 51, clientX: 10, clientY: 130 })
+    fireEvent.pointerUp(canvas, { pointerId: 51 })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom out' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+
+    for (const edge of visible) {
+      expectReadableWire(readPath(edge.id))
+    }
+    const movedEdge = visible.find(
+      (edge) => edge.from === 'op-WHERE' || edge.to === 'op-WHERE',
+    )!
+    expect(readPath(movedEdge.id).getAttribute('d')).not.toBe(before.get(movedEdge.id))
   })
 
   it('re-routes a wire and pushes downstream nodes down when a preview expands', () => {

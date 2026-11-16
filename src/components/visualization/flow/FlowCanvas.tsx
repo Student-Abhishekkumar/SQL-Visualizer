@@ -707,18 +707,31 @@ export function FlowCanvas({
     })
   }, [visibleEdges, connectedEdgeIds])
 
+  // Packets live in their own layer, painted after every wire and before
+  // the HTML node surfaces. That keeps moving data on top of the static
+  // strokes instead of letting a later edge paint over another edge's
+  // packets (the edge groups are interleaved).
+  const packetEdges = useMemo(
+    () => orderedEdges.filter((edge) => packetEdgeIdSet.has(edge.id)),
+    [orderedEdges, packetEdgeIdSet],
+  )
+
   const edgeVisual = (edge: FlowGraphEdge, status: FlowElementStatus | undefined) => {
     const active = status === 'active'
     const completed = status === 'completed'
     const emphasized = connectedEdgeIds?.has(edge.id) ?? false
     const dimmed = connectedEdgeIds !== null && !emphasized
     const accent = edgeAccent(edge)
-    const color = active || completed ? accentColor(accent) : 'var(--border-strong)'
+    // Pending wires must still read as connections. `--border-strong` is a
+    // hairline divider token and disappears against the canvas background;
+    // every wire uses the dedicated, high-contrast `--flow-wire` token
+    // instead, with completed/active stages layered on their accent.
+    const color = active || completed ? accentColor(accent) : 'var(--flow-wire)'
     return {
       accent,
       stroke: emphasized ? 'var(--accent)' : color,
-      strokeWidth: active ? 2.5 : completed ? 1.8 : 1.4,
-      opacity: dimmed ? 0.16 : active ? 1 : completed ? 0.8 : 0.42,
+      strokeWidth: active ? 2.6 : completed ? 2 : 1.7,
+      opacity: dimmed ? 0.32 : active ? 1 : completed ? 0.92 : 0.72,
       strokeDasharray: isDashedEdge(edge.kind) ? '5 4' : undefined,
       markerEnd:
         active || completed
@@ -824,7 +837,7 @@ export function FlowCanvas({
           }}
         >
           <svg
-            className="pointer-events-none absolute inset-0"
+            className="pointer-events-none absolute inset-0 z-0"
             width={canvasBounds.width}
             height={canvasBounds.height}
             aria-hidden
@@ -853,7 +866,7 @@ export function FlowCanvas({
                 markerHeight="6"
                 orient="auto-start-reverse"
               >
-                <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--border-strong)" />
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--flow-wire)" />
               </marker>
               <filter id="flow-packet-glow" x="-120%" y="-120%" width="340%" height="340%">
                 <feGaussianBlur stdDeviation="2" result="blur" />
@@ -888,7 +901,8 @@ export function FlowCanvas({
                       stroke={accentColor(visual.accent)}
                       strokeWidth={visual.strokeWidth + 4.5}
                       strokeLinecap="round"
-                      opacity={visual.dimmed ? 0.03 : 0.09}
+                      opacity={visual.dimmed ? 0.05 : 0.12}
+                      vectorEffect="non-scaling-stroke"
                       aria-hidden
                     />
                   )}
@@ -903,6 +917,7 @@ export function FlowCanvas({
                     strokeLinecap="round"
                     opacity={visual.opacity}
                     markerEnd={visual.markerEnd}
+                    vectorEffect="non-scaling-stroke"
                   />
                   {/* Marching overlay: readable direction along the active route. */}
                   {visual.flowing && !reducedMotion && (
@@ -913,13 +928,14 @@ export function FlowCanvas({
                       strokeWidth={visual.strokeWidth + 1.4}
                       strokeDasharray="3 13"
                       strokeLinecap="round"
-                      opacity={visual.dimmed ? 0.12 : 0.5}
+                      opacity={visual.dimmed ? 0.16 : 0.55}
                       className="flow-edge-active"
+                      vectorEffect="non-scaling-stroke"
                       aria-hidden
                     />
                   )}
                   {edge.label !== undefined && (
-                    <g opacity={visual.dimmed ? 0.2 : 1}>
+                    <g opacity={visual.dimmed ? 0.3 : 1}>
                       <rect
                         x={labelPoint.x - (edge.label.length * 2.6 + 6)}
                         y={labelPoint.y - 8}
@@ -941,28 +957,43 @@ export function FlowCanvas({
                       </text>
                     </g>
                   )}
-                  {visual.flowing &&
-                    !reducedMotion &&
-                    Array.from({ length: PACKETS_PER_EDGE }, (_, packetIndex) => (
-                      <circle
-                        key={packetIndex}
-                        r={packetIndex === 0 ? 4 : 2.6}
-                        fill={accentColor(visual.accent)}
-                        opacity={packetIndex === 0 ? 0.95 : 0.45}
-                        filter={packetIndex === 0 ? 'url(#flow-packet-glow)' : undefined}
-                      >
-                        <animateMotion
-                          dur="1.6s"
-                          begin={`${-packetIndex * (1.6 / PACKETS_PER_EDGE)}s`}
-                          repeatCount="indefinite"
-                        >
-                          <mpath href={`#edge-path-${edge.id}`} />
-                        </animateMotion>
-                      </circle>
-                    ))}
                 </g>
               )
             })}
+            {/* Data packets: one layer above every wire, still behind the
+                node surfaces. Each packet follows the real edge path. */}
+            {!reducedMotion && packetEdges.length > 0 && (
+              <g className="flow-packets" data-layer="packets" aria-hidden>
+                {packetEdges.map((edge) => {
+                  const accent = edgeAccent(edge)
+                  return (
+                    <g key={edge.id} data-edge-id={edge.id} data-accent={accent}>
+                      {Array.from({ length: PACKETS_PER_EDGE }, (_, packetIndex) => (
+                        <circle
+                          key={packetIndex}
+                          className="flow-packet"
+                          data-primary={packetIndex === 0 ? 'true' : undefined}
+                          r={packetIndex === 0 ? 4.2 : 2.8}
+                          fill={accentColor(accent)}
+                          opacity={packetIndex === 0 ? 0.95 : 0.55}
+                          filter={
+                            packetIndex === 0 ? 'url(#flow-packet-glow)' : undefined
+                          }
+                        >
+                          <animateMotion
+                            dur="1.6s"
+                            begin={`${-packetIndex * (1.6 / PACKETS_PER_EDGE)}s`}
+                            repeatCount="indefinite"
+                          >
+                            <mpath href={`#edge-path-${edge.id}`} />
+                          </animateMotion>
+                        </circle>
+                      ))}
+                    </g>
+                  )
+                })}
+              </g>
+            )}
           </svg>
 
           {visibleNodes.map((node) => (

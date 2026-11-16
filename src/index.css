@@ -14,6 +14,9 @@
   --surface-3: #e7ecf4;
   --border: #dbe2ee;
   --border-strong: #c4cfe0;
+  /* Wires need their own token: --border-strong is a hairline divider and
+     vanishes against the canvas at the fit zoom. */
+  --flow-wire: #64748b;
   --text-primary: #101828;
   --text-secondary: #475467;
   --text-muted: #98a2b3;
@@ -72,6 +75,9 @@
   --surface-3: #1a2440;
   --border: #1e2a45;
   --border-strong: #2c3a5c;
+  /* Dark-theme wires: brighter than the border token so every connection
+     reads as a real curve even while its stage is still pending. */
+  --flow-wire: #6f82a1;
   --text-primary: #e6ebf5;
   --text-secondary: #a3b1cc;
   --text-muted: #6b7a9c;
