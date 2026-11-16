@@ -349,6 +349,33 @@ body {
     0 18px 36px -18px color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
+/* Upstream nodes on the selected trace get a subtle accent rim. Kept
+   quieter than the selected-node treatment above so the destination is
+   still obvious at a glance. */
+.flow-node[data-upstream='true'] {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--border));
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #fff 55%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--accent) 26%, transparent),
+    0 10px 24px -18px color-mix(in srgb, var(--accent) 42%, transparent);
+}
+
+.dark .flow-node[data-upstream='true'] {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 0 0 1px color-mix(in srgb, var(--accent) 34%, transparent),
+    0 12px 28px -18px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+/* Sockets on the traced route glow so the path visibly enters and leaves
+   every upstream node at the real port. */
+.flow-node[data-upstream='true'] .flow-socket,
+.flow-node[data-selected='true'] .flow-socket {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 72%, transparent),
+    0 0 9px color-mix(in srgb, var(--accent) 42%, transparent);
+}
+
 .flow-node:focus-visible,
 .flow-node[data-selected='true']:focus-visible {
   outline: 2px solid var(--accent);
@@ -900,6 +927,15 @@ body {
   }
 }
 
+/* Short colour/weight transitions make switching the traced node read as
+   a smooth hand-off instead of an abrupt restyle. */
+.flow-edge > path {
+  transition:
+    stroke 150ms ease,
+    stroke-width 150ms ease,
+    opacity 150ms ease;
+}
+
 @keyframes flow-edge-march {
   to {
     stroke-dashoffset: -16;
@@ -925,5 +961,8 @@ body {
   }
   .flow-edge-active {
     animation: none;
+  }
+  .flow-edge > path {
+    transition: none;
   }
 }

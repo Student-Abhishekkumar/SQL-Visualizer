@@ -123,4 +123,30 @@ describe('FlowCanvas reduced motion', () => {
     expect(document.querySelectorAll('svg animateMotion').length).toBe(0)
     expect(document.querySelectorAll('.flow-edge-active').length).toBe(0)
   })
+
+  it('keeps the traced selection path but renders no moving particles', () => {
+    const graph = buildFlowGraph(makeTrace())
+    const state = deriveFlowState(graph, new Set(['FROM', 'WHERE']), 'SELECT', false)
+    render(
+      <div style={{ width: 900, height: 700 }}>
+        <FlowCanvas
+          graph={graph}
+          nodeStatuses={state.nodes}
+          edgeStatuses={state.edges}
+          packetEdgeIds={state.packetEdgeIds}
+          selectedNodeId="op-WHERE"
+          onSelectNode={vi.fn()}
+        />
+      </div>,
+    )
+
+    const incoming = graph.edges.find((edge) => edge.to === 'op-WHERE')!
+    expect(
+      document
+        .getElementById(`edge-path-${incoming.id}`)
+        ?.parentElement?.getAttribute('data-selected-path'),
+    ).toBe('true')
+    expect(document.querySelectorAll('svg animateMotion').length).toBe(0)
+    expect(document.querySelectorAll('.flow-edge-active').length).toBe(0)
+  })
 })

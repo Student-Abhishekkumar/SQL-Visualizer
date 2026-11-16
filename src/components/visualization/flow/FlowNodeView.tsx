@@ -245,6 +245,7 @@ function NodeFrame({
   node,
   status,
   selected,
+  upstream,
   expanded,
   dragging,
   offsetX,
@@ -257,6 +258,8 @@ function NodeFrame({
   node: FlowGraphNode
   status: FlowElementStatus
   selected: boolean
+  /** True when this node feeds the selected node (upstream trace). */
+  upstream: boolean
   expanded: boolean
   /** True while this node is under an active pointer drag. */
   dragging: boolean
@@ -283,6 +286,7 @@ function NodeFrame({
       data-kind={node.kind}
       data-status={status}
       data-selected={selected ? 'true' : undefined}
+      data-upstream={upstream ? 'true' : undefined}
       data-expanded={expanded ? 'true' : undefined}
       data-dragging={dragging ? 'true' : undefined}
       data-unsupported={node.unsupported === true ? 'true' : undefined}
@@ -306,7 +310,7 @@ function NodeFrame({
         top: node.y + offsetY,
         width: node.width,
         height: displayHeight,
-        zIndex: dragging ? 40 : expanded ? 30 : selected ? 20 : 1,
+        zIndex: dragging ? 40 : expanded ? 30 : selected ? 20 : upstream ? 2 : 1,
       }}
     >
       {node.sockets.map((socket) => (
@@ -326,6 +330,8 @@ interface FlowNodeViewProps {
   node: FlowGraphNode
   status: FlowElementStatus
   selected: boolean
+  /** True when this node feeds the selected node (upstream trace). */
+  upstream?: boolean
   expanded: boolean
   /** True while this node is being dragged by the pointer. */
   dragging?: boolean
@@ -343,6 +349,7 @@ export const FlowNodeView = memo(function FlowNodeView({
   node,
   status,
   selected,
+  upstream = false,
   expanded,
   dragging = false,
   offsetX = 0,
@@ -364,6 +371,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         node={node}
         status={status}
         selected={selected}
+        upstream={upstream}
         expanded={expanded}
         dragging={dragging}
         offsetX={offsetX}
@@ -415,6 +423,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         node={node}
         status={status}
         selected={selected}
+        upstream={upstream}
         expanded={false}
         dragging={dragging}
         offsetX={offsetX}
@@ -458,6 +467,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         node={node}
         status={status}
         selected={selected}
+        upstream={upstream}
         expanded={expanded}
         dragging={dragging}
         offsetX={offsetX}
@@ -504,6 +514,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         node={node}
         status={status}
         selected={selected}
+        upstream={upstream}
         expanded={expanded}
         dragging={dragging}
         offsetX={offsetX}
@@ -548,6 +559,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         node={node}
         status={status}
         selected={selected}
+        upstream={upstream}
         expanded={false}
         dragging={dragging}
         offsetX={offsetX}
@@ -592,6 +604,7 @@ export const FlowNodeView = memo(function FlowNodeView({
       node={node}
       status={status}
       selected={selected}
+      upstream={upstream}
       expanded={expanded}
       dragging={dragging}
       offsetX={offsetX}

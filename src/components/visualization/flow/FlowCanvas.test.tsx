@@ -3,6 +3,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildFlowGraph, deriveFlowState } from '../../../services/visualization/graphBuilder'
 import { flowBoxesOverlap } from '../../../services/visualization/flowLayout'
+import { traceUpstreamPath } from '../../../services/visualization/flowPath'
 import type { FlowGraph } from '../../../types/flowGraph'
 import type { StageSnapshot, VisualizationTrace } from '../../../types/visualization'
 import { FlowCanvas } from './FlowCanvas'
@@ -120,6 +121,52 @@ function makeJoinTrace(): VisualizationTrace {
 }
 
 const joinGraph = buildFlowGraph(makeJoinTrace())
+
+/** FROM → WHERE → GROUP BY → HAVING → SELECT, with real groups/branches. */
+function makeGroupTrace(): VisualizationTrace {
+  const base = makeTrace()
+  const stages: VisualizationTrace['stages'] = [
+    'FROM',
+    'WHERE',
+    'GROUP_BY',
+    'HAVING',
+    'SELECT',
+  ]
+  const group = (index: number): StageSnapshot['groups'][number] => ({
+    index,
+    key: `department ${index}`,
+    keyValues: [index],
+    rowIds: [`r${index}a`, `r${index}b`],
+    aggregates: { 'COUNT(*)': 2 },
+  })
+  return {
+    ...base,
+    query:
+      'SELECT department_id, COUNT(*) FROM employees WHERE salary > 0 GROUP BY department_id HAVING COUNT(*) > 1',
+    stages,
+    capability: {
+      ...base.capability,
+      supportedStages: stages,
+      hasAggregation: true,
+    },
+    stageSnapshots: [
+      snapshot('FROM', 8),
+      snapshot('WHERE', 6, 2),
+      { ...snapshot('GROUP_BY', 6), groups: [group(1), group(2), group(3)] },
+      snapshot('HAVING', 4, 2),
+      snapshot('SELECT', 4),
+    ],
+  }
+}
+
+const groupGraph = buildFlowGraph(makeGroupTrace())
+const groupStages = new Set<StageSnapshot['stage']>([
+  'FROM',
+  'WHERE',
+  'GROUP_BY',
+  'HAVING',
+  'SELECT',
+])
 
 function renderCanvas(overrides: {
   selectedNodeId?: string | null
@@ -695,6 +742,291 @@ describe('FlowCanvas', () => {
     expect(Number.parseFloat(source.style.left)).toBeCloseTo(1200, 5)
     expect(Number.parseFloat(surface.style.width)).toBeGreaterThan(beforeWidth)
     expect(Number.parseFloat(surface.style.width)).toBeGreaterThanOrEqual(1200 + 248 + 48)
+  })
+
+  it('traces the complete upstream path into the selected operation', () => {
+    const state = deriveFlowState(groupGraph, groupStages, null, false)
+    renderGraph(groupGraph, state, { selectedNodeId: 'op-HAVING' })
+
+    const expected = traceUpstreamPath(groupGraph, 'op-HAVING')
+    expect(expected.edgeIds.size).toBeGreaterThan(0)
+    for (const edgeId of expected.edgeIds) {
+      const path = readPath(edgeId)
+      expectReadableWire(path)
+      expect(path.getAttribute('stroke')).toBe('var(--accent)')
+      expect(path.getAttribute('marker-end')).toBe('url(#flow-arrow-selected)')
+      expect(path.parentElement?.getAttribute('data-selected-path')).toBe('true')
+    }
+
+    // Outgoing connections do not feed the selected node and stay dimmed.
+    const outgoing = groupGraph.edges.find((edge) => edge.from === 'op-HAVING')!
+    expect(readPath(outgoing.id).parentElement?.getAttribute('data-selected-path')).toBeNull()
+    expect(Number(readPath(outgoing.id).getAttribute('opacity'))).toBeLessThan(0.3)
+
+    // Upstream nodes get a subtle rim; the destination is the prominent one.
+    expect(
+      screen.getByRole('button', { name: /Operation WHERE/ }).getAttribute('data-upstream'),
+    ).toBe('true')
+    const having = screen.getByRole('button', { name: /Operation HAVING/ })
+    expect(having.getAttribute('data-selected')).toBe('true')
+    expect(having.getAttribute('data-upstream')).toBeNull()
+
+    // Exactly one animated stream per traced edge, bound to its real path.
+    const groups = [
+      ...document.querySelectorAll('.flow-packets g[data-mode="selection"]'),
+    ]
+    expect(groups).toHaveLength(expected.edgeIds.size)
+    for (const group of groups) {
+      const edgeId = group.getAttribute('data-edge-id')!
+      expect(expected.edgeIds.has(edgeId)).toBe(true)
+      expect(group.querySelector('mpath')?.getAttribute('href')).toBe(`#edge-path-${edgeId}`)
+      expect(group.querySelectorAll('circle.flow-packet')).toHaveLength(3)
+    }
+  })
+
+  it('traces both input branches into a selected JOIN', () => {
+    const state = deriveFlowState(joinGraph, new Set(['FROM', 'JOIN', 'SELECT']), null, false)
+    renderGraph(joinGraph, state, { selectedNodeId: 'op-JOIN' })
+
+    const inputs = joinGraph.edges.filter((edge) => edge.to === 'op-JOIN')
+    expect(inputs).toHaveLength(2)
+    for (const edge of inputs) {
+      expect(readPath(edge.id).parentElement?.getAttribute('data-selected-path')).toBe('true')
+      expect(readPath(edge.id).getAttribute('marker-end')).toBe('url(#flow-arrow-selected)')
+    }
+    for (const source of joinGraph.nodes.filter((node) => node.kind === 'source')) {
+      expect(
+        screen
+          .getByRole('button', { name: new RegExp(`Source table ${source.label}`) })
+          .getAttribute('data-upstream'),
+      ).toBe('true')
+    }
+    expect(
+      document.querySelectorAll('.flow-packets g[data-mode="selection"]'),
+    ).toHaveLength(inputs.length)
+  })
+
+  it('traces the entire main pipeline when the final result is selected', () => {
+    const state = deriveFlowState(groupGraph, groupStages, null, false)
+    renderGraph(groupGraph, state, { selectedNodeId: 'final' })
+
+    const expected = traceUpstreamPath(groupGraph, 'final')
+    const mainEdges = groupGraph.edges.filter(
+      (edge) => edge.kind === 'main' || edge.kind === 'final',
+    )
+    expect([...expected.edgeIds].sort()).toEqual(mainEdges.map((edge) => edge.id).sort())
+    for (const edge of mainEdges) {
+      expect(readPath(edge.id).parentElement?.getAttribute('data-selected-path')).toBe('true')
+    }
+
+    // Rejected and group fan-outs are not part of the final-result path.
+    const sideEdges = groupGraph.edges.filter(
+      (edge) => edge.kind === 'rejected' || edge.kind === 'group-member',
+    )
+    expect(sideEdges.length).toBeGreaterThan(0)
+    for (const edge of sideEdges) {
+      expect(readPath(edge.id).parentElement?.getAttribute('data-selected-path')).toBeNull()
+    }
+    expect(
+      screen.getByRole('button', { name: /Final result/ }).getAttribute('data-selected'),
+    ).toBe('true')
+    expect(
+      document.querySelectorAll('.flow-packets g[data-mode="selection"]'),
+    ).toHaveLength(expected.edgeIds.size)
+  })
+
+  it('traces the rejected-row branch when its destination is selected', () => {
+    renderCanvas({ selectedNodeId: 'branch-WHERE' })
+
+    const rejected = graph.edges.find((edge) => edge.kind === 'rejected')!
+    const path = readPath(rejected.id)
+    expect(path.parentElement?.getAttribute('data-selected-path')).toBe('true')
+    // Branch semantics survive the trace: still dashed, now selection-coloured.
+    expect(path.getAttribute('stroke-dasharray')).toBe('5 4')
+    expect(path.getAttribute('marker-end')).toBe('url(#flow-arrow-selected)')
+
+    // The accepted route does not lead to the rejected records.
+    const accepted = graph.edges.find(
+      (edge) => edge.from === 'op-WHERE' && edge.kind === 'main',
+    )!
+    expect(readPath(accepted.id).parentElement?.getAttribute('data-selected-path')).toBeNull()
+    expect(
+      screen.getByRole('button', { name: /Rejected rows/ }).getAttribute('data-selected'),
+    ).toBe('true')
+    expect(
+      screen.getByRole('button', { name: /Operation WHERE/ }).getAttribute('data-upstream'),
+    ).toBe('true')
+  })
+
+  it('recalculates the trace immediately when another node is selected', () => {
+    const state = deriveFlowState(graph, new Set(['FROM', 'WHERE']), 'SELECT', false)
+    const ui = (selected: string | null) => (
+      <div style={{ width: 900, height: 700 }}>
+        <FlowCanvas
+          graph={graph}
+          nodeStatuses={state.nodes}
+          edgeStatuses={state.edges}
+          packetEdgeIds={state.packetEdgeIds}
+          selectedNodeId={selected}
+          onSelectNode={vi.fn()}
+        />
+      </div>
+    )
+    const { rerender } = render(ui('branch-WHERE'))
+
+    const rejected = graph.edges.find((edge) => edge.kind === 'rejected')!
+    const incoming = graph.edges.find((edge) => edge.to === 'op-WHERE')!
+    expect(readPath(rejected.id).parentElement?.getAttribute('data-selected-path')).toBe('true')
+
+    rerender(ui('op-WHERE'))
+    expect(readPath(rejected.id).parentElement?.getAttribute('data-selected-path')).toBeNull()
+    expect(readPath(incoming.id).parentElement?.getAttribute('data-selected-path')).toBe('true')
+    const groups = [
+      ...document.querySelectorAll('.flow-packets g[data-mode="selection"]'),
+    ]
+    expect(groups.map((group) => group.getAttribute('data-edge-id'))).toEqual([incoming.id])
+  })
+
+  it('restores playback-driven wires when the selection is cleared', () => {
+    const state = deriveFlowState(graph, new Set(['FROM', 'WHERE']), 'SELECT', false)
+    const ui = (selected: string | null) => (
+      <div style={{ width: 900, height: 700 }}>
+        <FlowCanvas
+          graph={graph}
+          nodeStatuses={state.nodes}
+          edgeStatuses={state.edges}
+          packetEdgeIds={state.packetEdgeIds}
+          selectedNodeId={selected}
+          onSelectNode={vi.fn()}
+        />
+      </div>
+    )
+    const { rerender } = render(ui('branch-WHERE'))
+    const active = graph.edges.find(
+      (edge) => edge.from === 'data-WHERE' && edge.to === 'op-SELECT',
+    )!
+    expect(Number(readPath(active.id).getAttribute('opacity'))).toBeLessThan(0.3)
+
+    rerender(ui(null))
+    expect(document.querySelector('[data-selected-path]')).toBeNull()
+    expect(document.querySelectorAll('.flow-packets g[data-mode="selection"]')).toHaveLength(0)
+    expect(document.querySelectorAll('.flow-packets g[data-mode="playback"]')).toHaveLength(
+      state.packetEdgeIds.length,
+    )
+    expect(Number(readPath(active.id).getAttribute('opacity'))).toBeGreaterThan(0.6)
+    expect(
+      screen.getByRole('button', { name: /Operation WHERE/ }).getAttribute('data-upstream'),
+    ).toBeNull()
+    expect(
+      document.querySelector('[role="application"]')?.getAttribute('data-selected-node'),
+    ).toBeNull()
+  })
+
+  it('keeps the traced path bound to live geometry after a node is dragged', () => {
+    const state = deriveFlowState(groupGraph, groupStages, null, false)
+    renderGraph(groupGraph, state, { selectedNodeId: 'op-HAVING' })
+
+    const where = screen.getByRole('button', { name: /Operation WHERE/ })
+    const incoming = groupGraph.edges.find((edge) => edge.to === 'op-WHERE')!
+    const before = readPath(incoming.id).getAttribute('d')
+    const canvas = screen.getByRole('application')
+
+    fireEvent.pointerDown(where, { button: 0, pointerId: 201, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(canvas, { pointerId: 201, clientX: 80, clientY: 70 })
+    fireEvent.pointerUp(canvas, { pointerId: 201 })
+
+    expect(readPath(incoming.id).getAttribute('d')).not.toBe(before)
+    expect(readPath(incoming.id).parentElement?.getAttribute('data-selected-path')).toBe('true')
+    const group = document.querySelector(
+      `.flow-packets g[data-edge-id="${incoming.id}"]`,
+    )
+    expect(group?.querySelector('mpath')?.getAttribute('href')).toBe(
+      `#edge-path-${incoming.id}`,
+    )
+    // Topology did not change, so the upstream rim survives the drag.
+    expect(
+      screen.getByRole('button', { name: /Source table employees/ }).getAttribute('data-upstream'),
+    ).toBe('true')
+    expect(
+      screen.getByRole('button', { name: /Operation HAVING/ }).getAttribute('data-selected'),
+    ).toBe('true')
+  })
+
+  it('runs selection and playback particles together without duplicate streams', () => {
+    const state = deriveFlowState(graph, new Set(['FROM', 'WHERE']), 'SELECT', false)
+    expect(state.packetEdgeIds.length).toBeGreaterThan(0)
+    const ui = (selected: string | null) => (
+      <div style={{ width: 900, height: 700 }}>
+        <FlowCanvas
+          graph={graph}
+          nodeStatuses={state.nodes}
+          edgeStatuses={state.edges}
+          packetEdgeIds={state.packetEdgeIds}
+          selectedNodeId={selected}
+          onSelectNode={vi.fn()}
+        />
+      </div>
+    )
+    const { rerender } = render(ui('op-WHERE'))
+
+    const first = traceUpstreamPath(graph, 'op-WHERE')
+    const firstUnion = new Set([...first.edgeIds, ...state.packetEdgeIds])
+    const firstGroups = [
+      ...document.querySelectorAll('.flow-packets g[data-edge-id]'),
+    ]
+    expect(firstGroups).toHaveLength(firstUnion.size)
+    expect(new Set(firstGroups.map((group) => group.getAttribute('data-edge-id'))).size).toBe(
+      firstGroups.length,
+    )
+    expect(
+      document.querySelectorAll('.flow-packets g[data-mode="selection"]'),
+    ).toHaveLength(first.edgeIds.size)
+    expect(
+      document.querySelectorAll('.flow-packets g[data-mode="playback"]'),
+    ).toHaveLength(state.packetEdgeIds.length)
+
+    // Selecting the active operation overlaps playback; the shared edge
+    // must render one stream, owned by the selection trace.
+    rerender(ui('op-SELECT'))
+    const selected = traceUpstreamPath(graph, 'op-SELECT')
+    const overlap = [...selected.edgeIds].filter((edgeId) =>
+      state.packetEdgeIds.includes(edgeId),
+    )
+    expect(overlap.length).toBeGreaterThan(0)
+    const merged = new Set([...selected.edgeIds, ...state.packetEdgeIds])
+    expect(document.querySelectorAll('.flow-packets g[data-edge-id]')).toHaveLength(merged.size)
+    for (const edgeId of overlap) {
+      const groups = [
+        ...document.querySelectorAll(`.flow-packets g[data-edge-id="${edgeId}"]`),
+      ]
+      expect(groups).toHaveLength(1)
+      expect(groups[0]?.getAttribute('data-mode')).toBe('selection')
+      expect(groups[0]?.querySelectorAll('circle.flow-packet')).toHaveLength(3)
+      // The traced wire must not also carry the stage-coloured marching
+      // overlay: the selection stream owns direction and colour there.
+      const tracedGroup = document.querySelector(
+        `.flow-edge[data-selected-path="true"] path[id="edge-path-${edgeId}"]`,
+      )?.parentElement
+      expect(tracedGroup?.querySelector('.flow-edge-active')).toBeNull()
+      expect(tracedGroup?.querySelector('path[id^="edge-path-"]')?.getAttribute('stroke')).toBe(
+        'var(--accent)',
+      )
+    }
+    // Live playback still marches along edges that are not on the trace.
+    const playbackOnly = state.packetEdgeIds.filter((edgeId) => !selected.edgeIds.has(edgeId))
+    expect(document.querySelectorAll('.flow-edge-active')).toHaveLength(playbackOnly.length)
+    expect(document.querySelectorAll('[data-selected-path="true"] .flow-edge-active')).toHaveLength(0)
+  })
+
+  it('selects on a click without starting a drag', () => {
+    const { onSelectNode } = renderCanvas()
+    const canvas = screen.getByRole('application')
+    const where = screen.getByRole('button', { name: /Operation WHERE/ })
+    fireEvent.pointerDown(where, { button: 0, pointerId: 211, clientX: 10, clientY: 10 })
+    fireEvent.pointerUp(canvas, { pointerId: 211 })
+    fireEvent.click(where)
+    expect(onSelectNode).toHaveBeenCalledTimes(1)
+    expect(canvas.className).not.toContain('flow-canvas-node-dragging')
   })
 
   it('resets node drag offsets when a new graph is rendered', () => {

@@ -150,26 +150,28 @@ export function VisualizationWorkspace({
     )
   }, [syncStage, clauseSpans, trace, setStageHighlight])
 
-  // Clicking a graph node selects it, moves the shared timeline to the
-  // stage that produced it, and highlights the matching SQL clause — the
-  // flow, table, editor and theory views stay in sync from one state.
+  // Clicking a graph node selects it for inspection and traces its real
+  // upstream data path. Selection is inspection-only: it never seeks the
+  // timeline, re-runs SQL or changes playback. Seeking stays on the
+  // clause strip, pipeline and timeline controls.
   const handleNodeSelect = (node: { stage: VisualizedStage | null; id: string }): void => {
     const deselecting = selectedNodeId === node.id
     setSelectedNodeId(deselecting ? null : node.id)
     if (deselecting) {
       // Clicking the selected node again only clears the inspection; the
-      // playback position it moved to stays where it is.
+      // current playback position is left untouched.
       setInspectedStage(null)
       return
     }
-    setDetailsOpen(true)
+    // Do not force the details panel open: on narrow layouts it replaces
+    // the canvas, which would hide the very upstream trace the click just
+    // started. The Details toggle still opens the inspector for this node.
+    // A node inspection must not leave an unrelated pinned stage behind.
+    setInspectedStage(null)
     if (node.stage === null) {
-      setInspectedStage(null)
       setStageHighlight(null)
       return
     }
-    setInspectedStage(node.stage)
-    seekToStage(node.stage)
     const span = spanOfStage(clauseSpans, node.stage)
     setStageHighlight(span !== null ? { start: span.start, end: span.end, stage: node.stage } : null)
   }

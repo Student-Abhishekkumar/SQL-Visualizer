@@ -20,6 +20,7 @@ import {
   measureFlowLayout,
   resolveFlowLayout,
 } from '../../../services/visualization/flowLayout'
+import { traceUpstreamPath } from '../../../services/visualization/flowPath'
 import { FlowNodeView } from './FlowNodeView'
 import {
   accentColor,
@@ -677,23 +678,43 @@ export function FlowCanvas({
     [graph.nodes, nodeStatuses],
   )
 
-  // Edges connected to the selected or hovered node are emphasized;
-  // everything else is dimmed so the current data path is easy to follow.
-  // A hovered node can disappear when playback rewinds; ignore a stale
-  // hover id so the remaining wires are not all treated as unrelated.
+  // Selection traces the complete upstream route, not just the immediate
+  // neighbours. Traversal is memoized on graph + selection, so dragging,
+  // panning and animation frames reuse the result instead of re-walking
+  // the graph. The traversal itself protects against cycles.
+  const upstreamPath = useMemo(
+    () => traceUpstreamPath(graph, selectedNodeId),
+    [graph, selectedNodeId],
+  )
+  // A selection can outlive a rewind that hides its node. Keep the
+  // selection state, but only trace while the node is actually visible.
+  const selectionActive =
+    selectedNodeId !== null &&
+    upstreamPath.hasSelection &&
+    nodeStatuses[selectedNodeId] !== 'hidden'
+  const selectionEdgeIds = selectionActive ? upstreamPath.edgeIds : null
+  const selectionNodeIds = selectionActive ? upstreamPath.nodeIds : null
+
+  // Edges on the selected route use the trace colour; unrelated edges stay
+  // visible but dimmed. Hover still emphasizes immediate connections when
+  // nothing is selected, and never overrides a selected trace. A hovered
+  // node can disappear when playback rewinds, so stale hover ids are
+  // ignored rather than treating every remaining wire as unrelated.
   const liveHoveredNodeId =
     hoveredNodeId !== null && graph.nodes.some((node) => node.id === hoveredNodeId)
       ? hoveredNodeId
       : null
-  const emphasisNodeId = liveHoveredNodeId ?? selectedNodeId
-  const connectedEdgeIds = useMemo(() => {
-    if (emphasisNodeId === null) return null
+  const hoverEdgeIds = useMemo(() => {
+    if (selectionActive || liveHoveredNodeId === null) return null
     return new Set(
       graph.edges
-        .filter((edge) => edge.from === emphasisNodeId || edge.to === emphasisNodeId)
+        .filter(
+          (edge) => edge.from === liveHoveredNodeId || edge.to === liveHoveredNodeId,
+        )
         .map((edge) => edge.id),
     )
-  }, [graph.edges, emphasisNodeId])
+  }, [graph.edges, liveHoveredNodeId, selectionActive])
+  const connectedEdgeIds = selectionEdgeIds ?? hoverEdgeIds
 
   const packetEdgeIdSet = useMemo(() => new Set(packetEdgeIds), [packetEdgeIds])
 
@@ -707,19 +728,45 @@ export function FlowCanvas({
     })
   }, [visibleEdges, connectedEdgeIds])
 
-  // Packets live in their own layer, painted after every wire and before
-  // the HTML node surfaces. That keeps moving data on top of the static
-  // strokes instead of letting a later edge paint over another edge's
-  // packets (the edge groups are interleaved).
-  const packetEdges = useMemo(
-    () => orderedEdges.filter((edge) => packetEdgeIdSet.has(edge.id)),
-    [orderedEdges, packetEdgeIdSet],
-  )
+  // One packet stream per edge. A selection packet wins when the edge is
+  // on the traced path and also carrying live playback data, so the same
+  // connection never renders two overlapping sets of particles. Edges that
+  // are only playing back keep moving while a selection is active.
+  const packetGroups = useMemo(() => {
+    const ids = new Set<string>()
+    for (const id of selectionEdgeIds ?? []) ids.add(id)
+    for (const id of packetEdgeIdSet) ids.add(id)
+    const groups: Array<{ edge: FlowGraphEdge; mode: 'selection' | 'playback' }> = []
+    if (ids.size === 0) return groups
+    for (const edge of orderedEdges) {
+      if (!ids.has(edge.id)) continue
+      groups.push({
+        edge,
+        mode: selectionEdgeIds?.has(edge.id) === true ? 'selection' : 'playback',
+      })
+    }
+    return groups
+  }, [orderedEdges, packetEdgeIdSet, selectionEdgeIds])
+
+  // Small per-edge phase offsets keep the traced streams from moving in
+  // lockstep; the ordering is nearest-to-selected first, so the result
+  // reads as a continuous pulse rather than a single flashing line.
+  const selectionPacketPhase = useMemo(() => {
+    const phases = new Map<string, number>()
+    if (selectionEdgeIds === null) return phases
+    upstreamPath.orderedEdgeIds.forEach((edgeId, index) => {
+      phases.set(edgeId, index * 0.16)
+    })
+    return phases
+  }, [selectionEdgeIds, upstreamPath.orderedEdgeIds])
 
   const edgeVisual = (edge: FlowGraphEdge, status: FlowElementStatus | undefined) => {
     const active = status === 'active'
     const completed = status === 'completed'
-    const emphasized = connectedEdgeIds?.has(edge.id) ?? false
+    const onTrace = selectionEdgeIds?.has(edge.id) ?? false
+    // Hover emphasis only applies while nothing is selected.
+    const hovered = selectionEdgeIds === null && (connectedEdgeIds?.has(edge.id) ?? false)
+    const emphasized = onTrace || hovered
     const dimmed = connectedEdgeIds !== null && !emphasized
     const accent = edgeAccent(edge)
     // Pending wires must still read as connections. `--border-strong` is a
@@ -727,18 +774,33 @@ export function FlowCanvas({
     // every wire uses the dedicated, high-contrast `--flow-wire` token
     // instead, with completed/active stages layered on their accent.
     const color = active || completed ? accentColor(accent) : 'var(--flow-wire)'
+    const baseWidth = active ? 2.6 : completed ? 2 : 1.7
     return {
       accent,
       stroke: emphasized ? 'var(--accent)' : color,
-      strokeWidth: active ? 2.6 : completed ? 2 : 1.7,
-      opacity: dimmed ? 0.32 : active ? 1 : completed ? 0.92 : 0.72,
+      // The traced route is a little heavier than the same edge's normal
+      // state, so the path reads as one continuous electrical trace.
+      strokeWidth: onTrace ? baseWidth + 0.3 : baseWidth,
+      opacity: dimmed
+        ? selectionEdgeIds !== null
+          ? 0.24
+          : 0.32
+        : onTrace
+          ? 1
+          : active
+            ? 1
+            : completed
+              ? 0.92
+              : 0.72,
       strokeDasharray: isDashedEdge(edge.kind) ? '5 4' : undefined,
-      markerEnd:
-        active || completed
+      markerEnd: emphasized
+        ? 'url(#flow-arrow-selected)'
+        : active || completed
           ? `url(#flow-arrow-${accent})`
           : 'url(#flow-arrow-idle)',
       dimmed,
       active,
+      onTrace,
       flowing: packetEdgeIdSet.has(edge.id),
     }
   }
@@ -827,6 +889,7 @@ export function FlowCanvas({
         onDragStart={(event) => event.preventDefault()}
         role="application"
         aria-label="Animated SQL data-flow canvas"
+        data-selected-node={selectedNodeId ?? undefined}
       >
         <div
           className="absolute origin-top-left"
@@ -868,6 +931,20 @@ export function FlowCanvas({
               >
                 <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--flow-wire)" />
               </marker>
+              {/* Selection trace: same geometry as the operation markers,
+                  but in the selection colour so the destination is
+                  unmistakable at the end of the animated path. */}
+              <marker
+                id="flow-arrow-selected"
+                viewBox="0 0 10 10"
+                refX="9"
+                refY="5"
+                markerWidth="6"
+                markerHeight="6"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent)" />
+              </marker>
               <filter id="flow-packet-glow" x="-120%" y="-120%" width="340%" height="340%">
                 <feGaussianBlur stdDeviation="2" result="blur" />
                 <feMerge>
@@ -891,17 +968,18 @@ export function FlowCanvas({
                   data-status={status}
                   data-flowing={visual.flowing ? 'true' : undefined}
                   data-emphasized={visual.dimmed ? undefined : 'true'}
+                  data-selected-path={visual.onTrace ? 'true' : undefined}
                 >
-                  {/* Soft halo under an active wire so data movement stands
-                      out without thickening the arrow itself. */}
-                  {(visual.active || visual.flowing) && (
+                  {/* Soft halo under an active or traced wire so data
+                      movement stands out without thickening the arrow. */}
+                  {(visual.active || visual.flowing || visual.onTrace) && (
                     <path
                       d={d}
                       fill="none"
-                      stroke={accentColor(visual.accent)}
+                      stroke={visual.onTrace ? 'var(--accent)' : accentColor(visual.accent)}
                       strokeWidth={visual.strokeWidth + 4.5}
                       strokeLinecap="round"
-                      opacity={visual.dimmed ? 0.05 : 0.12}
+                      opacity={visual.onTrace ? 0.16 : visual.dimmed ? 0.05 : 0.12}
                       vectorEffect="non-scaling-stroke"
                       aria-hidden
                     />
@@ -919,8 +997,11 @@ export function FlowCanvas({
                     markerEnd={visual.markerEnd}
                     vectorEffect="non-scaling-stroke"
                   />
-                  {/* Marching overlay: readable direction along the active route. */}
-                  {visual.flowing && !reducedMotion && (
+                  {/* Marching overlay: readable direction along the active route.
+                      Traced edges use their own selection packets for
+                      direction, so the stage-coloured march is suppressed
+                      there to avoid two competing animations/colours. */}
+                  {visual.flowing && !visual.onTrace && !reducedMotion && (
                     <path
                       d={d}
                       fill="none"
@@ -961,28 +1042,59 @@ export function FlowCanvas({
               )
             })}
             {/* Data packets: one layer above every wire, still behind the
-                node surfaces. Each packet follows the real edge path. */}
-            {!reducedMotion && packetEdges.length > 0 && (
+                node surfaces. Each packet follows the real edge path, so
+                the selected upstream trace and live playback always move
+                in the true data-flow direction. */}
+            {!reducedMotion && packetGroups.length > 0 && (
               <g className="flow-packets" data-layer="packets" aria-hidden>
-                {packetEdges.map((edge) => {
+                {packetGroups.map(({ edge, mode }) => {
                   const accent = edgeAccent(edge)
+                  const selectionPacket = mode === 'selection'
+                  const duration = selectionPacket ? 1.25 : 1.6
+                  const phase = selectionPacket
+                    ? (selectionPacketPhase.get(edge.id) ?? 0)
+                    : 0
                   return (
-                    <g key={edge.id} data-edge-id={edge.id} data-accent={accent}>
+                    <g
+                      key={edge.id}
+                      data-edge-id={edge.id}
+                      data-accent={accent}
+                      data-mode={mode}
+                      // Keep playback visible during a trace without
+                      // competing with the brighter selection particles.
+                      opacity={selectionActive && !selectionPacket ? 0.65 : 1}
+                    >
                       {Array.from({ length: PACKETS_PER_EDGE }, (_, packetIndex) => (
                         <circle
                           key={packetIndex}
                           className="flow-packet"
                           data-primary={packetIndex === 0 ? 'true' : undefined}
-                          r={packetIndex === 0 ? 4.2 : 2.8}
-                          fill={accentColor(accent)}
-                          opacity={packetIndex === 0 ? 0.95 : 0.55}
+                          r={
+                            selectionPacket
+                              ? packetIndex === 0
+                                ? 4.5
+                                : 3
+                              : packetIndex === 0
+                                ? 4.2
+                                : 2.8
+                          }
+                          fill={selectionPacket ? 'var(--accent)' : accentColor(accent)}
+                          opacity={
+                            selectionPacket
+                              ? packetIndex === 0
+                                ? 1
+                                : 0.6
+                              : packetIndex === 0
+                                ? 0.95
+                                : 0.55
+                          }
                           filter={
                             packetIndex === 0 ? 'url(#flow-packet-glow)' : undefined
                           }
                         >
                           <animateMotion
-                            dur="1.6s"
-                            begin={`${-packetIndex * (1.6 / PACKETS_PER_EDGE)}s`}
+                            dur={`${duration}s`}
+                            begin={`${-(phase + packetIndex * (duration / PACKETS_PER_EDGE))}s`}
                             repeatCount="indefinite"
                           >
                             <mpath href={`#edge-path-${edge.id}`} />
@@ -1002,6 +1114,11 @@ export function FlowCanvas({
               node={node}
               status={nodeStatuses[node.id] ?? 'pending'}
               selected={selectedNodeId === node.id}
+              upstream={
+                selectionNodeIds !== null &&
+                selectionNodeIds.has(node.id) &&
+                selectedNodeId !== node.id
+              }
               expanded={expandedNodeIds.has(node.id)}
               dragging={draggingNodeId === node.id}
               offsetX={(placements.get(node.id)?.x ?? node.x) - node.x}

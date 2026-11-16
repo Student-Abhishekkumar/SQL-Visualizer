@@ -361,6 +361,33 @@ describe('Flow View behavior', () => {
     expect(screen.queryByRole('complementary', { name: 'Node inspector' })).not.toBeInTheDocument()
   })
 
+  it('selecting a node traces its path without moving playback', async () => {
+    const user = userEvent.setup()
+    const store = useVisualizationStore.getState()
+    store.loadTrace(makeTrace())
+    useVisualizationStore.setState({ status: 'ready' })
+    useVisualizationStore.getState().seekToStage('WHERE')
+    const before = useVisualizationStore.getState().eventIndex
+    const playingBefore = useVisualizationStore.getState().playing
+
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+    await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+
+    // Selection is inspection-only: the simulator never advances.
+    expect(useVisualizationStore.getState().eventIndex).toBe(before)
+    expect(useVisualizationStore.getState().playing).toBe(playingBefore)
+    expect(
+      document.querySelector('[data-selected-node]')?.getAttribute('data-selected-node'),
+    ).toBe('data-WHERE')
+    expect(document.querySelector('[data-selected-path="true"]')).not.toBeNull()
+    // Narrow layouts would replace the canvas with the inspector; the
+    // trace must stay visible until Details is explicitly opened.
+    expect(screen.getByRole('button', { name: 'Details' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    )
+  })
+
   it('switching to Table View keeps the playback position', async () => {
     const user = userEvent.setup()
     const store = useVisualizationStore.getState()
