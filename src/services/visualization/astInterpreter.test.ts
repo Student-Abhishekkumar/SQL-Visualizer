@@ -257,12 +257,26 @@ describe('interpretStatement — scalar subqueries', () => {
     ).toBe(true)
   })
 
-  it('reports IN subqueries as a specific unsupported construct', () => {
+  it('interprets an uncorrelated IN subquery as a supported block', () => {
     const result = interpretStatement(
       'SELECT name FROM employees WHERE department_id IN (SELECT id FROM departments)',
     )
+    expect(result.unsupportedReasons).toEqual([])
+    expect(result.structure?.where).toMatchObject({ kind: 'in_subquery', operator: 'IN' })
+    expect(result.structure?.subqueries[0]).toMatchObject({
+      usage: 'in',
+      correlated: false,
+    })
+    expect(result.structure?.subqueries[0]?.query.blockKind).toBe('in')
+  })
+
+  it('still rejects a correlated IN subquery with a specific reason', () => {
+    const result = interpretStatement(
+      'SELECT name FROM employees e WHERE e.department_id IN (SELECT d.id FROM departments d WHERE d.id = e.department_id)',
+    )
+    expect(result.structure).not.toBeNull()
     expect(
-      result.unsupportedReasons.some((reason) => /IN \/ NOT IN subqueries/i.test(reason)),
+      result.unsupportedReasons.some((reason) => /correlated subqueries/i.test(reason)),
     ).toBe(true)
   })
 })

@@ -30,6 +30,10 @@ function isAggregateExpression(expr: Expression): boolean {
     case 'not':
     case 'unary_minus':
       return isAggregateExpression(expr.operand)
+    case 'in_subquery':
+      return isAggregateExpression(expr.left)
+    case 'exists_subquery':
+      return false
     default:
       return false
   }
@@ -60,6 +64,13 @@ function collectOperators(expr: Expression | null, operators: Set<string>): void
       break
     case 'unary_minus':
       collectOperators(expr.operand, operators)
+      break
+    case 'in_subquery':
+      operators.add(expr.operator)
+      collectOperators(expr.left, operators)
+      break
+    case 'exists_subquery':
+      operators.add(expr.negated ? 'NOT EXISTS' : 'EXISTS')
       break
     default:
       break

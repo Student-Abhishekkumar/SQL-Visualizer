@@ -63,6 +63,12 @@ function collectReferences(expr: Expression | null, out: ColumnReference[]): voi
       // A nested block has its own scope; its references are checked
       // when that block is evaluated.
       break
+    case 'in_subquery':
+      // The left operand belongs to this block; the subquery is its own scope.
+      collectReferences(expr.left, out)
+      break
+    case 'exists_subquery':
+      break
     default:
       break
   }

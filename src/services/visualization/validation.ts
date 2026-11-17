@@ -189,13 +189,14 @@ function quoteIdentifier(name: string): string {
 }
 
 /**
- * Build a standalone SQLite statement for a CTE block. The body alone
- * would lose explicit column names and would not resolve earlier CTEs,
- * so dependencies are re-declared first and the target CTE is selected
- * as a relation. This is the same real SQL the CTE block represents.
+ * Build a standalone SQLite statement for a nested block.
+ *
+ * A block that reads a CTE cannot run in isolation: the CTE definition is
+ * not in its own SQL text. Like the CTE path, prerequisite CTE
+ * definitions are re-declared first (transitively), so scalar, IN, EXISTS
+ * and CTE blocks all compare against the same real SQL they represent.
  */
-function cteValidationSql(block: NestedQueryTrace, trace: VisualizationTrace): string | null {
-  if (block.kind !== 'cte' || block.cteName === undefined || block.cteName === '') return null
+function blockValidationSql(block: NestedQueryTrace, trace: VisualizationTrace): string | null {
   const blocks = trace.nestedQueries ?? []
   const byId = new Map(blocks.map((candidate) => [candidate.id, candidate]))
   const needed = new Set<string>()
@@ -215,10 +216,18 @@ function cteValidationSql(block: NestedQueryTrace, trace: VisualizationTrace): s
     if (definition === null) return null
     definitions.push(definition)
   }
-  const target = cteDefinitionSql(block)
-  if (target === null) return null
-  definitions.push(target)
-  return `WITH ${definitions.join(', ')} SELECT * FROM ${quoteIdentifier(block.cteName)}`
+
+  if (block.kind === 'cte') {
+    if (block.cteName === undefined || block.cteName === '') return null
+    const target = cteDefinitionSql(block)
+    if (target === null) return null
+    definitions.push(target)
+    return `WITH ${definitions.join(', ')} SELECT * FROM ${quoteIdentifier(block.cteName)}`
+  }
+
+  if (block.sql.trim() === '') return null
+  if (definitions.length === 0) return block.sql
+  return `WITH ${definitions.join(', ')} ${block.sql}`
 }
 
 function cteDefinitionSql(block: NestedQueryTrace): string | null {
@@ -299,9 +308,9 @@ export function validateNestedBlocks(
       })
       continue
     }
-    // CTE blocks are validated through a WITH wrapper: the body alone
-    // would lose the declared column list and earlier CTE dependencies.
-    const validationSql = block.kind === 'cte' ? cteValidationSql(block, trace) : block.sql
+    // Blocks that read a CTE are validated through a WITH wrapper that
+    // redeclares the prerequisite definitions; a plain block keeps its SQL.
+    const validationSql = blockValidationSql(block, trace)
     if (validationSql === null) {
       results.push({
         blockId: block.id,
@@ -310,7 +319,7 @@ export function validateNestedBlocks(
         method,
         skipped: true,
         detail:
-          'This CTE cannot be validated independently because a prerequisite CTE definition is unavailable.',
+          'This block cannot be validated independently because a prerequisite CTE definition is unavailable.',
       })
       continue
     }

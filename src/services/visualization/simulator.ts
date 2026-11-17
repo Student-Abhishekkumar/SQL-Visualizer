@@ -907,12 +907,14 @@ function cteDependenciesOf(
 }
 
 /**
- * Evaluate one scalar subquery through the same logical simulator. The
- * nested trace is recorded so its real intermediate snapshots remain
- * inspectable; the scalar value respects SQLite semantics (empty → NULL,
- * multiple rows → first row, exactly one output column).
+ * Evaluate one nested query block through the same logical simulator and
+ * record its real snapshots. The returned value matches how the block is
+ * consumed:
+ * - scalar: first row / first column (empty → NULL)
+ * - in:     the list of first-column values (exactly one column required)
+ * - exists: whether the block produced any row (column count is irrelevant)
  */
-function evaluateScalarSubquery(
+function evaluateSubquery(
   subquery: SubqueryExpr,
   getTableData: (name: string) => TableData | null,
   options: SimulationOptions,
@@ -957,19 +959,41 @@ function evaluateScalarSubquery(
       outcome.reasons.map((reason) => `Subquery ${subquery.text}: ${reason}`),
     )
   }
-  const trace = outcome.trace
-  if (trace.finalColumns.length !== 1) {
+const trace = outcome.trace
+  if (subquery.usage !== 'exists' && trace.finalColumns.length !== 1) {
     throw new SimulationAbort([
-      `Scalar subquery ${subquery.text} returns ${trace.finalColumns.length} columns; SQLite requires exactly one.`,
+      `${
+        subquery.usage === 'in' ? 'IN' : 'Scalar'
+      } subquery ${subquery.text} returns ${trace.finalColumns.length} columns; SQLite requires exactly one.`,
     ])
   }
 
-  const value = trace.finalRows[0]?.values[0] ?? null
+  let value: unknown
+  let note: string | undefined
+  if (subquery.usage === 'exists') {
+    value = trace.finalRows.length > 0
+  } else if (subquery.usage === 'in') {
+    value = trace.finalRows.map((row) => row.values[0] ?? null)
+    if (trace.finalRows.length === 0) {
+      note = 'The subquery returned no rows, so IN is false and NOT IN is true.'
+    }
+  } else {
+    value = trace.finalRows[0]?.values[0] ?? null
+    note =
+      trace.finalRows.length === 0
+        ? 'The subquery returned no rows, so SQLite uses NULL.'
+        : trace.finalRows.length > 1
+          ? `The subquery returned ${trace.finalRows.length} rows; SQLite uses the first row’s first column.`
+          : undefined
+  }
+
   runtime.cache.set(subquery.id, value)
   runtime.nested.push({
     id: subquery.query.id,
-    kind: 'scalar',
-    label: `Scalar subquery · ${selectSummaryOf(subquery.query)}`,
+    kind: subquery.usage === 'in' ? 'in' : subquery.usage === 'exists' ? 'exists' : 'scalar',
+    label: `${
+      subquery.usage === 'in' ? 'IN' : subquery.usage === 'exists' ? 'EXISTS' : 'Scalar'
+    } subquery · ${selectSummaryOf(subquery.query)}`,
     sql: structureText(subquery.query),
     stageSnapshots: trace.stageSnapshots,
     finalColumns: trace.finalColumns,
@@ -979,12 +1003,7 @@ function evaluateScalarSubquery(
     parentId: subquery.query.parentId ?? undefined,
     depth: subquery.query.depth,
     correlated: subquery.correlated,
-    note:
-      trace.finalRows.length === 0
-        ? 'The subquery returned no rows, so SQLite uses NULL.'
-        : trace.finalRows.length > 1
-          ? `The subquery returned ${trace.finalRows.length} rows; SQLite uses the first row’s first column.`
-          : undefined,
+    note,
     // Nested playback uses the block's own real events. Each one is
     // tagged with the block id, so it can never activate outer stages.
     events: trace.events.map((event) => ({
@@ -1013,7 +1032,7 @@ function evaluateSubqueries(
   for (const subquery of structure.subqueries) {
     values.set(
       subquery.id,
-      evaluateScalarSubquery(subquery, getTableData, options, runtime),
+      evaluateSubquery(subquery, getTableData, options, runtime),
     )
   }
   return values

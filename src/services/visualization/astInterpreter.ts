@@ -102,6 +102,11 @@ export interface SubqueryExpr {
   /** Outer clause whose expression contains this block. */
   parentStage: VisualizedStage | null
   /**
+   * How the subquery's result is consumed: a scalar value, a value list
+   * for IN / NOT IN, or an existence test for EXISTS / NOT EXISTS.
+   */
+  usage: 'scalar' | 'in' | 'exists'
+  /**
    * True when the block qualified-references a table that is not part of
    * its own FROM/JOIN scope. Unqualified outer references cannot be
    * detected here (no schema); the simulator resolves them against the
@@ -109,6 +114,23 @@ export interface SubqueryExpr {
    * correlated instead of supported.
    */
   correlated: boolean
+}
+
+/** `expr IN (subquery)` / `expr NOT IN (subquery)`. */
+export interface InSubqueryExpr {
+  kind: 'in_subquery'
+  operator: 'IN' | 'NOT IN'
+  left: Expression
+  subquery: SubqueryExpr
+  text: string
+}
+
+/** `EXISTS (subquery)` / `NOT EXISTS (subquery)`. */
+export interface ExistsSubqueryExpr {
+  kind: 'exists_subquery'
+  negated: boolean
+  subquery: SubqueryExpr
+  text: string
 }
 
 export type Expression =
@@ -123,6 +145,8 @@ export type Expression =
   | ListExpr
   | AggregateExpr
   | SubqueryExpr
+  | InSubqueryExpr
+  | ExistsSubqueryExpr
 
 export interface AggregateCall {
   name: 'COUNT' | 'SUM' | 'AVG' | 'MIN' | 'MAX'
@@ -192,8 +216,11 @@ export interface OrderByTerm {
 export interface QueryStructure {
   /** Stable query-block id (root and each nested block get one). */
   id: string
-  /** Block kind: root statement, nested scalar subquery, or CTE body. */
-  blockKind: 'root' | 'scalar' | 'cte'
+  /**
+   * Block kind: root statement, scalar subquery, CTE body, or the
+   * subquery form of IN / EXISTS.
+   */
+  blockKind: 'root' | 'scalar' | 'cte' | 'in' | 'exists'
   /** Parent block id, null for the root block. */
   parentId: string | null
   /** Nesting depth relative to the root block (root = 0). */
@@ -342,6 +369,11 @@ function collectQualifiedTables(expr: Expression | null, tables: Set<string>): v
     case 'list':
       for (const item of expr.exprs) collectQualifiedTables(item, tables)
       break
+    case 'in_subquery':
+      collectQualifiedTables(expr.left, tables)
+      break
+    case 'exists_subquery':
+      break
     default:
       break
   }
@@ -417,6 +449,7 @@ export function interpretExpression(
       query: nested,
       text: `(${structureText(nested)})`,
       parentStage: context.parentStage,
+      usage: 'scalar',
       correlated: isPotentiallyCorrelated(nested),
     }
     context.collected.push(expr)
@@ -460,10 +493,15 @@ export function interpretExpression(
       if (op === 'AND' || op === 'OR') {
         return { kind: 'logical', operator: op, left, right, text: `${left.text} ${op} ${right.text}` }
       }
-      if (op === 'IN' || op === 'NOT IN') {
-        if (right.kind === 'subquery') {
-          context.reasons.push('IN / NOT IN subqueries are not visualizable yet.')
-          return null
+      if ((op === 'IN' || op === 'NOT IN') && right.kind === 'subquery') {
+        right.usage = 'in'
+        right.query.blockKind = 'in'
+        return {
+          kind: 'in_subquery',
+          operator: op,
+          left,
+          subquery: right,
+          text: `${left.text} ${op} ${right.text}`,
         }
       }
       if (COMPARISON_OPERATORS.has(op)) {
@@ -509,8 +547,19 @@ export function interpretExpression(
     case 'unary_expr': {
       const op = String(raw.operator).toUpperCase()
       if (op === 'NOT EXISTS') {
-        context.reasons.push('EXISTS / NOT EXISTS subqueries are not visualizable yet.')
-        return null
+        const nested = interpretExpression(raw.expr, context)
+        if (nested === null || nested.kind !== 'subquery') {
+          context.reasons.push('EXISTS requires a subquery argument.')
+          return null
+        }
+        nested.usage = 'exists'
+        nested.query.blockKind = 'exists'
+        return {
+          kind: 'exists_subquery',
+          negated: true,
+          subquery: nested,
+          text: `NOT EXISTS ${nested.text}`,
+        }
       }
       const operand = interpretExpression(raw.expr, context)
       if (!operand) return null
@@ -520,8 +569,19 @@ export function interpretExpression(
     }
     case 'function': {
       if (rawFunctionName(raw).toUpperCase() === 'EXISTS') {
-        context.reasons.push('EXISTS / NOT EXISTS subqueries are not visualizable yet.')
-        return null
+        const nested = interpretExpression(raw.args, context)
+        if (nested === null || nested.kind !== 'subquery') {
+          context.reasons.push('EXISTS requires a subquery argument.')
+          return null
+        }
+        nested.usage = 'exists'
+        nested.query.blockKind = 'exists'
+        return {
+          kind: 'exists_subquery',
+          negated: false,
+          subquery: nested,
+          text: `EXISTS ${nested.text}`,
+        }
       }
       return null
     }
@@ -566,6 +626,10 @@ function isAggregateExpression(expr: Expression): boolean {
     case 'not':
     case 'unary_minus':
       return isAggregateExpression(expr.operand)
+    case 'in_subquery':
+      return isAggregateExpression(expr.left)
+    case 'exists_subquery':
+      return false
     default:
       return false
   }
@@ -884,6 +948,11 @@ function interpretSelectAst(
       case 'not':
       case 'unary_minus':
         collectAggregates(expr.operand)
+        break
+      case 'in_subquery':
+        collectAggregates(expr.left)
+        break
+      case 'exists_subquery':
         break
       default:
         break

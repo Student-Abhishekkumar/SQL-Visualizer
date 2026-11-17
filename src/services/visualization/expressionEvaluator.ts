@@ -244,12 +244,23 @@ function compareVerdict(
   }
 }
 
-function inVerdict(left: unknown, list: ListExpr, negated: boolean, ctx: RowContext): EvalVerdict {
-  if (list.exprs.length === 0) return negated ? 'true' : 'false'
+/**
+ * Three-valued IN over already-resolved values, matching SQLite:
+ * - empty set: IN → false, NOT IN → true
+ * - NULL left → UNKNOWN (even for NOT IN)
+ * - a match → IN true / NOT IN false
+ * - no match but a NULL member → UNKNOWN
+ * - otherwise IN false / NOT IN true
+ */
+function inValuesVerdict(
+  left: unknown,
+  items: readonly unknown[],
+  negated: boolean,
+): EvalVerdict {
+  if (items.length === 0) return negated ? 'true' : 'false'
   if (left === null || left === undefined) return 'unknown'
   let sawNull = false
-  for (const item of list.exprs) {
-    const itemValue = evaluateExpression(item, ctx)
+  for (const itemValue of items) {
     if (itemValue === null || itemValue === undefined) {
       sawNull = true
       continue
@@ -260,6 +271,14 @@ function inVerdict(left: unknown, list: ListExpr, negated: boolean, ctx: RowCont
   }
   if (sawNull) return 'unknown'
   return negated ? 'true' : 'false'
+}
+
+function inVerdict(left: unknown, list: ListExpr, negated: boolean, ctx: RowContext): EvalVerdict {
+  return inValuesVerdict(
+    left,
+    list.exprs.map((item) => evaluateExpression(item, ctx)),
+    negated,
+  )
 }
 
 function likeVerdict(left: unknown, pattern: unknown, negated: boolean): EvalVerdict {
@@ -320,6 +339,30 @@ export function evaluateExpression(expr: Expression, ctx: RowContext): unknown {
         )
       }
       return values.get(expr.id)
+    }
+    case 'in_subquery': {
+      const values = ctx.subqueryValues?.get(expr.subquery.id)
+      if (!Array.isArray(values)) {
+        throw new EvaluationError(
+          `Subquery ${expr.subquery.text} has not been evaluated in this context.`,
+        )
+      }
+      const verdict = inValuesVerdict(
+        evaluateExpression(expr.left, ctx),
+        values,
+        expr.operator === 'NOT IN',
+      )
+      return verdict === 'unknown' ? null : verdict === 'true'
+    }
+    case 'exists_subquery': {
+      // EXISTS is never UNKNOWN: it is true or false for every row.
+      const exists = ctx.subqueryValues?.get(expr.subquery.id)
+      if (typeof exists !== 'boolean') {
+        throw new EvaluationError(
+          `Subquery ${expr.subquery.text} has not been evaluated in this context.`,
+        )
+      }
+      return expr.negated ? !exists : exists
     }
     case 'not': {
       const verdict = notVerdict(evaluateCondition(expr.operand, ctx))

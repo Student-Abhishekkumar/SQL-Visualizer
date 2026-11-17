@@ -68,6 +68,8 @@ partially, and what it does not do yet. The [README](../README.md) is the short 
 | Single `SELECT` visualization | ◐ | Other statements execute normally but cannot be visualized. |
 | Logical pipeline | ✅ | `FROM`, `JOIN`, `WHERE`, `GROUP BY`, `HAVING`, `SELECT`, `DISTINCT`, `ORDER BY`, `LIMIT` / `OFFSET`. |
 | Scalar subqueries | ✅ | Non-correlated scalar subqueries in `WHERE`, `SELECT` and `JOIN … ON` are simulated as their own real pipeline; output feeds the consuming stage and is inspectable. |
+| Non-recursive CTEs | ✅ | Multiple `WITH` definitions, chained dependencies and explicit column lists. Each CTE is simulated as its own query block with snapshots, events and dependency edges. |
+| `IN` / `EXISTS` subqueries | ✅ | Uncorrelated `IN`, `NOT IN`, `EXISTS` and `NOT EXISTS` are simulated as their own blocks with SQLite three-valued logic. `IN` requires a single-column subquery; correlated forms are reported unsupported. |
 | Stage snapshots | ✅ | Immutable snapshots with output rows, removed rows and input/output counts, including filtered and skipped rows. |
 | Full-pipeline animation | ✅ | The default playback animates the whole trace from source tables to the final result. |
 | Playback | ✅ | Play, pause, previous, next, seek, restart and jump to final result. |
@@ -96,14 +98,25 @@ partially, and what it does not do yet. The [README](../README.md) is the short 
 - Non-correlated scalar subqueries in `WHERE`, `SELECT` and `JOIN … ON` expressions. Each nested
   block is simulated independently with real snapshots, and its output is shown as an inspectable
   source feeding the consuming stage.
+- Non-recursive common table expressions (`WITH`): multiple definitions, chained references and
+  explicit column lists. Supported scalar, `IN` and `EXISTS` subqueries may appear inside a CTE body.
+- Uncorrelated `IN` / `NOT IN` and `EXISTS` / `NOT EXISTS` subqueries. `IN` / `NOT IN` requires a
+  single-column subquery and follows SQLite three-valued logic; `EXISTS` ignores the column count.
 
 ### Limited or conditional behavior
 
 - **Scalar subquery semantics:** an empty subquery result becomes `NULL`, a multi-row result uses the
   first row's first column (SQLite's rule), and a subquery returning more than one column is rejected
   instead of guessed.
-- **Correlated subqueries:** qualification-based correlation is detected during interpretation and the
-  query is reported as unsupported rather than simulated with invented per-row values.
+- **Correlated subqueries:** qualification-based and schema-resolved correlation are detected before
+  execution. Correlated scalar, `IN` and `EXISTS` subqueries are reported as unsupported rather than
+  simulated with invented per-row values.
+- **CTE scope:** CTEs are non-recursive. A CTE body sees only earlier definitions and cannot reference
+  itself; forward and self references are rejected with explicit reasons. `WITH RECURSIVE` is
+  reported unsupported.
+- **`IN` / `NOT IN` subqueries:** must return exactly one column. `NOT IN` respects SQLite's
+  three-valued logic — a `NULL` member makes a non-match unknown, and an empty result is true — so it
+  is not treated as a plain inverse of `IN`.
 - **Large inputs:** the visual trace is capped at 500 rows and 2,000 events. Source previews show at
   most 12 rows. This affects the animation only, never SQLite's result.
 - **Implicit aggregation:** aggregate queries without `GROUP BY` are simulated as a single group, with
@@ -122,9 +135,9 @@ These still run in SQLite and return normal results:
 
 - `INSERT`, `UPDATE`, `DELETE`, DDL, `PRAGMA` and transaction statements.
 - Queries without a `FROM` clause (for example `SELECT 1`).
-- Common table expressions (`WITH`).
+- Recursive CTEs (`WITH RECURSIVE`).
 - Compound selects (`UNION`, `UNION ALL`, `INTERSECT`, `EXCEPT`).
-- Correlated subqueries, `IN` / `NOT IN` subqueries and `EXISTS` / `NOT EXISTS`.
+- Correlated subqueries, including correlated `IN` / `NOT IN` and `EXISTS` / `NOT EXISTS`.
 - Derived tables in `FROM` / `JOIN` (`FROM (SELECT …)`), including comma-separated cross joins
   (`FROM a, b`).
 - `RIGHT JOIN` and `FULL OUTER JOIN`.
