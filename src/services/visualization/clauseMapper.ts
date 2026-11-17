@@ -14,7 +14,12 @@
  * highlighting arbitrary text.
  */
 
-import type { VisualizedStage } from '../../types/visualization'
+import type {
+  NestedQueryTrace,
+  QueryBlockId,
+  VisualizedStage,
+} from '../../types/visualization'
+import { ROOT_BLOCK_ID, stageKeyFor } from './queryBlocks'
 
 export interface ClauseSpan {
   /** Pipeline stage this clause belongs to. */
@@ -29,6 +34,23 @@ export interface ClauseSpan {
   columnStart: number
   lineEnd: number
   columnEnd: number
+  /**
+   * Query block that owns this occurrence. Nested blocks have their own
+   * SELECT/FROM/WHERE, so the stage name alone is ambiguous.
+   */
+  blockId: QueryBlockId
+  /**
+   * Block-scoped stage key (`q2:WHERE`; bare `WHERE` for the root). This
+   * is what highlighting and playback activation compare.
+   */
+  stageKey: string
+}
+
+export interface ClauseMappingOptions {
+  /** Nested blocks of the statement, used to attribute occurrences. */
+  nestedQueries?: NestedQueryTrace[]
+  /** Root block id (defaults to q1). */
+  rootBlockId?: QueryBlockId
 }
 
 /**
@@ -167,6 +189,97 @@ function findClauseKeywords(sql: string, mask: boolean[]): KeywordMatch[] {
   return matches.sort((a, b) => a.start - b.start)
 }
 
+interface ParenRegion {
+  open: number
+  close: number
+  contentStart: number
+  contentEnd: number
+}
+
+/** True when the first code token inside a parenthesized range is SELECT. */
+function startsWithSelect(sql: string, mask: boolean[], from: number, to: number): boolean {
+  let i = from
+  while (i < to) {
+    const char = sql[i] ?? ''
+    if (mask[i] !== true || /\s/.test(char)) {
+      i++
+      continue
+    }
+    if (!/[A-Za-z]/.test(char)) return false
+    if (sql.slice(i, i + 'SELECT'.length).toUpperCase() !== 'SELECT') return false
+    const after = sql[i + 'SELECT'.length]
+    if (after !== undefined && /[A-Za-z0-9_$]/.test(after)) return false
+    return true
+  }
+  return false
+}
+
+/**
+ * Parenthesized regions whose first code token is SELECT, i.e. nested
+ * query blocks in source order. The AST carries no positions, so these
+ * regions are the only reliable way to attribute a clause keyword to a
+ * block. Strings/comments/quoted identifiers never count.
+ */
+function findSubqueryRegions(sql: string, mask: boolean[]): ParenRegion[] {
+  const stack: number[] = []
+  const regions: ParenRegion[] = []
+  for (let i = 0; i < sql.length; i++) {
+    if (mask[i] !== true) continue
+    const char = sql[i]
+    if (char === '(') {
+      stack.push(i)
+      continue
+    }
+    if (char !== ')') continue
+    const open = stack.pop()
+    if (open === undefined) continue
+    if (startsWithSelect(sql, mask, open + 1, i)) {
+      regions.push({ open, close: i, contentStart: open + 1, contentEnd: i })
+    }
+  }
+  return regions.sort((a, b) => a.open - b.open)
+}
+
+function normalizeSql(sql: string): string {
+  return sql.replace(/\s+/g, ' ').trim().toLowerCase()
+}
+
+/**
+ * Attribute source regions to nested blocks. An exact normalized-text
+ * match against the block's rendered SQL wins; any remaining block is
+ * assigned to the next unclaimed region in source order so multiple
+ * occurrences still get distinct, deterministic identities.
+ */
+function regionsForBlocks(
+  regions: ParenRegion[],
+  sql: string,
+  blocks: NestedQueryTrace[],
+): Map<number, QueryBlockId> {
+  const owner = new Map<number, QueryBlockId>()
+  const claimed = new Set<number>()
+  for (const block of blocks) {
+    const wanted = normalizeSql(block.sql)
+    const match = regions.findIndex(
+      (region, index) =>
+        !claimed.has(index) && normalizeSql(sql.slice(region.contentStart, region.contentEnd)) === wanted,
+    )
+    if (match >= 0) {
+      owner.set(match, block.id)
+      claimed.add(match)
+    }
+  }
+  let cursor = 0
+  for (const block of blocks) {
+    if ([...owner.values()].includes(block.id)) continue
+    while (cursor < regions.length && claimed.has(cursor)) cursor++
+    if (cursor >= regions.length) break
+    owner.set(cursor, block.id)
+    claimed.add(cursor)
+    cursor++
+  }
+  return owner
+}
+
 /** Convert a character offset to a 1-based Monaco line/column pair. */
 function positionAt(sql: string, offset: number): { line: number; column: number } {
   let line = 1
@@ -186,16 +299,70 @@ function positionAt(sql: string, offset: number): { line: number; column: number
  * Map the query text to clause spans. Deterministic and total: never
  * throws; unrecognized or missing clauses are simply absent.
  */
-export function mapQueryClauses(sql: string): ClauseSpan[] {
+export function mapQueryClauses(
+  sql: string,
+  options: ClauseMappingOptions = {},
+): ClauseSpan[] {
   if (sql.trim() === '') return []
+  const rootId = options.rootBlockId ?? ROOT_BLOCK_ID
+  const blocks = options.nestedQueries ?? []
   const mask = codeMaskOf(sql)
   const keywords = findClauseKeywords(sql, mask)
+  const regions = findSubqueryRegions(sql, mask)
+  const regionOwner = regionsForBlocks(regions, sql, blocks)
+
+  const innermostRegion = (offset: number): number => {
+    let best = -1
+    for (let index = 0; index < regions.length; index++) {
+      const region = regions[index]
+      if (region === undefined) continue
+      if (offset <= region.open || offset >= region.close) continue
+      if (
+        best === -1 ||
+        region.close - region.open <
+          (regions[best] as ParenRegion).close - (regions[best] as ParenRegion).open
+      ) {
+        best = index
+      }
+    }
+    return best
+  }
+
+  // `undefined` means "inside an unlabeled nested region" — such keywords
+  // belong to no simulated block and are skipped rather than blamed on
+  // the outer query.
+  const ownerOf = (offset: number): QueryBlockId | undefined => {
+    const region = innermostRegion(offset)
+    if (region === -1) return rootId
+    return regionOwner.get(region)
+  }
+
+  const boundaryOf = (blockId: QueryBlockId): number => {
+    if (blockId === rootId) return sql.length
+    for (const [index, owner] of regionOwner) {
+      if (owner === blockId) return regions[index]?.close ?? sql.length
+    }
+    return sql.length
+  }
+
   const spans: ClauseSpan[] = []
   for (let i = 0; i < keywords.length; i++) {
     const keyword = keywords[i]
     if (keyword === undefined) continue
-    const next = keywords[i + 1]
-    const end = next !== undefined ? next.start : sql.length
+    const owner = ownerOf(keyword.start)
+    if (owner === undefined) continue
+    // The clause ends at the next keyword owned by the same block (or at
+    // the block's own closing parenthesis), never at another block's
+    // keyword. An outer WHERE therefore still covers its subquery text.
+    let end = boundaryOf(owner)
+    for (let j = i + 1; j < keywords.length; j++) {
+      const candidate = keywords[j]
+      if (candidate === undefined) continue
+      if (ownerOf(candidate.start) === owner) {
+        end = candidate.start
+        break
+      }
+    }
     const startPos = positionAt(sql, keyword.start)
     const endPos = positionAt(sql, end)
     spans.push({
@@ -207,12 +374,29 @@ export function mapQueryClauses(sql: string): ClauseSpan[] {
       columnStart: startPos.column,
       lineEnd: endPos.line,
       columnEnd: endPos.column,
+      blockId: owner,
+      stageKey: stageKeyFor(owner, keyword.stage, rootId),
     })
   }
-  return spans
+  return spans.sort((a, b) => a.start - b.start)
 }
 
-/** The span of a given stage, when present. */
-export function spanOfStage(spans: ClauseSpan[], stage: VisualizedStage): ClauseSpan | null {
-  return spans.find((span) => span.stage === stage) ?? null
+/**
+ * The span of a stage. Without a block id the root block is preferred,
+ * so existing single-query callers keep their behavior and a root WHERE
+ * never resolves to an inner WHERE. Pass `blockId` for an exact match.
+ */
+export function spanOfStage(
+  spans: ClauseSpan[],
+  stage: VisualizedStage,
+  blockId?: QueryBlockId | null,
+): ClauseSpan | null {
+  if (blockId !== undefined && blockId !== null) {
+    return spans.find((span) => span.stage === stage && span.blockId === blockId) ?? null
+  }
+  return (
+    spans.find((span) => span.stage === stage && span.stageKey === span.stage) ??
+    spans.find((span) => span.stage === stage) ??
+    null
+  )
 }

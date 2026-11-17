@@ -55,6 +55,12 @@ export interface RowContext {
    * aggregates — per-row evaluation of an aggregate is an error.
    */
   aggregates?: Record<string, unknown>
+  /**
+   * Values of nested query blocks keyed by SubqueryExpr.id. The simulator
+   * evaluates each block once against real data and supplies the result
+   * here, so expression evaluation never re-executes SQL.
+   */
+  subqueryValues?: ReadonlyMap<string, unknown>
 }
 
 // ---------------------------------------------------------------------------
@@ -306,6 +312,15 @@ export function evaluateExpression(expr: Expression, ctx: RowContext): unknown {
     case 'list':
       // A bare parenthesized list has no scalar value outside IN/BETWEEN.
       throw new EvaluationError('A value list can only be evaluated as part of IN or BETWEEN.')
+    case 'subquery': {
+      const values = ctx.subqueryValues
+      if (values === undefined || !values.has(expr.id)) {
+        throw new EvaluationError(
+          `Subquery ${expr.text} has not been evaluated in this context.`,
+        )
+      }
+      return values.get(expr.id)
+    }
     case 'not': {
       const verdict = notVerdict(evaluateCondition(expr.operand, ctx))
       return verdict === 'unknown' ? null : verdict === 'true'

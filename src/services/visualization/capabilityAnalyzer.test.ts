@@ -62,6 +62,18 @@ describe('analyzeCapability — supported queries', () => {
     expect(capability.supported).toBe(true)
     expect(capability.detected.some((item) => item.kind === 'source-table' && item.detail === 'my_custom_table')).toBe(true)
   })
+
+  it('detects scalar subqueries as nested query blocks', () => {
+    const capability = analyzeCapability(
+      interpretStatement(
+        'SELECT name FROM employees WHERE salary > (SELECT AVG(salary) FROM employees)',
+      ),
+    )
+    expect(capability.supported).toBe(true)
+    const subquery = capability.detected.find((item) => item.kind === 'subquery')
+    expect(subquery?.detail).toMatch(/1 nested query block/)
+    expect(subquery?.detail).toMatch(/AVG\(salary\)/)
+  })
 })
 
 describe('analyzeCapability — warnings', () => {

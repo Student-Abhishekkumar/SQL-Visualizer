@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  clampPosition,
   clampRect,
   defaultRect,
   maximizeRect,
@@ -67,6 +68,23 @@ describe('floatingWindow geometry', () => {
     const clamped = moveRect(base, 9999, 9999, bounds)
     expect(clamped.x + clamped.width).toBeLessThanOrEqual(bounds.width)
     expect(clamped.y + clamped.height).toBeLessThanOrEqual(bounds.height)
+  })
+
+  it('moves a header-height rectangle using its real height, not the minimum', () => {
+    const collapsed = { ...base, height: 52 }
+    const moved = moveRect(collapsed, 60, 40, bounds)
+    expect(moved).toEqual({ x: 160, y: 140, width: 500, height: 52 })
+    const clamped = moveRect(collapsed, 9999, 9999, bounds)
+    expect(clamped).toEqual({ x: 500, y: 748, width: 500, height: 52 })
+  })
+
+  it('clamps position without forcing the minimum window size', () => {
+    expect(clampPosition({ x: -50, y: 900, width: 500, height: 52 }, bounds)).toEqual({
+      x: 0,
+      y: 748,
+      width: 500,
+      height: 52,
+    })
   })
 
   it('resizes from every edge, anchoring the opposite edge', () => {

@@ -132,3 +132,65 @@ describe('inspectNode', () => {
     expect(withoutSnapshot.overview.outputRows).toBeNull()
   })
 })
+
+describe('inspectNode — nested query sources', () => {
+  const nestedTrace: VisualizationTrace = {
+    ...makeTrace(),
+    sourceTables: [
+      ...makeTrace().sourceTables,
+      {
+        name: 'Scalar subquery · AVG(salary)',
+        alias: null,
+        columns: ['AVG(salary)'],
+        rowCount: 1,
+        previewRows: [{ id: 'q#r1', values: [54250] }],
+        role: 'subquery',
+        joinType: null,
+        on: null,
+        queryId: 'q2',
+        consumerStage: 'WHERE',
+      },
+    ],
+    nestedQueries: [
+      {
+        id: 'q2',
+        kind: 'scalar',
+        label: 'Scalar subquery · AVG(salary)',
+        sql: 'SELECT AVG(salary) FROM employees',
+        stageSnapshots: [],
+        finalColumns: ['AVG(salary)'],
+        finalRows: [{ id: 'q#r1', values: [54250] }],
+        parentStage: 'WHERE',
+        correlated: false,
+      },
+    ],
+  }
+  const nestedGraph = buildFlowGraph(nestedTrace)
+  const nestedSource = nestedGraph.nodes.find((candidate) => candidate.table?.role === 'subquery')!
+
+  it('describes the nested result without pretending it is a base table', () => {
+    const inspection = inspectNode(nestedSource, nestedTrace)
+    expect(inspection.header.title).toMatch(/^Subquery result:/)
+    expect(inspection.header.badge).toBe('SUBQUERY')
+    expect(inspection.header.stage).toBe('WHERE')
+    expect(inspection.overview.description).toMatch(/evaluated before the outer pipeline/i)
+    expect(inspection.output?.rows).toEqual([{ id: 'q#r1', values: [54250] }])
+    expect(inspection.output?.note).toMatch(/nested query/i)
+    expect(inspection.details.clause).toBeNull()
+  })
+
+  it('lists the nested result among the consuming operation’s real inputs', () => {
+    const inspection = inspectNode(node(nestedGraph, 'op-WHERE'), nestedTrace)
+    const nestedInput = inspection.inputs.find((input) => input.label?.includes('Scalar subquery'))
+    expect(nestedInput).toBeDefined()
+    expect(nestedInput?.rows[0]?.values[0]).toBe(54250)
+    expect(nestedInput?.note).toMatch(/computed before the outer pipeline/i)
+  })
+
+  it('does not attach the nested input to unrelated operations', () => {
+    const inspection = inspectNode(node(nestedGraph, 'op-SELECT'), nestedTrace)
+    expect(
+      inspection.inputs.some((input) => input.label?.includes('Scalar subquery')),
+    ).toBe(false)
+  })
+})

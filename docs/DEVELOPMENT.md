@@ -5,8 +5,8 @@ server, database service or environment file to configure.
 
 ## Requirements
 
-- Node.js `20.19+` or `22.12+` (required by Vite 8)
-- npm
+- Node.js `^20.19.0 || >=22.12.0` (required by Vite 8)
+- npm (the repository ships a `package-lock.json`)
 - A modern browser with WebAssembly and IndexedDB
 
 ## Setup
@@ -20,6 +20,8 @@ npm run dev
 
 The dev server runs at <http://localhost:5173>. The University example database is created on first
 launch and persisted in IndexedDB.
+
+No environment variables are required. SQLite WASM assets and Monaco are bundled by Vite.
 
 ## Scripts
 
@@ -35,7 +37,7 @@ launch and persisted in IndexedDB.
 
 ## Testing
 
-The suite currently covers 22 files and 319 tests.
+The suite currently covers 29 files and 485 tests.
 
 - Vitest is configured in `vite.config.ts`.
 - Domain, service and store tests run in the default Node environment.
@@ -56,11 +58,14 @@ npm test
 
 - **Parser and interpreter changes:** supported constructs, aliases, unsupported reasons.
 - **Capability analysis:** detected stages, warnings and conservative failure.
-- **Simulator:** row roles, ordering, grouping, joins, limits, stable ids and truncation.
+- **Simulator:** row roles, ordering, grouping, joins, limits, scalar subqueries, stable ids and
+  truncation.
 - **Validation:** ordered and unordered comparison, column mismatches, floating-point tolerance.
-- **Graph layout:** node/edge determinism, branch visibility and connectivity.
+- **Graph layout:** node/edge determinism, branch visibility, subquery sources and connectivity.
 - **Playback:** event folding, seeking, speed and database-switch invalidation.
-- **Components:** user-visible behavior rather than implementation details.
+- **Window geometry:** move, clamp, resize, maximize and header-height collapsed boxes.
+- **Components:** user-visible behavior rather than implementation details — including actual
+  inspector dimensions, collapse/expand cycles and pointer interactions.
 
 ## Architectural rules
 
@@ -76,6 +81,8 @@ These rules keep the educational visualization honest:
 7. **Results are not persisted.** History stores SQL text and metadata only.
 8. **Workspace state survives switching.** Query and Canvas stay mounted; do not reset editor,
    results, zoom, selection or playback when toggling views.
+9. **The inspector's visible box is the interaction box.** Collapsed mode uses the real header
+   height for layout, dragging and clamping; the saved expanded geometry is kept separately.
 
 If a change would violate one of these rules, discuss the design before implementing it.
 
@@ -94,8 +101,10 @@ A new logical stage touches several layers. Use this checklist:
 6. Update `src/services/visualization/clauseMapper.ts` so the clause strip and Monaco highlight stay
    synchronized.
 7. Add explanations and learning content in `src/services/visualization/explanations.ts`.
-8. Extend validation coverage if the stage affects the final result or its determinism.
-9. Add tests at every layer, then update `docs/FEATURES.md` and `docs/ARCHITECTURE.md`.
+8. Extend `src/services/visualization/nodeInspection.ts` when the stage needs inspector tabs or
+   previews.
+9. Extend validation coverage if the stage affects the final result or its determinism.
+10. Add tests at every layer, then update `docs/FEATURES.md` and `docs/ARCHITECTURE.md`.
 
 The flow canvas renders whatever the graph builder produces; avoid putting query semantics in React
 components.
@@ -139,13 +148,20 @@ Before a release or a README asset refresh:
 - [ ] Run a query with a syntax error and confirm the Messages tab explains it.
 - [ ] Run a multi-statement script and check Query Information.
 - [ ] Visualize a simple filter, a join, and a grouped query with `HAVING` and `ORDER BY`.
-- [ ] Confirm the validation badge matches SQLite for each query.
+- [ ] Visualize a non-correlated scalar subquery and confirm its nested source appears.
+- [ ] Try an unsupported query (for example a CTE or `IN` subquery) and confirm the reasons appear.
+- [ ] Confirm the validation badge matches SQLite for each supported query.
 - [ ] Step backward and forward through playback; seek to a stage from the clause strip.
 - [ ] Switch Flow/Table and Query/Canvas; confirm state is preserved.
+- [ ] Hover and click nodes to check upstream tracing, branch emphasis and inspector opening.
+- [ ] Drag, resize, maximize, collapse and minimize the inspector; confirm the collapsed window is
+  exactly header-height and that expanding restores the saved geometry and active tab.
+- [ ] Toggle the documentation sidebar, answer a knowledge check, close and reopen it, and confirm
+  scroll position, learning level and answer are preserved.
 - [ ] Rename, duplicate, export, import and reset a database.
 - [ ] Reload the page and confirm databases, history and saved queries persist.
 - [ ] Toggle light/dark theme and check both themes on the canvas and panels.
-- [ ] Check a narrow viewport: the inspector and explanation panel become drawers.
+- [ ] Check a narrow viewport: the inspector and documentation sidebar become overlays.
 
 ## Building and hosting
 
@@ -157,7 +173,8 @@ and favicon resolve. No runtime environment variables are required.
 
 Documentation screenshots and the playback recording live in `docs/assets/`. All product images must
 come from the running application — no mockups or fabricated UI. Prefer small, meaningful crops and
-keep the README gallery focused.
+keep the README gallery focused. When the UI changes, replace affected captures rather than adding
+screenshots of retired layouts.
 
 ## Pull request checklist
 

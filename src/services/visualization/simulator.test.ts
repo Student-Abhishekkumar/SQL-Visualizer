@@ -423,3 +423,128 @@ describe('edge cases', () => {
     expect(outcome.trace.finalRows).toHaveLength(8)
   })
 })
+
+describe('scalar subqueries', () => {
+  it('filters the outer rows using the real scalar result', () => {
+    const outcome = run(
+      'SELECT name FROM employees WHERE salary > (SELECT AVG(salary) FROM employees)',
+    )
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    // AVG(salary) is 54250; four employees earn more.
+    expect(outcome.trace.finalRows.map((row) => row.values[0]).sort()).toEqual([
+      'Amit',
+      'Omar',
+      'Ravi',
+      'Sara',
+    ])
+    const where = outcome.trace.stageSnapshots.find((snapshot) => snapshot.stage === 'WHERE')
+    expect(where?.outputRowCount).toBe(4)
+    expect(where?.removedRows).toHaveLength(4)
+  })
+
+  it('records the nested query with real snapshots and its scalar value', () => {
+    const outcome = run(
+      'SELECT name FROM employees WHERE salary > (SELECT AVG(salary) FROM employees)',
+    )
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    const [nested] = outcome.trace.nestedQueries ?? []
+    expect(nested).toBeDefined()
+    expect(nested?.kind).toBe('scalar')
+    expect(nested?.parentStage).toBe('WHERE')
+    expect(nested?.finalColumns).toHaveLength(1)
+    expect(nested?.finalRows[0]?.values[0]).toBeCloseTo(54250)
+    expect(nested?.stageSnapshots.map((snapshot) => snapshot.stage)).toEqual([
+      'FROM',
+      'GROUP_BY',
+      'SELECT',
+    ])
+    expect(nested?.label).toMatch(/Scalar subquery · AVG\(salary\)/)
+  })
+
+  it('exposes the subquery output as a real source feeding the WHERE stage', () => {
+    const outcome = run(
+      'SELECT name FROM employees WHERE salary > (SELECT AVG(salary) FROM employees)',
+    )
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    const source = outcome.trace.sourceTables.find((table) => table.role === 'subquery')
+    expect(source).toMatchObject({
+      rowCount: 1,
+      consumerStage: 'WHERE',
+      queryId: outcome.trace.nestedQueries?.[0]?.id,
+    })
+    expect(source?.previewRows[0]?.values[0]).toBeCloseTo(54250)
+    expect(source?.columns).toHaveLength(1)
+  })
+
+  it('uses NULL when the subquery returns no rows', () => {
+    const outcome = run(
+      'SELECT name FROM employees WHERE salary > (SELECT id FROM employees WHERE id > 999)',
+    )
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.trace.finalRows).toHaveLength(0)
+    const nested = outcome.trace.nestedQueries?.[0]
+    expect(nested?.finalRows).toHaveLength(0)
+    expect(nested?.note).toMatch(/no rows/i)
+  })
+
+  it('uses NULL when an aggregate subquery runs over an empty set', () => {
+    const outcome = run(
+      'SELECT name FROM employees WHERE salary > (SELECT AVG(salary) FROM employees WHERE id > 999)',
+    )
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.trace.finalRows).toHaveLength(0)
+    const nested = outcome.trace.nestedQueries?.[0]
+    expect(nested?.finalRows[0]?.values[0]).toBeNull()
+  })
+
+  it('projects a scalar subquery value into every outer row', () => {
+    const outcome = run(
+      'SELECT name, (SELECT MAX(salary) FROM employees) AS top_salary FROM employees LIMIT 2',
+    )
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.trace.finalColumns).toEqual(['name', 'top_salary'])
+    expect(outcome.trace.finalRows).toHaveLength(2)
+    for (const row of outcome.trace.finalRows) expect(row.values[1]).toBe(75000)
+  })
+
+  it('follows SQLite’s first-row rule for a multi-row scalar subquery', () => {
+    const outcome = run(
+      'SELECT name, (SELECT name FROM employees ORDER BY id DESC) AS any_name FROM employees LIMIT 1',
+    )
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    const nested = outcome.trace.nestedQueries?.[0]
+    expect(nested?.finalRows).toHaveLength(8)
+    expect(nested?.note).toMatch(/first row/i)
+    expect(outcome.trace.finalRows[0]?.values[1]).toBe('Lena')
+  })
+
+  it('evaluates a subquery nested inside another subquery', () => {
+    const outcome = run(
+      'SELECT name FROM employees WHERE salary > (SELECT AVG(salary) FROM employees WHERE salary > (SELECT MIN(salary) FROM employees))',
+    )
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.trace.nestedQueries).toHaveLength(2)
+    const deepest = outcome.trace.nestedQueries?.find(
+      (nested) => Math.abs(Number(nested.finalRows[0]?.values[0]) - 40000) < 1e-9,
+    )
+    expect(deepest).toBeDefined()
+  })
+
+  it('refuses correlated scalar subqueries instead of guessing', () => {
+    const sql =
+      'SELECT name FROM employees e WHERE salary > (SELECT AVG(salary) FROM employees x WHERE x.department_id = e.id)'
+    const interpretation = interpretQuery(sql, [sql])
+    expect(interpretation.structure).not.toBeNull()
+    expect(
+      interpretation.unsupportedReasons.some((reason) => /correlated/i.test(reason)),
+    ).toBe(true)
+  })
+})

@@ -105,6 +105,18 @@ export function defaultRect(bounds: WindowBounds): WindowRect {
   )
 }
 
+/**
+ * Clamp a rectangle's position into the bounds while preserving its
+ * dimensions exactly. Used for moving (a move must never resize) and for
+ * temporaries such as the header-only collapsed window, whose height is
+ * intentionally below the normal minimum.
+ */
+export function clampPosition(rect: WindowRect, bounds: WindowBounds): WindowRect {
+  const x = clamp(rect.x, 0, Math.max(0, bounds.width - rect.width))
+  const y = clamp(rect.y, 0, Math.max(0, bounds.height - rect.height))
+  return { ...rect, x, y }
+}
+
 /** Move a rectangle by a delta, keeping it inside the bounds. */
 export function moveRect(
   start: WindowRect,
@@ -112,7 +124,7 @@ export function moveRect(
   dy: number,
   bounds: WindowBounds,
 ): WindowRect {
-  return clampRect({ ...start, x: start.x + dx, y: start.y + dy }, bounds)
+  return clampPosition({ ...start, x: start.x + dx, y: start.y + dy }, bounds)
 }
 
 /**

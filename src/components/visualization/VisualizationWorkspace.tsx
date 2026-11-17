@@ -1,26 +1,47 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   CircleAlert,
   CircleCheck,
   Database as DatabaseIcon,
   Eye,
   Info,
+  PanelRightClose,
+  PanelRightOpen,
   Table2,
   TriangleAlert,
   Waypoints,
-  X,
 } from 'lucide-react'
 import { motion } from 'motion/react'
 import { PipelinePanel } from './PipelinePanel'
 import { TransformationPanel } from './TransformationPanel'
-import { ExplanationPanel } from './ExplanationPanel'
 import { PlaybackControls } from './PlaybackControls'
 import { ClauseStrip } from './ClauseStrip'
 import { FlowView } from './flow/FlowView'
-import { FloatingNodeInspector } from './flow/FloatingNodeInspector'
+import {
+  FloatingNodeInspector,
+  INSPECTOR_HEADER_HEIGHT,
+  type InspectorWindowMode,
+} from './flow/FloatingNodeInspector'
+import { FloatingInspectorDock } from './flow/FloatingInspectorDock'
+import {
+  DocumentationEdgeTab,
+  DocumentationSidebar,
+} from './DocumentationSidebar'
+import { Tooltip } from '../common/Tooltip'
 import { buildFlowGraph, deriveFlowState } from '../../services/visualization/graphBuilder'
 import { mapQueryClauses, spanOfStage } from '../../services/visualization/clauseMapper'
 import {
+  blockEvents,
+  blockStages,
+  blocksOf,
+  eventStageKey,
+  rootBlockIdOf,
+  snapshotStageKey,
+  splitStageKey,
+  stageKeyFor,
+} from '../../services/visualization/queryBlocks'
+import {
+  clampPosition,
   clampRect,
   defaultRect,
   rectNearAnchor,
@@ -82,18 +103,41 @@ export function VisualizationWorkspace({
   const seek = useVisualizationStore((state) => state.seek)
   const jumpToEnd = useVisualizationStore((state) => state.jumpToEnd)
   const seekToStage = useVisualizationStore((state) => state.seekToStage)
+  const activeBlockId = useVisualizationStore((state) => state.activeBlockId)
+  const setActiveBlock = useVisualizationStore((state) => state.setActiveBlock)
   const setSpeed = useVisualizationStore((state) => state.setSpeed)
 
-  // Stage selected for inspection (persists until cleared or playback moves).
-  const [inspectedStage, setInspectedStage] = useState<VisualizedStage | null>(null)
+  // Stage (within a query block) selected for inspection. Stored as a
+  // block-scoped key so the same stage in two blocks stays distinct.
+  const [inspectedKey, setInspectedKey] = useState<string | null>(null)
   // View mode: the animated flow canvas is the default; both views share playback.
   const [viewMode, setViewMode] = useState<'flow' | 'table'>('flow')
-  // Narrow containers show the inspector/explanation as a drawer instead
-  // of a permanent column, so the canvas keeps a usable width.
-  const [detailsOpen, setDetailsOpen] = useState(false)
+  // Documentation sidebar state. Local to the workspace so it survives
+  // playback, node switches and Query/Canvas switching for this session;
+  // it never touches the SQL/execution stores. Compact windows start
+  // closed so the sidebar opens as an overlay rather than covering the
+  // canvas on first use; the user's choice is remembered afterwards.
+  const [docsOpen, setDocsOpen] = useState<boolean>(
+    () => typeof window === 'undefined' || window.innerWidth >= 1024,
+  )
   // Selected flow node id — resolved against the current graph, so a
   // stale id (new trace) simply resolves to nothing selected.
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+  // Inspector window mode. A single source of truth prevents the old
+  // ambiguous "minimize" flag from meaning both header-collapse and hide.
+  // The mode is stored with the trace it belongs to, so a new visualization
+  // (a new inspection session) starts expanded without a reset effect and a
+  // collapsed/minimized window is never carried into a different query.
+  const [inspectorSession, setInspectorSession] = useState<{
+    trace: typeof trace
+    mode: InspectorWindowMode
+  }>(() => ({ trace, mode: 'expanded' }))
+  const inspectorMode: InspectorWindowMode =
+    inspectorSession.trace === trace ? inspectorSession.mode : 'expanded'
+  const setInspectorMode = useCallback(
+    (mode: InspectorWindowMode): void => setInspectorSession({ trace, mode }),
+    [trace],
+  )
   // Floating inspector geometry. Owned here (not by the popup) so position
   // and size survive switching nodes, closing/reopening and playback
   // updates for the lifetime of the workspace.
@@ -101,21 +145,39 @@ export function VisualizationWorkspace({
   const [inspectorBounds, setInspectorBounds] = useState<WindowBounds>({ width: 0, height: 0 })
   const [inspectorRect, setInspectorRect] = useState<WindowRect | null>(null)
 
-  const completedByStage = useMemo(() => {
-    const map = new Map<VisualizedStage, StageSnapshot>()
+  const rootId = trace !== null ? rootBlockIdOf(trace) : null
+  const queryBlocks = useMemo(() => (trace !== null ? blocksOf(trace) : []), [trace])
+
+  // Snapshots keyed by block-scoped stage key. Nested blocks are
+  // precomputed before the outer pipeline, so every nested block except
+  // the one currently playing counts as completed.
+  const completedByKey = useMemo(() => {
+    const map = new Map<string, StageSnapshot>()
+    if (trace === null) return map
+    const root = rootBlockIdOf(trace)
     for (const snapshot of viewState.completedStages) {
-      if (!map.has(snapshot.stage)) map.set(snapshot.stage, snapshot)
+      const key = snapshotStageKey(snapshot, root)
+      if (!map.has(key)) map.set(key, snapshot)
+    }
+    for (const block of trace.nestedQueries ?? []) {
+      if (block.id === activeBlockId || block.status === 'unsupported') continue
+      for (const snapshot of block.stageSnapshots) {
+        const key = stageKeyFor(block.id, snapshot.stage, root)
+        if (!map.has(key)) map.set(key, snapshot)
+      }
     }
     return map
-  }, [viewState.completedStages])
+  }, [trace, viewState.completedStages, activeBlockId])
 
   // The explanation/panel follows the inspected stage when set, else the
   // last completed snapshot of live playback.
   const liveSnapshot = viewState.snapshot
-  const inspecting = inspectedStage !== null && completedByStage.has(inspectedStage)
+  const inspecting = inspectedKey !== null && completedByKey.has(inspectedKey)
   const displaySnapshot = inspecting
-    ? (completedByStage.get(inspectedStage) ?? null)
+    ? (completedByKey.get(inspectedKey) ?? null)
     : liveSnapshot
+  const inspectedStage =
+    inspectedKey !== null && rootId !== null ? splitStageKey(inspectedKey, rootId).stage : null
   const displayStage = inspecting
     ? inspectedStage
     : (liveSnapshot?.stage ?? null)
@@ -133,20 +195,63 @@ export function VisualizationWorkspace({
     if (flowGraph === null) return null
     return deriveFlowState(
       flowGraph,
-      new Set(viewState.completedStages.map((snapshot) => snapshot.stage)),
-      viewState.activeStage,
+      new Set(completedByKey.keys()),
+      viewState.activeStageKey,
       viewState.finished,
     )
-  }, [flowGraph, viewState.completedStages, viewState.activeStage, viewState.finished])
+  }, [flowGraph, completedByKey, viewState.activeStageKey, viewState.finished])
+
+  // Pipeline panel data for the block currently being played. Stage names
+  // alone would collide across blocks, so everything here is scoped to
+  // the active block.
+  const pipelineStages = useMemo(
+    () => (trace !== null ? blockStages(trace, activeBlockId) : []),
+    [trace, activeBlockId],
+  )
+  const pipelineCompleted = useMemo(() => {
+    const map = new Map<VisualizedStage, StageSnapshot>()
+    for (const stage of pipelineStages) {
+      const key = stageKeyFor(activeBlockId, stage, rootId ?? undefined)
+      const snapshot = completedByKey.get(key)
+      if (snapshot !== undefined) map.set(stage, snapshot)
+    }
+    return map
+  }, [pipelineStages, completedByKey, activeBlockId, rootId])
+  const activeStageOfBlock: VisualizedStage | null =
+    viewState.activeStageKey !== null && rootId !== null
+      ? (() => {
+          const { blockId, stage } = splitStageKey(viewState.activeStageKey, rootId)
+          return blockId === activeBlockId ? stage : null
+        })()
+      : null
+  const selectedStageInBlock = inspecting ? inspectedStage : null
+  const totalEvents = useMemo(
+    () => (trace !== null ? blockEvents(trace, activeBlockId).length : 0),
+    [trace, activeBlockId],
+  )
 
   // The visible rectangle is always clamped into the measured workspace so
-  // a viewport resize can never strand the popup off-screen.
+  // a viewport resize can never strand the popup off-screen. Collapsed mode
+  // clamps the real header box, not the saved expanded height — otherwise
+  // the header could not reach the lower part of the workspace even though
+  // nothing exists below it.
   const inspectorDisplayRect =
-    inspectorRect === null ? null : clampRect(inspectorRect, inspectorBounds)
+    inspectorRect === null
+      ? null
+      : inspectorMode === 'collapsed'
+        ? (() => {
+            const visible = clampPosition(
+              { ...inspectorRect, height: INSPECTOR_HEADER_HEIGHT },
+              inspectorBounds,
+            )
+            return { ...inspectorRect, x: visible.x, y: visible.y }
+          })()
+        : clampRect(inspectorRect, inspectorBounds)
 
   // Track the canvas layer size so the popup can be clamped into view.
-  // Measurement runs from the observer/resize callbacks, never straight
-  // from the effect body, to avoid cascading renders on mount.
+  // Measure once when the ready workspace mounts (a newly attached ref is
+  // not guaranteed to have received its first ResizeObserver callback
+  // yet), then keep it current from the observer/resize events.
   useEffect(() => {
     const element = workspaceLayerRef.current
     if (element === null) return
@@ -158,6 +263,7 @@ export function VisualizationWorkspace({
           : { width: box.width, height: box.height },
       )
     }
+    measure()
     window.addEventListener('resize', measure)
     let observer: ResizeObserver | null = null
     if (typeof ResizeObserver !== 'undefined') {
@@ -171,12 +277,32 @@ export function VisualizationWorkspace({
   }, [status])
 
   // Clause spans of the visualized query, used by the strip and for
-  // pushing the playback-synced highlight into the Monaco editor.
+  // pushing the playback-synced highlight into the Monaco editor. Spans
+  // carry their query block, so an inner WHERE never highlights the
+  // outer WHERE (and vice versa).
   const clauseSpans = useMemo(
-    () => (trace !== null ? mapQueryClauses(trace.query) : []),
-    [trace],
+    () =>
+      trace !== null
+        ? mapQueryClauses(trace.query, {
+            nestedQueries: trace.nestedQueries,
+            rootBlockId: rootId ?? undefined,
+          })
+        : [],
+    [trace, rootId],
   )
-  const seekableStages = useMemo(() => new Set(trace?.stages ?? []), [trace])
+  // Every stage of every block is a valid seek target; each key is
+  // block-scoped, so two WHERE clauses stay distinct.
+  const seekableStages = useMemo(() => {
+    if (trace === null) return new Set<string>()
+    const keys = new Set<string>()
+    for (const stage of trace.stages) keys.add(stageKeyFor(rootId, stage, rootId ?? undefined))
+    for (const block of trace.nestedQueries ?? []) {
+      for (const snapshot of block.stageSnapshots) {
+        keys.add(stageKeyFor(block.id, snapshot.stage, rootId ?? undefined))
+      }
+    }
+    return keys
+  }, [trace, rootId])
 
   // Synchronize the active stage with the external editor store: the
   // Monaco editor decorates the clause of the currently active stage
@@ -184,26 +310,30 @@ export function VisualizationWorkspace({
   // A completed event leaves activeStage null; the clause the user is
   // looking at is then the stage that just completed.
   const setStageHighlight = useEditorStore((state) => state.setStageHighlight)
-  const syncStage: VisualizedStage | null =
-    viewState.activeStage ??
-    (viewState.event?.type === 'STAGE_COMPLETED' ? (viewState.event.stage ?? null) : null)
+  const syncStageKey: string | null =
+    viewState.activeStageKey ??
+    (viewState.event?.type === 'STAGE_COMPLETED'
+      ? eventStageKey(viewState.event, rootId ?? undefined)
+      : null)
   useEffect(() => {
-    if (trace === null || syncStage === null) {
+    if (trace === null || syncStageKey === null) {
       setStageHighlight(null)
       return
     }
-    const span = spanOfStage(clauseSpans, syncStage)
+    const { blockId, stage } =
+      rootId !== null ? splitStageKey(syncStageKey, rootId) : { blockId: null, stage: syncStageKey }
+    const span = spanOfStage(clauseSpans, stage as VisualizedStage, blockId)
     setStageHighlight(
-      span !== null ? { start: span.start, end: span.end, stage: syncStage } : null,
+      span !== null ? { start: span.start, end: span.end, stage: stage as VisualizedStage } : null,
     )
-  }, [syncStage, clauseSpans, trace, setStageHighlight])
+  }, [syncStageKey, clauseSpans, trace, rootId, setStageHighlight])
 
   /**
    * First-open placement: prefer the space beside the clicked node, and
    * fall back to the workspace default when the node box is unavailable
    * (e.g. before layout has run).
    */
-  const initialRectFor = (nodeId: string): WindowRect => {
+  const initialRectFor = useCallback((nodeId: string): WindowRect => {
     const layer = workspaceLayerRef.current
     const layerBox = layer?.getBoundingClientRect()
     if (layer === null || layerBox === undefined) {
@@ -226,36 +356,48 @@ export function VisualizationWorkspace({
       base,
       bounds,
     )
-  }
+  }, [])
 
   // Clicking a graph node selects it for inspection and traces its real
   // upstream data path. Selection is inspection-only: it never seeks the
   // timeline, re-runs SQL or changes playback. Seeking stays on the
   // clause strip, pipeline and timeline controls.
-  const handleNodeSelect = (node: { stage: VisualizedStage | null; id: string }): void => {
-    const deselecting = selectedNodeId === node.id
-    setSelectedNodeId(deselecting ? null : node.id)
-    if (deselecting) {
-      // Clicking the selected node again only clears the inspection; the
-      // current playback position is left untouched.
-      setInspectedStage(null)
-      return
-    }
-    if (inspectorRect === null) {
-      setInspectorRect(initialRectFor(node.id))
-    }
-    // Do not force the details panel open: on narrow layouts it replaces
-    // the canvas, which would hide the very upstream trace the click just
-    // started. The Details toggle still opens the inspector for this node.
-    // A node inspection must not leave an unrelated pinned stage behind.
-    setInspectedStage(null)
-    if (node.stage === null) {
-      setStageHighlight(null)
-      return
-    }
-    const span = spanOfStage(clauseSpans, node.stage)
-    setStageHighlight(span !== null ? { start: span.start, end: span.end, stage: node.stage } : null)
-  }
+  const handleNodeSelect = useCallback(
+    (node: { stage: VisualizedStage | null; id: string; blockId?: string }): void => {
+      const deselecting = selectedNodeId === node.id
+      setSelectedNodeId(deselecting ? null : node.id)
+      if (deselecting) {
+        // Clicking the selected node again only clears the inspection; the
+        // current playback position is left untouched. A later selection
+        // opens a full window again rather than a stale collapsed/docked one.
+        setInspectorMode('expanded')
+        setInspectedKey(null)
+        return
+      }
+      if (inspectorRect === null) {
+        setInspectorRect(initialRectFor(node.id))
+      }
+      // Do not force the details panel open: on narrow layouts it replaces
+      // the canvas, which would hide the very upstream trace the click just
+      // started. The Details toggle still opens the inspector for this node.
+      // A node inspection must not leave an unrelated pinned stage behind.
+      setInspectedKey(null)
+      if (node.stage === null) {
+        setStageHighlight(null)
+        return
+      }
+      const span = spanOfStage(clauseSpans, node.stage, node.blockId)
+      setStageHighlight(
+        span !== null ? { start: span.start, end: span.end, stage: node.stage } : null,
+      )
+    },
+    [clauseSpans, initialRectFor, inspectorRect, selectedNodeId, setInspectorMode, setStageHighlight],
+  )
+
+  const closeInspector = useCallback(() => {
+    setSelectedNodeId(null)
+    setInspectorMode('expanded')
+  }, [setInspectorMode])
 
   if (status !== 'ready' || trace === null) {
     return (
@@ -301,7 +443,7 @@ export function VisualizationWorkspace({
   }
 
   return (
-    <section className="@container flex h-full min-h-0 flex-col overflow-hidden bg-surface">
+    <section className="@container flex h-full min-h-0 flex-col overflow-clip bg-surface">
       <WorkspaceHeader
         queryName={queryName}
         status={status}
@@ -314,17 +456,24 @@ export function VisualizationWorkspace({
         hasJoin={trace.capability.hasJoin}
         viewMode={viewMode}
         onViewModeChange={setViewMode}
-        detailsOpen={detailsOpen}
-        onToggleDetails={() => setDetailsOpen((open) => !open)}
+        docsOpen={docsOpen}
+        onToggleDocs={() => setDocsOpen((open) => !open)}
       />
 
       {/* Synchronized clause strip — click a clause to jump to its stage. */}
       <ClauseStrip
         query={trace.query}
-        activeStage={syncStage}
+        activeStageKey={syncStageKey}
         seekableStages={seekableStages}
+        nestedQueries={trace.nestedQueries}
+        rootBlockId={rootId ?? undefined}
         onSeekStage={(stage) => {
-          setInspectedStage(stage)
+          setInspectedKey(stageKeyFor(activeBlockId, stage, rootId ?? undefined))
+          seekToStage(stage)
+        }}
+        onSeekStageKey={(key, stage, blockId) => {
+          setActiveBlock(blockId === rootId ? null : blockId)
+          setInspectedKey(key)
           seekToStage(stage)
         }}
       />
@@ -349,7 +498,9 @@ export function VisualizationWorkspace({
       )}
 
       {/* Validation / truncation warnings */}
-      {(validation?.validated === false || trace.truncated) && (
+      {(validation?.validated === false ||
+        trace.truncated ||
+        (validation?.nested?.length ?? 0) > 0) && (
         <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface-2 px-3 py-1.5">
           {validation?.validated === false && (
             <span className="inline-flex items-center gap-1.5 rounded border border-danger/40 bg-danger-soft px-2 py-0.5 text-[11px] text-danger">
@@ -357,6 +508,33 @@ export function VisualizationWorkspace({
               Not validated against SQLite: {validation.detail}
             </span>
           )}
+          {validation?.nested?.map((nested) => (
+            <span
+              key={nested.blockId}
+              title={nested.detail ?? undefined}
+              className={`inline-flex items-center gap-1.5 rounded border px-2 py-0.5 text-[11px] ${
+                nested.skipped === true
+                  ? 'border-border bg-surface text-text-muted'
+                  : nested.validated
+                    ? 'border-success/40 bg-success/10 text-success'
+                    : 'border-danger/40 bg-danger-soft text-danger'
+              }`}
+            >
+              {nested.skipped === true ? (
+                <CircleAlert className="size-3" aria-hidden />
+              ) : nested.validated ? (
+                <CircleCheck className="size-3" aria-hidden />
+              ) : (
+                <TriangleAlert className="size-3" aria-hidden />
+              )}
+              {nested.label}:{' '}
+              {nested.skipped === true
+                ? 'not compared with SQLite'
+                : nested.validated
+                  ? 'matches SQLite'
+                  : 'differs from SQLite'}
+            </span>
+          ))}
           {trace.truncated && (
             <span className="inline-flex items-center gap-1.5 rounded border border-warning/40 bg-warning/10 px-2 py-0.5 text-[11px] text-warning">
               <CircleAlert className="size-3" aria-hidden />
@@ -370,13 +548,19 @@ export function VisualizationWorkspace({
         {/* Left: pipeline (only when the container is wide enough) */}
         <div className="hidden w-56 shrink-0 border-r border-border @5xl:block">
           <PipelinePanel
-            stages={trace.stages}
-            completedByStage={completedByStage}
-            activeStage={viewState.activeStage}
-            selectedStage={inspectedStage}
+            stages={pipelineStages}
+            completedByStage={pipelineCompleted}
+            activeStage={activeStageOfBlock}
+            selectedStage={selectedStageInBlock}
+            blocks={queryBlocks}
+            activeBlockId={activeBlockId}
+            onSelectBlock={(blockId) => {
+              setActiveBlock(blockId === rootId ? null : blockId)
+              setInspectedKey(null)
+            }}
             onSelectStage={(stage) => {
-              setDetailsOpen(true)
-              setInspectedStage(stage)
+              setDocsOpen(true)
+              setInspectedKey(stageKeyFor(activeBlockId, stage, rootId ?? undefined))
               seekToStage(stage)
             }}
           />
@@ -395,7 +579,7 @@ export function VisualizationWorkspace({
               flowState={flowState}
               selectedNodeId={selectedNodeId}
               playing={playing}
-              focusStage={inspecting ? displayStage : null}
+              focusStageKey={inspecting ? inspectedKey : null}
               onSelectNode={handleNodeSelect}
             />
           ) : (
@@ -420,65 +604,64 @@ export function VisualizationWorkspace({
                 }
                 rect={inspectorDisplayRect}
                 bounds={inspectorBounds}
+                mode={inspectorMode}
+                onModeChange={setInspectorMode}
                 onRectChange={setInspectorRect}
-                onClose={() => setSelectedNodeId(null)}
+                onClose={closeInspector}
               />
             )}
+
+          {viewMode === 'flow' && selectedNode !== null && inspectorMode === 'minimized' && (
+            <FloatingInspectorDock
+              node={selectedNode}
+              onRestore={() => setInspectorMode('expanded')}
+              onClose={closeInspector}
+            />
+          )}
         </div>
 
-        {/* Narrow layout: the details panel replaces the canvas (above). */}
-
-        {/* Right: stage explanation. Node data lives in the floating
-            inspector over the canvas, not in this panel. On narrow
-            containers this becomes a full-size panel so the explanation
-            stays readable instead of covering half the canvas. */}
-        <div
-          className={`${
-            detailsOpen ? 'flex' : 'hidden'
-          } absolute inset-0 z-40 flex-col bg-surface @4xl:static @4xl:z-auto @4xl:flex @4xl:w-72 @4xl:max-w-none @4xl:border-l @4xl:border-border`}
-        >
-          <button
-            type="button"
-            onClick={() => setDetailsOpen(false)}
-            aria-label="Close details"
-            className="absolute top-1.5 right-1.5 z-50 rounded-md p-1 text-text-muted transition-colors hover:bg-surface-2 hover:text-text-primary @4xl:hidden"
-          >
-            <X className="size-3.5" aria-hidden />
-          </button>
-          <ExplanationPanel stage={displayStage} snapshot={displaySnapshot} />
-        </div>
+        {/* Right: independently togglable documentation sidebar. Node data
+            lives in the floating inspector over the canvas; this sidebar
+            holds the stage guide and references only. */}
+        <DocumentationSidebar
+          open={docsOpen}
+          stage={displayStage}
+          snapshot={displaySnapshot}
+          onClose={() => setDocsOpen(false)}
+        />
+        {!docsOpen && <DocumentationEdgeTab onOpen={() => setDocsOpen(true)} />}
       </div>
 
       <PlaybackControls
         playing={playing}
         eventIndex={viewState.eventIndex}
-        totalEvents={trace.events.length}
+        totalEvents={totalEvents}
         finished={finished}
         speed={speed}
         currentStageLabel={viewState.snapshot?.label ?? null}
         onPlay={() => {
-          setInspectedStage(null)
+          setInspectedKey(null)
           play()
         }}
         onPause={pause}
         onRestart={() => {
-          setInspectedStage(null)
+          setInspectedKey(null)
           restart()
         }}
         onPrevious={() => {
-          setInspectedStage(null)
+          setInspectedKey(null)
           previous()
         }}
         onNext={() => {
-          setInspectedStage(null)
+          setInspectedKey(null)
           next()
         }}
         onJumpToEnd={() => {
-          setInspectedStage(null)
+          setInspectedKey(null)
           jumpToEnd()
         }}
         onSeek={(eventIndex) => {
-          setInspectedStage(null)
+          setInspectedKey(null)
           seek(eventIndex)
         }}
         onSpeedChange={setSpeed}
@@ -500,8 +683,8 @@ interface WorkspaceHeaderProps {
   hasJoin?: boolean
   viewMode?: 'flow' | 'table'
   onViewModeChange?: (mode: 'flow' | 'table') => void
-  detailsOpen?: boolean
-  onToggleDetails?: () => void
+  docsOpen?: boolean
+  onToggleDocs?: () => void
 }
 
 function WorkspaceHeader({
@@ -515,8 +698,8 @@ function WorkspaceHeader({
   hasJoin,
   viewMode,
   onViewModeChange,
-  detailsOpen,
-  onToggleDetails,
+  docsOpen,
+  onToggleDocs,
 }: WorkspaceHeaderProps) {
   return (
     <header className="flex flex-wrap items-center gap-2 border-b border-border bg-surface px-3 py-2">
@@ -585,16 +768,29 @@ function WorkspaceHeader({
           </button>
         </div>
       )}
-      {onToggleDetails !== undefined && (
-        <button
-          type="button"
-          aria-pressed={detailsOpen === true}
-          onClick={onToggleDetails}
-          className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface-2 px-2 py-1 text-[11px] font-medium text-text-secondary transition-colors hover:border-border-strong hover:text-text-primary @4xl:hidden"
-        >
-          <Info className="size-3" aria-hidden />
-          Details
-        </button>
+      {onToggleDocs !== undefined && (
+        <Tooltip label={docsOpen === true ? 'Hide documentation sidebar' : 'Show documentation sidebar'}>
+          <button
+            type="button"
+            id="documentation-toggle"
+            aria-label="Toggle documentation sidebar"
+            aria-pressed={docsOpen === true}
+            aria-controls="documentation-sidebar"
+            onClick={onToggleDocs}
+            className={`inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none ${
+              docsOpen === true
+                ? 'border-accent/40 bg-accent-soft text-text-primary'
+                : 'border-border bg-surface-2 text-text-secondary hover:border-border-strong hover:text-text-primary'
+            }`}
+          >
+            {docsOpen === true ? (
+              <PanelRightClose className="size-3" aria-hidden />
+            ) : (
+              <PanelRightOpen className="size-3" aria-hidden />
+            )}
+            <span className="hidden @3xl:inline">Documentation</span>
+          </button>
+        </Tooltip>
       )}
       <div className="flex-1" />
       {actualRowCount != null && (

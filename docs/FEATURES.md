@@ -3,12 +3,25 @@
 This document is the detailed inventory of what SQL Visualizer actually does, what it supports only
 partially, and what it does not do yet. The [README](../README.md) is the short product tour.
 
-**Legend:** ✅ implemented · ◐ limited or conditional · — not implemented
+**Legend:** ✅ implemented · ◐ limited, conditional or partial · — not implemented
 
-## Query workspace
+## Status at a glance
+
+| Area | Status | Summary |
+|:---|:---:|:---|
+| SQL execution | ✅ | Real SQLite WASM execution, Monaco editor, multi-statement scripts, results, messages and query metadata. |
+| Database management | ✅ | Independent databases, templates, custom SQL, import/export, schema explorer and IndexedDB persistence. |
+| SQL visualization | ◐ | Full logical pipeline for supported single `SELECT` statements; unsupported constructs are reported. |
+| Canvas interactions | ✅ | Pan, zoom, node dragging, hover tracing, click-to-pin and branch-aware emphasis. |
+| Node Inspector | ✅ | Floating, draggable, resizable, collapsible and minimizable window with real node data and playback sync. |
+| Learning and explanations | ◐ | Stage explanations, references and knowledge checks; guided exercises are planned. |
+| Validation and errors | ✅ | SQLite result parity, honest validation status and explicit unsupported-query reasons. |
+
+## SQL execution
 
 | Capability | Status | Details |
 |:---|:---:|:---|
+| Real SQLite execution | ✅ | Queries run in SQLite compiled to WebAssembly (`sql.js`); results are authoritative. |
 | Monaco SQL editor | ✅ | SQL syntax highlighting, schema-aware autocomplete and a resizable editor area. |
 | Run SQL | ✅ | Executes the editor buffer, including multiple statements separated by semicolons. |
 | Keyboard execution | ✅ | `Ctrl/Cmd + Enter` runs the current buffer. |
@@ -17,33 +30,28 @@ partially, and what it does not do yet. The [README](../README.md) is the short 
 | Example queries | ✅ | Toolbar menu with ready-made queries for the University example. |
 | Visualize | ✅ | Builds a flow trace for a single supported `SELECT`. |
 | Query / Canvas toggle | ✅ | Both views stay mounted; `Ctrl/Cmd + Shift + M` switches without losing state. |
-
-## Results and history
-
-| Capability | Status | Details |
-|:---|:---:|:---|
 | Results grid | ✅ | Real SQLite rows with sticky headers and row numbers. |
 | Display types | ✅ | Columns are labelled `TEXT`, `NUM` or `BLOB` from the first non-null value. |
-| Messages | ✅ | Success/error messages, including failing statement index. |
-| Query information | ✅ | Statement types, total time, rows returned, rows modified, query length, referenced tables and SQLite version. |
+| Messages | ✅ | Success and error messages, including the failing statement index. |
+| Query information | ✅ | Status, statement types, total time, rows returned, rows modified, query length, referenced tables and the SQLite version. |
 | Query history | ✅ | Persists across refreshes, capped at 200 entries; stores SQL and metadata, never result sets. |
 | History filtering | ✅ | Filter by the active database or show all databases. |
 | Saved queries | ✅ | Named queries persisted in IndexedDB and tagged with the active database when one is open. |
 | History maintenance | ✅ | Delete individual entries or clear all history from Settings. |
 
-## Database workspace
+## Database management
 
 | Capability | Status | Details |
 |:---|:---:|:---|
-| Multiple databases | ✅ | Independent SQLite files with their own schema. History and saved queries are tagged with the database they belong to. |
-| Create from template | ✅ | Blank, University example, or custom setup SQL. |
+| Multiple databases | ✅ | Independent SQLite files with their own schema. History and saved queries are tagged with their database. |
+| Create from template | ✅ | Blank, University example, or custom setup SQL. Only the example template seeds sample data. |
 | Open / switch | ✅ | The active database is remembered across reloads. |
 | Rename / duplicate | ✅ | Metadata-only rename and a full copy of the database bytes. |
 | Reset | ✅ | Replays the setup state for template databases; clears imported databases to empty. |
 | Delete | ✅ | Removes database metadata and stored bytes. Existing history and saved queries remain tagged to the deleted database. |
 | Export SQLite | ✅ | Downloads the database as a `.sqlite` file. |
 | Export SQL | ✅ | Downloads a `.sql` script that recreates the exported database. |
-| Import | ✅ | Accepts `.db`, `.sqlite`, `.sqlite3` and `.sql` scripts. |
+| Import | ✅ | Accepts `.db`, `.sqlite`, `.sqlite3` and `.sql` scripts. Import always creates a new database. |
 | Schema explorer | ✅ | Tables, columns, row counts, keys, indexes and original `CREATE TABLE` SQL. |
 | Persistent storage | ✅ | Database bytes, metadata, history and saved queries live in IndexedDB. |
 
@@ -53,49 +61,26 @@ partially, and what it does not do yet. The [README](../README.md) is the short 
 
 <p align="center"><sub>Switching databases keeps schemas separate; history entries and saved queries stay tagged to the database they came from.</sub></p>
 
-## Visualization
+## SQL visualization
 
 | Capability | Status | Details |
 |:---|:---:|:---|
 | Single `SELECT` visualization | ◐ | Other statements execute normally but cannot be visualized. |
 | Logical pipeline | ✅ | `FROM`, `JOIN`, `WHERE`, `GROUP BY`, `HAVING`, `SELECT`, `DISTINCT`, `ORDER BY`, `LIMIT` / `OFFSET`. |
+| Scalar subqueries | ✅ | Non-correlated scalar subqueries in `WHERE`, `SELECT` and `JOIN … ON` are simulated as their own real pipeline; output feeds the consuming stage and is inspectable. |
 | Stage snapshots | ✅ | Immutable snapshots with output rows, removed rows and input/output counts, including filtered and skipped rows. |
-| Playback | ✅ | Play, pause, previous, next, seek, restart and jump to end. |
+| Full-pipeline animation | ✅ | The default playback animates the whole trace from source tables to the final result. |
+| Playback | ✅ | Play, pause, previous, next, seek, restart and jump to final result. |
 | Speed control | ✅ | 0.5×, 1×, 1.5× and 2×. |
 | Flow view | ✅ | Blender-inspired nodes, sockets, animated wires and status colours. |
 | Table view | ✅ | Row-level transformation view driven by the same playback position. |
-| Node inspector | ✅ | Operation details and rows in/out, plus row previews for source, intermediate, branch, group and final nodes. |
 | Clause strip | ✅ | Query clauses are clickable and jump playback to the matching stage. |
 | Editor synchronization | ✅ | The active SQL clause is highlighted in Monaco during playback. |
-| Pan / zoom / fit | ✅ | Drag to pan, scroll to zoom, fit-to-screen and reset controls. |
 | SQLite validation | ✅ | Compares simulated final columns, row count and values with SQLite's real result. |
 | Truncation reporting | ✅ | Caps are disclosed; real SQLite output is never truncated. |
 | Unsupported-query reporting | ✅ | Lists explicit reasons instead of generating a misleading trace. |
 
-## Learning panels
-
-| Capability | Status | Details |
-|:---|:---:|:---|
-| Learning levels | ✅ | Beginner, Intermediate and Advanced explanations. |
-| Stage explanations | ✅ | Concept, why the stage matters, what actually happened with real counts, and the snapshot's detailed explanation. |
-| Knowledge checks | ✅ | Multiple-choice checks where available for the active stage. |
-| Documentation links | ✅ | Curated SQLite documentation links per stage. |
-| Inspector / explanation switch | ✅ | Selecting a node shows its inspector; otherwise the explanation panel follows the active stage. |
-
-## Personalization and settings
-
-| Capability | Status | Details |
-|:---|:---:|:---|
-| Dark and light themes | ✅ | Theme is persisted in `localStorage`. |
-| Workspace preference | ✅ | Query/Canvas choice is persisted in `localStorage`. |
-| Reset active database | ✅ | Available from Settings and the editor toolbar. |
-| Clear history | ✅ | Confirmation-protected action in Settings. |
-| Engine information | ✅ | Displays the SQLite library version reported by the running engine. |
-| Sidebar | ✅ | Static on desktop and an overlay drawer below the `md` breakpoint. |
-
-## SQL support for visualization
-
-### Supported
+### Supported SQL constructs
 
 - A single `SELECT` statement with a `FROM` clause.
 - Explicit `INNER JOIN`, `LEFT JOIN` and `CROSS JOIN` with `ON` conditions (except `CROSS JOIN`,
@@ -108,9 +93,17 @@ partially, and what it does not do yet. The [README](../README.md) is the short 
 - `DISTINCT`.
 - `ORDER BY` on supported expressions.
 - `LIMIT` and `OFFSET` with constant numbers.
+- Non-correlated scalar subqueries in `WHERE`, `SELECT` and `JOIN … ON` expressions. Each nested
+  block is simulated independently with real snapshots, and its output is shown as an inspectable
+  source feeding the consuming stage.
 
-### Limited
+### Limited or conditional behavior
 
+- **Scalar subquery semantics:** an empty subquery result becomes `NULL`, a multi-row result uses the
+  first row's first column (SQLite's rule), and a subquery returning more than one column is rejected
+  instead of guessed.
+- **Correlated subqueries:** qualification-based correlation is detected during interpretation and the
+  query is reported as unsupported rather than simulated with invented per-row values.
 - **Large inputs:** the visual trace is capped at 500 rows and 2,000 events. Source previews show at
   most 12 rows. This affects the animation only, never SQLite's result.
 - **Implicit aggregation:** aggregate queries without `GROUP BY` are simulated as a single group, with
@@ -119,6 +112,9 @@ partially, and what it does not do yet. The [README](../README.md) is the short 
   otherwise the comparison is order-insensitive.
 - **Group nodes:** the canvas renders up to 8 group nodes, with an explicit overflow node when a
   stage produces more. The underlying trace still contains every group.
+- **Compound selects:** `INTERSECT` and `EXCEPT` are not parsed by the current `node-sql-parser`
+  version, so they are reported as unsupported. `UNION` / `UNION ALL` are recognized as compound
+  selects but are not visualized yet.
 
 ### Not visualizable yet
 
@@ -128,14 +124,92 @@ These still run in SQLite and return normal results:
 - Queries without a `FROM` clause (for example `SELECT 1`).
 - Common table expressions (`WITH`).
 - Compound selects (`UNION`, `UNION ALL`, `INTERSECT`, `EXCEPT`).
-- Subqueries in any clause.
-- Comma-separated cross joins (`FROM a, b`).
+- Correlated subqueries, `IN` / `NOT IN` subqueries and `EXISTS` / `NOT EXISTS`.
+- Derived tables in `FROM` / `JOIN` (`FROM (SELECT …)`), including comma-separated cross joins
+  (`FROM a, b`).
 - `RIGHT JOIN` and `FULL OUTER JOIN`.
 - Window functions and expressions outside the supported grammar, including `CASE`.
 - Non-constant `LIMIT` / `OFFSET`.
 
 When a query falls into this list, the app keeps the real SQLite result available and explains why
 the visualization is unavailable.
+
+## Canvas interactions
+
+| Capability | Status | Details |
+|:---|:---:|:---|
+| Pan | ✅ | Drag empty canvas space. |
+| Zoom | ✅ | Scroll to zoom around the pointer, with dedicated zoom controls. |
+| Fit / reset | ✅ | Fit the whole graph to the viewport or reset the camera. |
+| Node dragging | ✅ | Drag nodes to reposition them; nearby nodes settle without changing the query or selection. |
+| Hover tracing | ✅ | Hovering a node temporarily emphasizes its branch-aware upstream path. |
+| Click tracing | ✅ | Clicking pins the upstream trace and opens the inspector. |
+| Branch visibility | ✅ | Rejected rows fan out from filters and `HAVING`; group nodes fan out from grouping. |
+| Playback synchronization | ✅ | Node status, revealed wires and branch emphasis follow the current playback event. |
+| Selection independence | ✅ | Pan, zoom and node dragging do not change the selected node or playback position. |
+
+## Node Inspector
+
+| Capability | Status | Details |
+|:---|:---:|:---|
+| Floating popup | ✅ | Opens over the canvas when a node is clicked; reuses the same window when another node is selected. |
+| Real node data | ✅ | Uses the immutable trace and live snapshot data through `inspectNode`. |
+| Tabs | ✅ | Overview, Input, Output and Details. |
+| Node-specific information | ✅ | Operation, clause, input/output counts, group keys, join details, accepted/rejected statistics and nested-subquery inputs. |
+| Row previews | ✅ | Source, intermediate, branch, group and final-result rows where available; paginated for large snapshots. |
+| Dragging | ✅ | The persistent header drags the window in expanded and collapsed modes. Header buttons never start a drag. |
+| Resizing | ✅ | Eight resize handles in expanded mode; the opposite edge stays anchored and minimum sizes are enforced. |
+| Collapse | ✅ | Collapses to the real 52px header height. Content and resize handles are removed from the layout, so there is no invisible expanded area. |
+| Collapsed dragging | ✅ | Uses the current header box for movement and workspace clamping; the saved expanded height is preserved separately. |
+| Expand | ✅ | Restores the saved width, height, position and active tab. |
+| Minimize / restore | ✅ | Minimizing leaves a dock chip that restores the same window; closing dismisses it. |
+| Workspace clamping | ✅ | The window stays inside the measured canvas layer on resize; collapsed mode clamps the header box, not the saved expanded height. |
+| Playback synchronization | ✅ | The inspector reflects the selected node's current status and never reveals final rows before playback produces them. |
+| Focus and controls | ✅ | Header controls remain keyboard-accessible; pointer capture handles pointer-up and pointer-cancel. |
+
+## Learning and explanations
+
+| Capability | Status | Details |
+|:---|:---:|:---|
+| Documentation sidebar | ✅ | Independently toggleable; open/close releases or reclaims canvas width. |
+| Edge tab | ✅ | A compact edge tab reopens the sidebar when it is closed. |
+| Narrow layouts | ✅ | The sidebar overlays the canvas instead of squeezing it. |
+| Preserved state | ✅ | Scroll position, selected learning level and knowledge-check answer survive closing and reopening. |
+| Learning levels | ✅ | Beginner, Intermediate and Advanced explanations. |
+| Stage explanations | ✅ | Concept, why the stage matters, what actually happened with real counts, and the snapshot's detailed explanation. |
+| Knowledge checks | ◐ | Multiple-choice checks for selected stages at beginner and intermediate levels. Advanced has no check. |
+| Documentation links | ✅ | Curated SQLite documentation links per stage. |
+| Node explanation switch | ✅ | Selecting a node shows its inspector; the sidebar follows the active or inspected stage. |
+| Guided exercises | — | Not implemented. The knowledge checks are the current interactive learning feature. |
+
+## Validation and error handling
+
+| Capability | Status | Details |
+|:---|:---:|:---|
+| Result parity | ✅ | Compares the simulator's final columns, row count and values with SQLite's real result. |
+| Ordered comparison | ✅ | Used when `ORDER BY` proves a fully determined order. |
+| Unordered comparison | ✅ | Multiset equality when SQLite does not guarantee row order. |
+| Numeric tolerance | ✅ | Small relative tolerance for floating-point results. |
+| Column checks | ✅ | Lenient label comparison (case and whitespace insensitive) and explicit mismatch details. |
+| Validation display | ✅ | The workspace shows validated ordered/unordered status or the mismatch; SQLite output is never altered. |
+| Unsupported reasons | ✅ | Unsupported constructs produce explicit, human-readable reasons. |
+| Parser failures | ✅ | A statement that cannot be parsed is reported as unavailable for visualization, never approximated. |
+| Execution errors | ✅ | SQLite errors appear in the Messages tab with the failing statement. |
+| Caps | ✅ | Truncation of the visual trace is disclosed; real results remain complete. |
+
+The visualization workspace distinguishes `idle`, `ready`, `unsupported` and `unavailable` states.
+DDL and DML still execute normally; they simply cannot be visualized.
+
+## Personalization and settings
+
+| Capability | Status | Details |
+|:---|:---:|:---|
+| Dark and light themes | ✅ | Theme is persisted in `localStorage`. |
+| Workspace preference | ✅ | Query/Canvas choice is persisted in `localStorage`. |
+| Reset active database | ✅ | Available from Settings and the editor toolbar. |
+| Clear history | ✅ | Confirmation-protected action in Settings. |
+| Engine information | ✅ | Displays the SQLite library version reported by the running engine. |
+| Main sidebar | ✅ | Static on desktop and an overlay drawer below the `md` breakpoint. |
 
 ## Known limitations
 
@@ -147,11 +221,13 @@ the visualization is unavailable.
 - **No sharing or export of traces.** The canvas can be inspected and recorded manually, but there is
   no built-in share link or image/video export.
 - **No hosted demo.** Run the project locally with `npm run dev`.
+- **No guided exercises.** Stage explanations and knowledge checks exist; a full exercise flow does
+  not.
 - **Educational model, not a query planner.** The simulator models logical stages only; it does not
   claim to expose SQLite's physical plan, indexes or bytecode.
 
 ## Related documentation
 
-- [Architecture](ARCHITECTURE.md) — how execution, simulation, validation and playback fit together.
+- [Architecture](ARCHITECTURE.md) — how execution, simulation, validation, playback and inspector geometry fit together.
 - [Development guide](DEVELOPMENT.md) — setup, tests and change conventions.
 - [README](../README.md) — product overview and screenshots.

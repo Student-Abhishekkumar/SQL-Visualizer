@@ -7,7 +7,12 @@ import {
   Table2,
 } from 'lucide-react'
 import { STAGE_TITLES } from '../../services/visualization/explanations'
-import type { StageSnapshot, VisualizedStage } from '../../types/visualization'
+import type { QueryBlockDescriptor } from '../../services/visualization/queryBlocks'
+import type {
+  QueryBlockId,
+  StageSnapshot,
+  VisualizedStage,
+} from '../../types/visualization'
 
 /**
  * Left panel: the logical execution pipeline. Each stage shows its
@@ -24,6 +29,12 @@ interface PipelinePanelProps {
   /** Selected stage for inspection. */
   selectedStage: VisualizedStage | null
   onSelectStage: (stage: VisualizedStage) => void
+  /** All query blocks of the statement (root first). */
+  blocks?: QueryBlockDescriptor[]
+  /** Block whose timeline playback currently follows (null = root). */
+  activeBlockId?: QueryBlockId | null
+  /** Switch the played/inspected query block. */
+  onSelectBlock?: (blockId: QueryBlockId) => void
 }
 
 function StageIcon({
@@ -46,13 +57,34 @@ export function PipelinePanel({
   activeStage,
   selectedStage,
   onSelectStage,
+  blocks,
+  activeBlockId = null,
+  onSelectBlock,
 }: PipelinePanelProps) {
+  const showBlocks = blocks !== undefined && blocks.length > 1 && onSelectBlock !== undefined
   return (
     <nav aria-label="Execution pipeline" className="flex h-full min-h-0 flex-col overflow-y-auto">
       <div className="flex items-center gap-1.5 px-3 pt-3 pb-1.5 text-[11px] font-semibold tracking-wide text-text-muted uppercase">
         <Layers className="size-3.5" aria-hidden />
         Pipeline
       </div>
+      {showBlocks && (
+        <label className="mx-2 mb-1.5 flex flex-col gap-1 text-[11px] text-text-muted">
+          Query block
+          <select
+            aria-label="Query block"
+            value={activeBlockId ?? blocks[0]?.id ?? ''}
+            onChange={(event) => onSelectBlock(event.target.value)}
+            className="w-full rounded-md border border-border bg-surface px-2 py-1 text-[12px] text-text-primary"
+          >
+            {blocks.map((block) => (
+              <option key={block.id} value={block.id}>
+                {`${'··'.repeat(block.depth)} ${block.label}${block.playable ? '' : ' (unavailable)'}`}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <ol className="relative flex-1 space-y-0.5 px-2 pb-3">
         {stages.map((stage, index) => {
           const completed = completedByStage.has(stage)

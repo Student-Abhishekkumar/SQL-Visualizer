@@ -22,7 +22,7 @@ import type {
 
 export type FlowNodeKind = 'source' | 'operation' | 'data' | 'branch' | 'group' | 'final'
 
-export type FlowEdgeKind = 'main' | 'join-input' | 'rejected' | 'group-member' | 'final'
+export type FlowEdgeKind = 'main' | 'join-input' | 'cte' | 'rejected' | 'group-member' | 'final'
 
 /** Edge of a node that a wire attaches to. */
 export type FlowSocketSide = 'top' | 'bottom' | 'left' | 'right'
@@ -55,6 +55,16 @@ export interface FlowGraphNode {
   kind: FlowNodeKind
   /** Owning pipeline stage, null for the final node. */
   stage: VisualizedStage | null
+  /**
+   * Query block that owns this node. Undefined means the root block;
+   * nested blocks always set it so their stages never collide.
+   */
+  blockId?: string
+  /**
+   * Block-scoped stage key (`q2:WHERE`; bare `WHERE` for the root).
+   * Playback compares this, never the bare stage name.
+   */
+  stageKey?: string | null
   label: string
   /** Secondary line, e.g. a condition or column summary. */
   detail?: string
@@ -74,6 +84,14 @@ export interface FlowGraphNode {
   expandedHeight?: number
   /** True when the trace cannot faithfully visualize this stage. */
   unsupported?: boolean
+  /**
+   * True when this node's data is not the complete relation (display
+   * cap or an incomplete upstream CTE/scalar dependency). This is a
+   * warning layer on top of playback status, not a flow status.
+   */
+  incomplete?: boolean
+  /** Human-readable causes, naming upstream CTEs where known. */
+  incompleteReasons?: string[]
   /** For source nodes: real table metadata from the trace. */
   table?: TraceSourceTable
   /** The real snapshot of the node's stage (operation/data/branch). */
@@ -90,6 +108,11 @@ export interface FlowGraphNode {
    * its stage has actually produced the data.
    */
   revealsAt: VisualizedStage | null
+  /**
+   * Block-scoped form of `revealsAt`. Nested nodes use `q2:WHERE` so a
+   * stage in one block never reveals a node in another.
+   */
+  revealsAtKey?: string | null
   /** Whether this node feeds a rejected/skipped path. */
   isRejected?: boolean
 }
@@ -107,6 +130,8 @@ export interface FlowGraphEdge {
    * its data is actually flowing.
    */
   stage: VisualizedStage | null
+  /** Block-scoped form of `stage` (`q2:WHERE`; bare for the root). */
+  stageKey?: string | null
   /** Socket ids the wire attaches to on the source/target nodes. */
   fromSocket: string
   toSocket: string

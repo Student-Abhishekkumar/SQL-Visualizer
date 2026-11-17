@@ -44,6 +44,37 @@ export const STAGE_ORDER: readonly VisualizedStage[] = [
 export type StageStatus = 'pending' | 'active' | 'completed' | 'skipped' | 'unsupported'
 
 // ---------------------------------------------------------------------------
+// Query blocks (nested query identity)
+// ---------------------------------------------------------------------------
+
+/**
+ * Deterministic id of one query block: `q1` is the root statement and each
+ * nested block gets the next id in interpretation order (q2, q3, …).
+ */
+export type QueryBlockId = string
+
+/** How a query block participates in the statement. */
+export type QueryBlockKind = 'root' | 'scalar' | 'in' | 'exists' | 'cte' | 'compound' | 'derived'
+
+/**
+ * Block identity shared by snapshots, events, graph nodes and traces.
+ *
+ * Stage names alone are NOT unique across a statement once nested blocks
+ * exist (a subquery has its own WHERE, SELECT, …), so every stage-bearing
+ * artifact also carries the owning block.
+ */
+export interface QueryBlockRef {
+  id: QueryBlockId
+  kind: QueryBlockKind
+  /** Parent block id, null for the root block. */
+  parentId: QueryBlockId | null
+  /** Nesting depth: the root block is 0. */
+  depth: number
+  /** Parent stage whose expression consumes this block (null for the root). */
+  consumingStage: VisualizedStage | null
+}
+
+// ---------------------------------------------------------------------------
 // Capability analysis (Milestone 2.2)
 // ---------------------------------------------------------------------------
 
@@ -121,6 +152,11 @@ export interface HighlightInfo {
  */
 export interface StageSnapshot {
   stage: VisualizedStage
+  /**
+   * Query block that produced this snapshot. Undefined means the root
+   * block (older traces and fixtures predate block identity).
+   */
+  blockId?: QueryBlockId
   /** Short label for the pipeline, e.g. "WHERE salary > 50000". */
   label: string
   /** Column labels of `rows`. */
@@ -139,6 +175,15 @@ export interface StageSnapshot {
   outputRowCount: number
   /** True when rows were dropped to honor the visualization row limit. */
   truncated: boolean
+  /**
+   * True when this snapshot's rows are not the complete relation: the
+   * block's own display cap dropped rows, or it consumed an incomplete
+   * CTE / nested query result. `truncated` only describes this block's
+   * own FROM/JOIN cap; `incomplete` includes inherited dependencies.
+   */
+  incomplete?: boolean
+  /** Human-readable causes of `incomplete`, including upstream CTEs. */
+  incompleteReasons?: string[]
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +219,12 @@ export interface VisualizationEvent {
   description: string
   /** Logical stage this event belongs to (null for QUERY_* events). */
   stage: VisualizedStage | null
+  /**
+   * Query block this event belongs to. Undefined means the root block;
+   * nested blocks always set it so two blocks never activate each
+   * other's stages during playback.
+   */
+  blockId?: QueryBlockId
   payload?: {
     rowId?: string
     /** For ROW_EVALUATED: the condition text and its 3VL verdict. */
@@ -195,22 +246,126 @@ export interface VisualizationEvent {
 // ---------------------------------------------------------------------------
 
 /**
- * Real metadata about one source table of the query, captured by the
- * simulator while loading data. Previews are genuine table rows (capped
- * for display); `rowCount` is the full table size. Never fabricated.
+ * Real metadata about one source of the query, captured by the
+ * simulator while loading data. Previews are genuine rows (capped for
+ * display); `rowCount` is the full size. Never fabricated.
+ *
+ * `subquery` sources are nested query blocks whose real output feeds the
+ * outer pipeline; `cte` sources are ordinary CTE results. Both are
+ * resolved to real rows before the outer pipeline runs.
  */
 export interface TraceSourceTable {
   name: string
   alias: string | null
   columns: string[]
-  /** Full row count of the real table (not capped). */
+  /** Full row count of the real source (not capped). */
   rowCount: number
-  /** First rows of the real table, capped for preview display. */
+  /** First rows of the real source, capped for preview display. */
   previewRows: VisualizedRow[]
-  role: 'from' | 'join'
+  role: 'from' | 'join' | 'subquery' | 'cte'
   joinType: 'INNER JOIN' | 'LEFT JOIN' | 'CROSS JOIN' | null
   /** ON condition text, when a join. */
   on: string | null
+  /** For nested sources: the owning NestedQueryTrace id. */
+  queryId?: string
+  /** For nested sources: the outer stage that consumes the values. */
+  consumerStage?: VisualizedStage | null
+  /**
+   * Full row count of the real relation. Physical tables are exact, so
+   * this is their loaded size. A CTE/subquery whose own input was capped
+   * has no known full count, so this is null (never guessed).
+   */
+  realRowCount?: number | null
+  /** True when these rows are a visualization-capped intermediate. */
+  incomplete?: boolean
+  /** Why the source is incomplete (names the upstream CTE when known). */
+  incompleteReasons?: string[]
+}
+
+/** How a nested query block participates in the outer query. */
+export type NestedQueryKind = 'scalar' | 'in' | 'exists' | 'cte' | 'compound'
+
+/**
+ * Explicit data dependency between nested blocks. A CTE can read an
+ * earlier CTE in the same WITH clause; the edge is recorded by block id,
+ * never inferred by matching stage names.
+ */
+export interface NestedQueryDependency {
+  blockId: QueryBlockId
+  /** Stage of the dependent block that reads the other block's rows. */
+  stage: VisualizedStage
+  /**
+   * When the dependency was discovered through a nested scalar block,
+   * the scalar block that actually read the relation. Undefined for a
+   * direct FROM/JOIN dependency.
+   */
+  viaBlockId?: QueryBlockId
+  /** Stage inside the reference where the dependency is consumed. */
+  referenceStage?: VisualizedStage
+}
+
+/**
+ * A fully simulated nested query block. Its snapshots come from the same
+ * logical simulator as the outer query, so they are real intermediate
+ * rows — never reconstructed from the outer result.
+ */
+export interface NestedQueryTrace {
+  id: string
+  kind: NestedQueryKind
+  /** Short display label, e.g. "Scalar subquery · AVG(salary)". */
+  label: string
+  /** Best-effort SQL text for the nested block, rendered from its AST. */
+  sql: string
+  stageSnapshots: StageSnapshot[]
+  finalColumns: RowColumns
+  finalRows: VisualizedRow[]
+  /** Outer stage whose expression contains this nested block. */
+  parentStage: VisualizedStage | null
+  /**
+   * Canonical name for `parentStage`: the parent stage that consumes this
+   * block. The simulator always sets both to the same value.
+   */
+  consumingStage?: VisualizedStage | null
+  /** Parent block id (the root block id when nested in the root query). */
+  parentId?: QueryBlockId
+  /** Nesting depth relative to the root (root = 0). */
+  depth?: number
+  /** True when the block reads a column from its parent query. */
+  correlated: boolean
+  /** Honest caveat (empty result, SQLite first-row rule, …). */
+  note?: string
+  /**
+   * Ordered playback events for this block alone. Their stage names are
+   * block-local; `blockId` identifies the owner so playback never mixes
+   * blocks.
+   */
+  events?: VisualizationEvent[]
+  /** Lifecycle of the block's own simulation. */
+  status?: 'complete' | 'unsupported'
+  /** Why the block is unsupported (empty when complete). */
+  unavailableReasons?: string[]
+  /** True when the block's own simulation dropped rows for display. */
+  truncated?: boolean
+  /**
+   * True when the block's rows are not the complete relation, either
+   * because of its own display cap or because it read incomplete
+   * upstream CTE/scalar results.
+   */
+  incomplete?: boolean
+  /** Human-readable causes of `incomplete`, naming upstream blocks. */
+  incompleteReasons?: string[]
+  /** True only when the block's ORDER BY fully determines its row order. */
+  hasDeterministicOrder?: boolean
+  /** Declared CTE name (CTE blocks only). */
+  cteName?: string
+  /** Explicit CTE column list from `WITH name(a, b) AS …`, or null. */
+  cteColumns?: string[] | null
+  /**
+   * Earlier query blocks this block reads directly. For CTEs these are
+   * the CTE definitions it consumes; the consuming stage is recorded so
+   * the graph can wire the exact operation instead of guessing by name.
+   */
+  dependencies?: NestedQueryDependency[]
 }
 
 export interface VisualizationTrace {
@@ -218,12 +373,16 @@ export interface VisualizationTrace {
   /** Statement type of the visualized statement. */
   statementType: StatementType
   capability: VisualizationCapability
+  /** Root query block id (q1 unless a trace was built elsewhere). */
+  rootBlockId?: QueryBlockId
   stages: VisualizedStage[]
   events: VisualizationEvent[]
   /** Snapshot per completed stage, in stage order. */
   stageSnapshots: StageSnapshot[]
   /** Real source tables behind the FROM/JOIN stages. */
   sourceTables: TraceSourceTable[]
+  /** Nested query blocks (scalar subqueries today) with real snapshots. */
+  nestedQueries?: NestedQueryTrace[]
   totalSteps: number
   /** Final projected rows of the logical simulation (post LIMIT). */
   finalRows: VisualizedRow[]
@@ -237,6 +396,14 @@ export interface VisualizationTrace {
   hasDeterministicOrder: boolean
   /** True when the simulator had to drop rows (row limit). */
   truncated: boolean
+  /**
+   * True when this trace's rows are not the complete relation because a
+   * display cap or an incomplete upstream CTE/scalar block contributed.
+   * `truncated` reports only the trace's own caps.
+   */
+  incomplete?: boolean
+  /** Human-readable causes of `incomplete`, naming upstream CTEs. */
+  incompleteReasons?: string[]
 }
 
 /** Outcome of comparing the simulation with SQLite's real result. */
@@ -251,6 +418,35 @@ export interface ValidationResult {
   actualColumns?: string[]
   /** Number of rows SQLite returned. */
   actualRowCount?: number
+  /**
+   * Independent parity for each nested query block. A nested mismatch is
+   * reported separately from the outer result so the UI can say which
+   * block disagreed with SQLite.
+   */
+  nested?: NestedBlockValidation[]
+  /**
+   * True when the simulation itself was incomplete (a visualization cap
+   * or inherited CTE incompleteness), so a match cannot claim parity.
+   */
+  incomplete?: boolean
+  /** Why the simulation is incomplete. */
+  incompleteReasons?: string[]
+}
+
+/** Parity of one nested query block against SQLite's own execution. */
+export interface NestedBlockValidation {
+  blockId: QueryBlockId
+  label: string
+  validated: boolean
+  method: 'ordered' | 'unordered'
+  /**
+   * True when the block could not be compared (truncated for display, or
+   * SQLite could not isolate the block). Never a silent pass.
+   */
+  skipped?: boolean
+  detail?: string
+  /** True when the block's input was an incomplete/capped intermediate. */
+  incomplete?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -267,6 +463,16 @@ export interface VisualizationViewState {
   activeStage: VisualizedStage | null
   /** Completed stage snapshots in stage order, for pipeline inspection. */
   completedStages: StageSnapshot[]
+  /**
+   * Block-scoped keys of the completed stages (`q2:WHERE`, bare `WHERE`
+   * for the root block). Playback activation compares these, never bare
+   * stage names, so two blocks can never activate each other.
+   */
+  completedStageKeys: string[]
+  /** Block-scoped key of the stage currently animating, when any. */
+  activeStageKey: string | null
+  /** Query block this view state was folded from (null = root block). */
+  blockId: QueryBlockId | null
   finished: boolean
 }
 

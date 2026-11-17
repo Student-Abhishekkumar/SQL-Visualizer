@@ -16,25 +16,58 @@ The two paths share the same SQL text and the same live database, but neither mu
 
 ```mermaid
 flowchart TD
-    UI[React UI] --> EDITOR[Monaco editor]
-    UI --> DBM[Database manager]
-    DBM --> ENGINE[SQLite WASM engine]
-    ENGINE --> RESULT[Query result + per-statement metadata]
+    UI["React UI + Zustand stores"]
 
-    EDITOR --> VIS[Visualization pipeline]
-    VIS --> PARSER[SQL parser]
-    PARSER --> INTERP[AST interpreter]
-    INTERP --> CAP[Capability analyzer]
-    CAP --> SIM[Logical simulator]
-    SIM --> TRACE[Immutable trace: snapshots + events]
-    ENGINE --> VALIDATE[Result validation]
+    subgraph exec["Real execution"]
+        EDITOR["Monaco SQL editor"]
+        DBM["Database manager"]
+        ENGINE["SQLite WASM engine"]
+        RESULT["Results, messages, query info"]
+    end
+
+    subgraph viz["Visual explanation"]
+        PARSER["node-sql-parser"]
+        INTERP["Typed AST interpreter"]
+        CAP["Capability analyzer"]
+        SIM["Educational logical simulator"]
+        TRACE["Immutable trace: snapshots + events"]
+        VALIDATE["SQLite parity validation"]
+        GRAPH["Graph builder"]
+        PLAY["Playback controller"]
+    end
+
+    subgraph views["Views and panels"]
+        FLOW["Flow canvas"]
+        TABLE["Table view"]
+        INSPECT["Node Inspector"]
+        DOCS["Documentation sidebar"]
+        CONTROLS["Playback controls"]
+    end
+
+    PERSIST[("IndexedDB")]
+
+    UI --> EDITOR
+    UI --> DBM
+    DBM --> ENGINE
+    ENGINE --> RESULT
+    EDITOR --> PARSER
+    PARSER --> INTERP
+    INTERP --> CAP
+    CAP --> SIM
+    SIM --> TRACE
+    ENGINE --> VALIDATE
     TRACE --> VALIDATE
-    VALIDATE --> TRACE
-    TRACE --> GRAPH[Deterministic flow graph]
-    GRAPH --> CANVAS[Flow canvas]
-    TRACE --> PLAYBACK[Playback controller]
-    PLAYBACK --> CANVAS
-    PLAYBACK --> PANELS[Table view, inspector, explanations]
+    VALIDATE --> UI
+    TRACE --> GRAPH
+    GRAPH --> FLOW
+    TRACE --> PLAY
+    PLAY --> FLOW
+    PLAY --> TABLE
+    PLAY --> INSPECT
+    PLAY --> DOCS
+    CONTROLS --> PLAY
+    DBM --> PERSIST
+    UI --> PERSIST
 ```
 
 ## Real execution path
@@ -79,6 +112,7 @@ execution state:
 | Simulate | `src/services/visualization/simulator.ts` | Immutable snapshots and event trace |
 | Validate | `src/services/visualization/validation.ts` | Parity result against SQLite |
 | Layout | `src/services/visualization/graphBuilder.ts` | Nodes, edges, sockets and coordinates |
+| Inspect | `src/services/visualization/nodeInspection.ts` | Tab data, row previews, nested inputs |
 | Playback | `src/store/visualizationStore.ts` | Folded view state for the current event |
 | Render | `src/components/visualization/**` | Canvas, table, inspector and explanations |
 
@@ -98,6 +132,16 @@ execution state:
 
 Snapshots carry row roles (`accepted`, `filtered`, `duplicated`, `selected`, `skipped`, `grouped`)
 so every panel can explain not just what survived, but what was removed and why.
+
+### Nested query blocks
+
+A non-correlated scalar subquery is a real expression input, so the simulator evaluates it first
+through the same logical pipeline. Its own immutable stage snapshots are stored in
+`VisualizationTrace.nestedQueries`, and its real output rows become a `subquery` source table whose
+`consumerStage` names the outer stage that uses the value. The flow graph wires that source into the
+consuming operation; the node inspector exposes the nested output and the outer operation's inputs.
+Nested values are cached per simulation and are never re-executed when inspecting a node. This is
+still an educational logical model — not SQLite's physical plan.
 
 ## Simulator guarantees
 
@@ -138,14 +182,14 @@ deterministic and cheap. `visualizationStore` folds events up to the current ind
 
 That single view state drives:
 
-- node status and revealed edges on the flow canvas,
+- node status, revealed edges and branch emphasis on the flow canvas,
 - the clause strip and Monaco clause highlight,
 - the synchronized table view,
-- the node inspector and explanation panel,
-- the playback controls.
+- the floating node inspector and the documentation sidebar,
+- the playback controls and speed selection.
 
 Both Query and Canvas workspaces stay mounted. Switching views therefore preserves editor
-content, results, canvas pan/zoom, selection and playback position.
+content, results, canvas pan/zoom, node selection and playback position.
 
 ## Canvas architecture
 
@@ -157,7 +201,74 @@ content, results, canvas pan/zoom, selection and playback position.
 - sockets and edge routing computed separately from rendering.
 
 `FlowCanvas` renders HTML nodes and SVG wires, reveals elements only when their data exists, and
-keeps interaction (pan, zoom, fit, node selection) independent from the playback state.
+keeps interaction independent from playback state. It owns transient camera and pointer state:
+
+- **Pan and zoom:** pointer drag and wheel gestures update a local camera; fit and reset derive a
+  new camera from the graph bounds.
+- **Node dragging:** pointer capture moves a node within the canvas and settles nearby collisions;
+  a drag never selects the node or opens the inspector.
+- **Hover and click tracing:** hover emphasizes the upstream path for that node; click pins the
+  selection and opens the inspector. Both use the graph's real edges, including branch edges.
+
+Query semantics stay in the services; the canvas renders whatever the graph builder produces.
+
+## Node Inspector architecture
+
+The inspector is a single persistent window, not one window per node. Its geometry and mode are
+owned by `VisualizationWorkspace`, so they survive node switches, playback updates, closing and
+reopening:
+
+| State | Owner | Meaning |
+|:---|:---|:---|
+| `inspectorRect` | Workspace | Saved expanded rectangle (position, width, height). |
+| `inspectorMode` | Workspace | `expanded`, `collapsed` or `minimized`. |
+| `inspectorBounds` | Workspace | Measured canvas layer used for clamping. |
+| `liveRect` | Inspector | Transient rectangle during an in-flight drag or resize. |
+| Active tab | Inspector | Overview, Input, Output or Details. |
+
+The visible rectangle is derived from the saved rectangle:
+
+- **Expanded:** `clampRect` keeps the full rectangle inside the workspace and enforces the minimum
+  readable size.
+- **Collapsed:** the visible box is rebuilt at `INSPECTOR_HEADER_HEIGHT` (52px). Its position is
+  clamped with `clampPosition`, which preserves dimensions exactly, so the header can reach the
+  bottom of the workspace without the expanded minimum height inflating it.
+- **Minimized:** the window is hidden and a dock chip represents it.
+
+`floatingWindow.ts` contains the pure geometry helpers: `clampRect`, `clampPosition`, `moveRect`,
+`resizeRect`, `maximizeRect`, `defaultRect` and `rectNearAnchor`. `moveRect` never resizes a window;
+`resizeRect` anchors the opposite edge and enforces minimum sizes.
+
+Pointer interaction is centralized in one handler for both expanded and collapsed modes. The
+persistent header starts a move, resize handles start a resize, and header buttons stop propagation.
+Pointer capture is used where supported, and pointer-up and pointer-cancel both commit the gesture.
+Because only the rectangle changes during playback, the selected node's data updates without
+resetting the window's position, size or mode.
+
+The collapsed state removes the content and resize handles from the rendered tree instead of hiding
+them. The outer element's height is the real header height, and the drag rectangle is the same
+header-height box. Expanding restores the saved expanded height, width, position and tab.
+
+## Learning and explanation architecture
+
+`explanations.ts` holds the educational content as data:
+
+- per-stage descriptions at beginner, intermediate and advanced levels,
+- the "what happened" summary derived from the active snapshot,
+- curated SQLite documentation links,
+- optional knowledge checks for selected stages (beginner and intermediate only).
+
+`ExplanationPanel` renders that content, including the knowledge-check state. `DocumentationSidebar`
+wraps the panel in an independently toggleable sidebar:
+
+- it stays mounted while closed, preserving scroll position, learning level and answer state,
+- it is a real flex column on wide layouts and an overlay on narrow ones,
+- closing moves focus back to the header toggle; opening from the edge tab focuses the panel,
+- `Escape` closes it,
+- a compact edge tab keeps it reachable while closed.
+
+The workspace passes the current playback snapshot or the inspected node's stage, so theory and
+visualization stay synchronized.
 
 ## State and persistence
 
@@ -166,8 +277,11 @@ keeps interaction (pan, zoom, fit, node selection) independent from the playback
 | `databaseStore` | Active database, database list, schema, last result, execution status |
 | `editorStore` | SQL text and current clause highlight |
 | `historyStore` | Query history and saved named queries |
-| `uiStore` | Theme, active workspace view, sidebar and modal state, learning level |
+| `uiStore` | Theme, active workspace view, sidebar state, modals, learning level |
 | `visualizationStore` | Trace, playback position, speed, validation and status |
+
+Playback state also carries a session id so a new trace or database switch cannot leave stale
+status or validation text attached to a different query.
 
 IndexedDB database `sql-visualizer` (version 2) contains:
 
@@ -200,15 +314,17 @@ workspace useful even when the educational model does not apply.
 src/services/
 ├─ database/        sql.js wrapper, multi-database manager, seed data, templates
 ├─ sql/             parser wrapper and SQL formatter
-├─ visualization/   interpreter, analyzer, simulator, validation, graph layout, explanations
+├─ visualization/   interpreter, analyzer, simulator, validation, graph layout,
+│                   inspection, explanations, window geometry
 └─ persistence/     IndexedDB storage and legacy migration
 
 src/components/visualization/
-├─ flow/            canvas, node renderers, wires, inspector
+├─ flow/            canvas, node renderers, wires, inspector, minimized dock
 ├─ VisualizationWorkspace.tsx
+├─ DocumentationSidebar.tsx
+├─ ExplanationPanel.tsx
 ├─ PipelinePanel.tsx
 ├─ TransformationPanel.tsx
-├─ ExplanationPanel.tsx
 └─ PlaybackControls.tsx
 ```
 
@@ -219,6 +335,12 @@ src/components/visualization/
 - **Validation:** `src/services/visualization/validation.ts`, starting at `simulateAndValidate`
 - **Canvas:** `src/services/visualization/graphBuilder.ts` and `src/components/visualization/flow/FlowCanvas.tsx`
 - **Playback:** `src/store/visualizationStore.ts`, starting at `foldEvents`
+- **Inspector:** `src/components/visualization/flow/FloatingNodeInspector.tsx`,
+  `src/components/visualization/VisualizationWorkspace.tsx` and
+  `src/services/visualization/floatingWindow.ts`
+- **Learning content:** `src/services/visualization/explanations.ts`,
+  `src/components/visualization/ExplanationPanel.tsx` and
+  `src/components/visualization/DocumentationSidebar.tsx`
 
 For supported SQL constructs and known gaps, see [FEATURES.md](FEATURES.md). For setup and test
 conventions, see [DEVELOPMENT.md](DEVELOPMENT.md).

@@ -1459,3 +1459,48 @@ describe('FlowCanvas', () => {
     ).toBeCloseTo(originalLeft, 5)
   })
 })
+
+describe('FlowCanvas — nested query source', () => {
+  const base = makeTrace()
+  const nestedTrace: VisualizationTrace = {
+    ...base,
+    sourceTables: [
+      ...base.sourceTables,
+      {
+        name: 'Scalar subquery · AVG(salary)',
+        alias: null,
+        columns: ['AVG(salary)'],
+        rowCount: 1,
+        previewRows: [{ id: 'q#r1', values: [54250] }],
+        role: 'subquery',
+        joinType: null,
+        on: null,
+        queryId: 'q2',
+        consumerStage: 'WHERE',
+      },
+    ],
+    nestedQueries: [
+      {
+        id: 'q2',
+        kind: 'scalar',
+        label: 'Scalar subquery · AVG(salary)',
+        sql: 'SELECT AVG(salary) FROM employees',
+        stageSnapshots: [],
+        finalColumns: ['AVG(salary)'],
+        finalRows: [{ id: 'q#r1', values: [54250] }],
+        parentStage: 'WHERE',
+        correlated: false,
+      },
+    ],
+  }
+  const subqueryGraph = buildFlowGraph(nestedTrace)
+
+  it('renders the nested result as an inspectable source with a SUBQUERY badge', () => {
+    renderGraph(subqueryGraph, deriveFlowState(subqueryGraph, new Set(['FROM']), null, false))
+    expect(screen.getByText('SUBQUERY')).toBeInTheDocument()
+    expect(screen.getByText('computed first')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: /Nested query result Scalar subquery/ }),
+    ).toBeInTheDocument()
+  })
+})

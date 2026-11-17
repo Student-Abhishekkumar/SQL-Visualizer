@@ -1,6 +1,5 @@
-import { useMemo } from 'react'
+import { memo, useMemo } from 'react'
 import type { FlowGraph, FlowGraphNode, FlowGraphState } from '../../../types/flowGraph'
-import type { VisualizedStage } from '../../../types/visualization'
 import { FlowCanvas } from './FlowCanvas'
 
 /**
@@ -17,20 +16,20 @@ interface FlowViewProps {
   /** True while the shared playback controller is running. */
   playing: boolean
   /**
-   * Stage the user explicitly inspected (clause strip, pipeline, node
-   * click). Playback is paused in that case, so the relevant connection
-   * keeps its data packets moving to show what that stage produced.
+   * Block-scoped stage key the user explicitly inspected (`q2:WHERE`).
+   * Playback is paused in that case, so the relevant connection keeps
+   * its data packets moving to show what that stage produced.
    */
-  focusStage?: VisualizedStage | null
+  focusStageKey?: string | null
   onSelectNode: (node: FlowGraphNode) => void
 }
 
-export function FlowView({
+export const FlowView = memo(function FlowView({
   graph,
   flowState,
   selectedNodeId,
   playing,
-  focusStage = null,
+  focusStageKey = null,
   onSelectNode,
 }: FlowViewProps) {
   // Live playback animates the edges of the running stage. When the user
@@ -38,16 +37,16 @@ export function FlowView({
   // the inspected data flow stays legible.
   const packetEdgeIds = useMemo(() => {
     if (flowState.packetEdgeIds.length > 0) return flowState.packetEdgeIds
-    if (focusStage === null) return []
+    if (focusStageKey === null) return []
     return graph.edges
       .filter(
         (edge) =>
-          edge.stage === focusStage &&
+          (edge.stageKey ?? edge.stage) === focusStageKey &&
           flowState.edges[edge.id] !== 'hidden' &&
           edge.curve.length >= 4,
       )
       .map((edge) => edge.id)
-  }, [flowState.packetEdgeIds, flowState.edges, graph.edges, focusStage])
+  }, [flowState.packetEdgeIds, flowState.edges, graph.edges, focusStageKey])
 
   return (
     <FlowCanvas
@@ -57,8 +56,8 @@ export function FlowView({
       packetEdgeIds={packetEdgeIds}
       selectedNodeId={selectedNodeId}
       following={playing}
-      focusStage={focusStage}
+      focusStageKey={focusStageKey}
       onSelectNode={onSelectNode}
     />
   )
-}
+})

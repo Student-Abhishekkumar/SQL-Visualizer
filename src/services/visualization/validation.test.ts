@@ -36,6 +36,96 @@ const SPEC_QUERIES = [
   'SELECT name, salary FROM employees WHERE salary BETWEEN 40000 AND 70000 AND department_id IN (1, 2) ORDER BY salary DESC',
 ]
 
+describe('simulateAndValidate — scalar subqueries against real SQLite', () => {
+  /** Seed AVG(salary) is 53125; only Priya, Neha and Arjun earn more. */
+  it('validates a scalar subquery in WHERE', () => {
+    const query =
+      'SELECT name FROM employees WHERE salary > (SELECT AVG(salary) FROM employees) ORDER BY name'
+    const outcome = simulateAndValidate(query, [query], db)
+    expect(outcome.simulation.ok).toBe(true)
+    expect(outcome.validation?.validated).toBe(true)
+    expect(outcome.execution?.values).toEqual([['Arjun'], ['Neha'], ['Priya']])
+    if (outcome.validation && !outcome.validation.validated) {
+      throw new Error(`parity failure: ${outcome.validation.detail}`)
+    }
+  })
+
+  it('validates a scalar subquery in the SELECT list', () => {
+    const query =
+      'SELECT name, (SELECT MAX(salary) FROM employees) AS top_salary FROM employees ORDER BY name'
+    const outcome = simulateAndValidate(query, [query], db)
+    expect(outcome.simulation.ok).toBe(true)
+    expect(outcome.validation?.validated).toBe(true)
+    expect(outcome.execution?.values.every((row) => row[1] === 90000)).toBe(true)
+  })
+
+  it('validates an empty subquery result as NULL (outer rows filtered out)', () => {
+    const query =
+      'SELECT name FROM employees WHERE salary > (SELECT id FROM employees WHERE id > 999) ORDER BY name'
+    const outcome = simulateAndValidate(query, [query], db)
+    expect(outcome.simulation.ok).toBe(true)
+    expect(outcome.validation?.validated).toBe(true)
+    expect(outcome.execution?.values).toEqual([])
+    expect(outcome.simulation.ok && outcome.simulation.trace.nestedQueries?.[0]?.finalRows).toHaveLength(0)
+  })
+
+  it('validates a NULL scalar value from a non-empty subquery', () => {
+    const query =
+      'SELECT name FROM employees WHERE salary > (SELECT NULL FROM employees WHERE id = 1) ORDER BY name'
+    const outcome = simulateAndValidate(query, [query], db)
+    expect(outcome.simulation.ok).toBe(true)
+    expect(outcome.validation?.validated).toBe(true)
+    expect(outcome.execution?.values).toEqual([])
+  })
+
+  it('validates SQLite’s first-row rule for a multi-row scalar subquery', () => {
+    const query =
+      'SELECT name, (SELECT name FROM employees ORDER BY id DESC) AS any_name FROM employees ORDER BY id LIMIT 1'
+    const outcome = simulateAndValidate(query, [query], db)
+    expect(outcome.simulation.ok).toBe(true)
+    expect(outcome.validation?.validated).toBe(true)
+    expect(outcome.execution?.values).toEqual([['Rahul', 'Pooja']])
+  })
+
+  it('validates a subquery nested inside another subquery', () => {
+    const query =
+      'SELECT name FROM employees WHERE salary > (SELECT AVG(salary) FROM employees WHERE salary > (SELECT MIN(salary) FROM employees)) ORDER BY name'
+    const outcome = simulateAndValidate(query, [query], db)
+    expect(outcome.simulation.ok).toBe(true)
+    expect(outcome.validation?.validated).toBe(true)
+    if (outcome.validation && !outcome.validation.validated) {
+      throw new Error(`parity failure: ${outcome.validation.detail}`)
+    }
+  })
+
+  it('reports a correlated scalar subquery as unsupported while SQLite still executes it', () => {
+    const query =
+      'SELECT name FROM employees e WHERE salary > (SELECT AVG(salary) FROM employees x WHERE x.department_id = e.department_id) ORDER BY name'
+    const outcome = simulateAndValidate(query, [query], db)
+    expect(outcome.simulation.ok).toBe(false)
+    if (!outcome.simulation.ok) {
+      expect(outcome.simulation.reasons.some((reason) => /correlated/i.test(reason))).toBe(true)
+    }
+    expect(outcome.execution).not.toBeNull()
+    expect(outcome.execution?.values.length).toBeGreaterThan(0)
+  })
+
+  it('reports a multi-column scalar subquery instead of faking a value', () => {
+    // node-sql-parser rejects a multi-column subquery in the SELECT list,
+    // but parses one in WHERE — where SQLite rejects it at execution time.
+    const query =
+      'SELECT name FROM employees WHERE salary > (SELECT id, name FROM employees WHERE id = 1)'
+    const outcome = simulateAndValidate(query, [query], db)
+    expect(outcome.simulation.ok).toBe(false)
+    if (!outcome.simulation.ok) {
+      expect(outcome.simulation.reasons.some((reason) => /2 columns/i.test(reason))).toBe(true)
+    }
+    // SQLite itself rejects this query, so there is no real result to validate.
+    expect(outcome.execution).toBeNull()
+    expect(outcome.validation).toBeNull()
+  })
+})
+
 describe('simulateAndValidate — spec queries against real SQLite', () => {
   for (const query of SPEC_QUERIES) {
     it(`validates: ${query}`, () => {

@@ -124,8 +124,26 @@ export function analyzeCapability(
       : structure.from.name,
   })
 
+  if (structure.ctes.length > 0) {
+    detected.push({
+      kind: 'cte',
+      detail: `${structure.ctes.length} common table expression${structure.ctes.length === 1 ? '' : 's'}: ${structure.ctes
+        .map((cte) => cte.name)
+        .join(', ')}`,
+    })
+  }
+
   for (const join of structure.joins) {
     detected.push({ kind: 'join', detail: `${join.type} on ${join.table.name}` })
+  }
+
+  if (structure.subqueries.length > 0) {
+    detected.push({
+      kind: 'subquery',
+      detail: `${structure.subqueries.length} nested ${structure.subqueries.length === 1 ? 'query block' : 'query blocks'}: ${structure.subqueries
+        .map((subquery) => subquery.text)
+        .join(', ')}`,
+    })
   }
 
   if (structure.selectAll) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { interpretQuery, interpretStatement } from './astInterpreter'
+import { interpretQuery, interpretStatement, type SubqueryExpr } from './astInterpreter'
 
 /**
  * AST interpretation tests — run against the real node-sql-parser AST
@@ -214,6 +214,56 @@ describe('interpretStatement — unsupported constructs', () => {
   it('rejects comma joins with a clear reason', () => {
     const result = interpretStatement('SELECT * FROM employees, departments')
     expect(result.unsupportedReasons.some((reason) => /comma cross joins/i.test(reason))).toBe(true)
+  })
+})
+
+describe('interpretStatement — scalar subqueries', () => {
+  it('interprets an uncorrelated scalar subquery in WHERE with real structure', () => {
+    const result = interpretStatement(
+      'SELECT name FROM employees WHERE salary > (SELECT AVG(salary) FROM employees)',
+    )
+    expect(result.unsupportedReasons).toEqual([])
+    const where = result.structure?.where
+    expect(where).toMatchObject({ kind: 'comparison', operator: '>' })
+    if (where?.kind !== 'comparison') throw new Error('missing comparison')
+    const subquery = where.right as SubqueryExpr
+    expect(subquery.kind).toBe('subquery')
+    expect(subquery.parentStage).toBe('WHERE')
+    expect(subquery.correlated).toBe(false)
+    expect(subquery.query.from.name).toBe('employees')
+    expect(subquery.query.aggregates[0]).toMatchObject({ name: 'AVG' })
+    expect(result.structure?.subqueries).toHaveLength(1)
+    expect(subquery.text).toMatch(/^\(SELECT AVG\(salary\) FROM employees\)$/)
+  })
+
+  it('interprets a scalar subquery in the SELECT list', () => {
+    const result = interpretStatement(
+      'SELECT name, (SELECT MAX(salary) FROM employees) AS top_salary FROM employees',
+    )
+    expect(result.unsupportedReasons).toEqual([])
+    const item = result.structure?.selectItems[1]
+    expect(item?.alias).toBe('top_salary')
+    expect(item?.expression).toMatchObject({ kind: 'subquery', parentStage: 'SELECT' })
+    expect(result.structure?.subqueries).toHaveLength(1)
+  })
+
+  it('rejects a correlated scalar subquery with a specific reason', () => {
+    const result = interpretStatement(
+      'SELECT name FROM employees e WHERE salary > (SELECT AVG(salary) FROM employees x WHERE x.department_id = e.id)',
+    )
+    expect(result.structure).not.toBeNull()
+    expect(
+      result.unsupportedReasons.some((reason) => /correlated subqueries/i.test(reason)),
+    ).toBe(true)
+  })
+
+  it('reports IN subqueries as a specific unsupported construct', () => {
+    const result = interpretStatement(
+      'SELECT name FROM employees WHERE department_id IN (SELECT id FROM departments)',
+    )
+    expect(
+      result.unsupportedReasons.some((reason) => /IN \/ NOT IN subqueries/i.test(reason)),
+    ).toBe(true)
   })
 })
 

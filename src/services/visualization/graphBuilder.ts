@@ -28,11 +28,13 @@ import type {
 } from '../../types/flowGraph'
 import type {
   GroupSnapshot,
+  NestedQueryTrace,
   StageSnapshot,
   VisualizationTrace,
   VisualizedStage,
 } from '../../types/visualization'
 import { curveMidpoint, routeEdgeCurve } from './flowGeometry'
+import { rootBlockIdOf, stageKeyFor } from './queryBlocks'
 
 /** Operations that get a dedicated operation node (FROM is the source load). */
 const OPERATION_STAGES = new Set<VisualizedStage>([
@@ -184,6 +186,174 @@ function branchEdgeLabel(stage: VisualizedStage): string {
   return 'rejected'
 }
 
+/** Horizontal gap between nested-block columns. */
+const NESTED_COLUMN_GAP = 56
+
+interface NestedSubgraph {
+  nodes: FlowGraphNode[]
+  edges: FlowGraphEdge[]
+  /** Last data node of each block (its real result, ready to be consumed). */
+  lastByBlock: Map<string, FlowGraphNode>
+  /** Width reserved for one nesting level. */
+  columnWidth: number
+}
+
+/**
+ * Build the stage-level subgraph of every nested query block.
+ *
+ * Nested results are computed before the outer pipeline, so their blocks
+ * live in columns to the LEFT of the root pipeline: depth 1 next to the
+ * sources, depth 2 one column further left-to-right, and so on. Each
+ * node carries its block id and block-scoped stage key, so playback can
+ * animate a block without ever touching another block's stages.
+ *
+ * Blocks are stacked vertically inside their depth column; coordinates
+ * are deterministic for a given trace.
+ */
+function buildNestedSubgraphs(
+  trace: VisualizationTrace,
+  rootId: string,
+  maxDepth: number,
+): NestedSubgraph {
+  const columnWidth = NODE_W + NESTED_COLUMN_GAP
+  const nodes: FlowGraphNode[] = []
+  const edges: FlowGraphEdge[] = []
+  const lastByBlock = new Map<string, FlowGraphNode>()
+  const columnTop = new Map<number, number>()
+
+  const link = (
+    from: FlowGraphNode,
+    fromSocket: string,
+    to: FlowGraphNode,
+    toSocket: string,
+    kind: FlowGraphEdge['kind'],
+    stage: VisualizedStage,
+    stageKey: string,
+  ): void => {
+    const curve = routeEdgeCurve(from, fromSocket, to, toSocket)
+    if (curve.length < 4) return
+    edges.push({
+      id: `edge-${from.id}-${to.id}`,
+      from: from.id,
+      to: to.id,
+      kind,
+      stage,
+      stageKey,
+      fromSocket,
+      toSocket,
+      curve,
+      labelPoint: curveMidpoint(curve),
+    })
+  }
+
+  const blocks: NestedQueryTrace[] = trace.nestedQueries ?? []
+  for (const block of blocks) {
+    const depth = Math.max(1, block.depth ?? 1)
+    // Depth 1 (the direct child) sits nearest the root pipeline; deeper
+    // blocks stack further left so data visibly flows child → parent.
+    const x = (maxDepth - depth) * columnWidth
+    let rowTop = columnTop.get(depth) ?? TOP
+    let previous: FlowGraphNode | null = null
+
+    for (const snapshot of block.stageSnapshots) {
+      const stage = snapshot.stage
+      const hasOp = OPERATION_STAGES.has(stage)
+      const stageKey = stageKeyFor(block.id, stage, rootId)
+      let opNode: FlowGraphNode | null = null
+
+      if (hasOp) {
+        const inputSocket = makeSocket(
+          {
+            id: 'in',
+            direction: 'input',
+            kind: 'data',
+            side: previous === null ? 'left' : 'top',
+            label: 'in',
+          },
+          NODE_W,
+          OP_H,
+        )
+        opNode = {
+          id: `${block.id}-op-${stage}`,
+          kind: 'operation',
+          stage,
+          blockId: block.id,
+          stageKey,
+          label: stage.replace('_', ' '),
+          detail: snapshot.label,
+          hint: STAGE_HINTS[stage],
+          x,
+          y: rowTop,
+          width: NODE_W,
+          height: OP_H,
+          sockets: [
+            inputSocket,
+            makeSocket(
+              { id: 'out', direction: 'output', kind: 'data', side: 'bottom', label: 'rows' },
+              NODE_W,
+              OP_H,
+            ),
+          ],
+          snapshot,
+          revealsAt: null,
+          revealsAtKey: null,
+          incomplete: block.incomplete === true,
+          incompleteReasons: [...(block.incompleteReasons ?? [])],
+        }
+        nodes.push(opNode)
+        if (previous !== null) {
+          link(previous, 'out', opNode, inputSocket.id, 'main', stage, stageKey)
+        }
+        previous = opNode
+      }
+
+      const dataNode: FlowGraphNode = {
+        id: `${block.id}-data-${stage}`,
+        kind: 'data',
+        stage,
+        blockId: block.id,
+        stageKey,
+        label: `${DATA_LABELS[stage] ?? `${stage} result`} · ${snapshot.outputRowCount}`,
+        detail: `${snapshot.inputRowCount} in → ${snapshot.outputRowCount} out`,
+        x,
+        y: hasOp ? rowTop + OP_H + OP_DATA_GAP : rowTop,
+        width: NODE_W,
+        height: DATA_H,
+        sockets: [
+          makeSocket(
+            { id: 'in', direction: 'input', kind: 'data', side: 'top', label: 'in' },
+            NODE_W,
+            DATA_H,
+          ),
+          makeSocket(
+            { id: 'out', direction: 'output', kind: 'data', side: 'bottom', label: 'rows' },
+            NODE_W,
+            DATA_H,
+          ),
+        ],
+        expandedHeight: expandedHeightFor(DATA_H, snapshot.rows.length),
+        snapshot,
+        rows: snapshot.rows,
+        revealsAt: stage,
+        revealsAtKey: stageKey,
+        incomplete: block.incomplete === true,
+        incompleteReasons: [...(block.incompleteReasons ?? [])],
+      }
+      nodes.push(dataNode)
+      if (previous !== null) {
+        link(previous, 'out', dataNode, 'in', 'main', stage, stageKey)
+      }
+      previous = dataNode
+      rowTop += (hasOp ? OP_H + OP_DATA_GAP : 0) + DATA_H + ROW_GAP
+    }
+
+    if (previous !== null) lastByBlock.set(block.id, previous)
+    columnTop.set(depth, rowTop)
+  }
+
+  return { nodes, edges, lastByBlock, columnWidth }
+}
+
 /**
  * Build the flow graph for a trace. Deterministic: the same trace
  * always yields the same nodes, sockets, edges and layout.
@@ -192,6 +362,21 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
   const nodes: FlowGraphNode[] = []
   const edges: FlowGraphEdge[] = []
   const supportedStages = new Set(trace.capability.supportedStages)
+  const rootId = rootBlockIdOf(trace)
+
+  // Nested blocks are rendered in columns to the left of the root
+  // pipeline. Only queries with nested blocks pay the layout shift, so a
+  // single-block query keeps exactly the same coordinates as before.
+  const nestedBlocks = trace.nestedQueries ?? []
+  const nestedMaxDepth = nestedBlocks.reduce(
+    (max, block) => Math.max(max, Math.max(1, block.depth ?? 1)),
+    0,
+  )
+  const nested = buildNestedSubgraphs(trace, rootId, nestedMaxDepth)
+  const rootShift = nested.nodes.length > 0 ? nestedMaxDepth * nested.columnWidth : 0
+  const sourceX = SOURCE_X + rootShift
+  const spineX = SPINE_X + rootShift
+  const sideX = SIDE_X + rootShift
 
   const snapshotByStage = new Map<VisualizedStage, StageSnapshot>()
   for (const snapshot of trace.stageSnapshots) snapshotByStage.set(snapshot.stage, snapshot)
@@ -233,51 +418,175 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
   const joinRow = rows.get('JOIN')
   const firstRow = pipelineStages[0] !== undefined ? rows.get(pipelineStages[0]) : undefined
   const consumerY = joinRow?.opY ?? firstRow?.opY ?? TOP
-  const sourceCount = Math.max(trace.sourceTables.length, 0)
+  const primarySources = trace.sourceTables.filter(
+    (table) => table.role !== 'subquery' && table.role !== 'cte',
+  )
+  const sourceCount = primarySources.length
   const stackHeight =
     sourceCount > 0 ? sourceCount * SOURCE_H + (sourceCount - 1) * SOURCE_STACK_GAP : 0
   const stackTop = Math.max(16, consumerY + OP_H / 2 - stackHeight / 2)
+  // Nested query results are inputs too, but they are computed before the
+  // outer pipeline. They stack below the real tables so no node overlaps,
+  // and their wires still point at the consuming operation.
+  const nestedStackTop =
+    sourceCount > 0
+      ? stackTop + stackHeight + SOURCE_STACK_GAP
+      : Math.max(16, consumerY + OP_H / 2 - SOURCE_H / 2)
+  let nestedPosition = 0
 
   const sourceNodes: FlowGraphNode[] = trace.sourceTables.map((table, index) => {
     const height = SOURCE_H
-    return {
-      id: `src-${index}-${table.alias ?? table.name}`,
-      kind: 'source',
-      stage: table.role === 'from' ? 'FROM' : 'JOIN',
-      label: table.name,
-      detail:
-        table.role === 'from'
-          ? `${table.alias !== null ? `alias ${table.alias} · ` : ''}${table.rowCount} row${table.rowCount === 1 ? '' : 's'} in table`
-          : `${table.joinType ?? 'JOIN'}${table.alias !== null ? ` · alias ${table.alias}` : ''} · ${table.rowCount} row${table.rowCount === 1 ? '' : 's'}`,
-      hint: table.role === 'from' ? 'Data starts here.' : 'This table feeds the join.',
-      x: SOURCE_X,
-      y: stackTop + index * (SOURCE_H + SOURCE_STACK_GAP),
-      width: SOURCE_W,
-      height,
-      sockets: [
+    const isPrimary = table.role !== 'subquery' && table.role !== 'cte'
+    const primaryIndex = primarySources.indexOf(table)
+    const y = isPrimary
+      ? stackTop + primaryIndex * (SOURCE_H + SOURCE_STACK_GAP)
+      : nestedStackTop + nestedPosition++ * (SOURCE_H + SOURCE_STACK_GAP)
+    const isCte = table.role === 'cte'
+    const detail = isPrimary
+      ? table.role === 'from'
+        ? `${table.alias !== null ? `alias ${table.alias} · ` : ''}${table.rowCount} row${table.rowCount === 1 ? '' : 's'} in table`
+        : `${table.joinType ?? 'JOIN'}${table.alias !== null ? ` · alias ${table.alias}` : ''} · ${table.rowCount} row${table.rowCount === 1 ? '' : 's'}`
+      : isCte
+        ? `CTE result · ${table.rowCount} row${table.rowCount === 1 ? '' : 's'}`
+        : `Nested query result · ${table.rowCount} row${table.rowCount === 1 ? '' : 's'}`
+    const hint = isPrimary
+      ? table.role === 'from'
+        ? 'Data starts here.'
+        : 'This table feeds the join.'
+      : isCte
+        ? 'The CTE is computed before this query reads it.'
+        : 'This subquery is evaluated before the outer pipeline runs.'
+    const nodeStage: VisualizedStage = isPrimary
+      ? table.role === 'from'
+        ? 'FROM'
+        : 'JOIN'
+      : (table.consumerStage ?? 'SELECT')
+    const sockets: FlowSocket[] = []
+    // A nested/CTE result is produced by its own subgraph; that subgraph
+    // feeds this source node through a dedicated input port.
+    if (!isPrimary) {
+      sockets.push(
         makeSocket(
-          {
-            id: 'out',
-            direction: 'output',
-            kind: 'data',
-            side: 'right',
-            label: table.alias ?? 'rows',
-          },
+          { id: 'in-nested', direction: 'input', kind: 'data', side: 'left', label: 'rows' },
           SOURCE_W,
           height,
         ),
-      ],
+      )
+    }
+    sockets.push(
+      makeSocket(
+        {
+          id: 'out',
+          direction: 'output',
+          kind: 'data',
+          side: 'right',
+          label: table.alias ?? 'rows',
+        },
+        SOURCE_W,
+        height,
+      ),
+    )
+    return {
+      id: `src-${index}-${table.alias ?? table.name}`,
+      kind: 'source',
+      stage: nodeStage,
+      blockId: rootId,
+      stageKey: stageKeyFor(rootId, nodeStage, rootId),
+      label: table.name,
+      detail,
+      hint,
+      x: sourceX,
+      y,
+      width: SOURCE_W,
+      height,
+      sockets,
       expandedHeight: expandedHeightFor(height, table.previewRows.length),
       // Source tables are query inputs, not query output: they already
       // exist in the database, so both join inputs are visible from the
       // start and visibly converge on the JOIN node.
       revealsAt: null,
       table,
+      incomplete: table.incomplete === true,
+      incompleteReasons: [...(table.incompleteReasons ?? [])],
     }
   })
   nodes.push(...sourceNodes)
   const mainSource = sourceNodes.find((node) => node.table?.role === 'from') ?? sourceNodes[0]
   const joinSources = sourceNodes.filter((node) => node.table?.role === 'join')
+  const subquerySources = sourceNodes.filter(
+    (node) => node.table?.role === 'subquery' || node.table?.role === 'cte',
+  )
+
+  // --- phase 2b: nested query subgraphs ------------------------------------
+  // Every nested block gets its own stage-level subgraph on the left. Its
+  // last data node is the block's real result and feeds the matching
+  // source node (role: 'subquery' / 'cte'), which then feeds the
+  // consuming stage. Nothing is wired across blocks by name, only by
+  // recorded block ids and dependency edges.
+  nodes.push(...nested.nodes)
+  edges.push(...nested.edges)
+  for (const source of subquerySources) {
+    const blockId = source.table?.queryId
+    if (blockId === undefined) continue
+    const last = nested.lastByBlock.get(blockId)
+    if (last === undefined) continue
+    const input = source.sockets.find((socket) => socket.id === 'in-nested')
+    if (input === undefined) continue
+    const curve = routeEdgeCurve(last, 'out', source, input.id)
+    if (curve.length < 4) continue
+    const block = nestedBlocks.find((entry) => entry.id === blockId)
+    const lastStage = block?.stageSnapshots[block.stageSnapshots.length - 1]?.stage ?? null
+    edges.push({
+      id: `edge-${last.id}-${source.id}`,
+      from: last.id,
+      to: source.id,
+      kind: source.table?.role === 'cte' ? 'cte' : 'main',
+      stage: lastStage,
+      stageKey: lastStage !== null ? stageKeyFor(blockId, lastStage, rootId) : null,
+      fromSocket: 'out',
+      toSocket: input.id,
+      curve,
+      labelPoint: curveMidpoint(curve),
+    })
+  }
+
+  // A CTE that reads an earlier CTE gets an explicit edge between the two
+  // block subgraphs. The target is the exact stage that consumes the
+  // rows (FROM data or JOIN operation), never a stage-name guess.
+  for (const block of nestedBlocks) {
+    for (const dependency of block.dependencies ?? []) {
+      const from = nested.lastByBlock.get(dependency.blockId)
+      if (from === undefined) continue
+      const targetId =
+        dependency.stage === 'FROM'
+          ? `${block.id}-data-FROM`
+          : `${block.id}-op-${dependency.stage}`
+      const target =
+        nodes.find((node) => node.id === targetId) ??
+        nodes.find((node) => node.blockId === block.id)
+      if (target === undefined) continue
+      const input = target.sockets.find((socket) => socket.direction === 'input')
+      if (input === undefined) continue
+      const curve = routeEdgeCurve(from, 'out', target, input.id)
+      if (curve.length < 4) continue
+      const dependencyBlock = nestedBlocks.find((entry) => entry.id === dependency.blockId)
+      const lastStage =
+        dependencyBlock?.stageSnapshots[dependencyBlock.stageSnapshots.length - 1]?.stage ?? null
+      edges.push({
+        id: `edge-${from.id}-${target.id}`,
+        from: from.id,
+        to: target.id,
+        kind: 'cte',
+        label: 'cte',
+        stage: lastStage,
+        stageKey: lastStage !== null ? stageKeyFor(dependency.blockId, lastStage, rootId) : null,
+        fromSocket: 'out',
+        toSocket: input.id,
+        curve,
+        labelPoint: curveMidpoint(curve),
+      })
+    }
+  }
 
   // --- phase 3: operations, datasets, branches, groups ---------------------
   let previousBottom: FlowGraphNode | null = mainSource ?? null
@@ -299,6 +608,7 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
       to: to.id,
       kind,
       stage,
+      stageKey: stage !== null ? stageKeyFor(rootId, stage, rootId) : null,
       fromSocket,
       toSocket,
       label,
@@ -322,6 +632,9 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
       // through a left port.
       const inputs: FlowSocket[] = []
       const inputBySourceId = new Map<string, string>()
+      const stageSubquerySources = subquerySources.filter(
+        (source) => (source.table?.consumerStage ?? null) === stage,
+      )
       if (stage === 'JOIN') {
         const joinInputs = sourceNodes.filter(
           (source) => source === previousBottom || source.table?.role === 'join',
@@ -363,6 +676,28 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
           ),
         )
       }
+
+      // A nested result is a second real input to the operation whose
+      // expression consumes it (WHERE, SELECT, JOIN …). It gets its own
+      // left port so the wire does not merge with the main dataset.
+      stageSubquerySources.forEach((source, index) => {
+        const id = `in-sub-${index}`
+        inputs.push(
+          makeSocket(
+            {
+              id,
+              direction: 'input',
+              kind: 'data',
+              side: 'left',
+              label: source.table?.alias ?? 'value',
+            },
+            NODE_W,
+            OP_H,
+            { y: (OP_H * (index + 2)) / (stageSubquerySources.length + 2) },
+          ),
+        )
+        inputBySourceId.set(source.id, id)
+      })
 
       // Outputs: the main dataset leaves through the bottom; branches
       // and group members leave through hollow right-hand ports.
@@ -413,10 +748,12 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
         id: `op-${stage}`,
         kind: 'operation',
         stage,
+        blockId: rootId,
+        stageKey: stageKeyFor(rootId, stage, rootId),
         label: stage.replace('_', ' '),
         detail: snapshot.label,
         hint: STAGE_HINTS[stage],
-        x: SPINE_X,
+        x: spineX,
         y: row.opY,
         width: NODE_W,
         height: OP_H,
@@ -424,6 +761,9 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
         unsupported: supportedStages.has(stage) ? undefined : true,
         snapshot,
         revealsAt: null,
+        revealsAtKey: null,
+        incomplete: snapshot.incomplete === true,
+        incompleteReasons: [...(snapshot.incompleteReasons ?? [])],
       }
       nodes.push(opNode)
 
@@ -451,6 +791,20 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
           )
         }
       }
+
+      // Nested results feed exactly the operation whose expression uses
+      // them, and no other stage.
+      for (const source of stageSubquerySources) {
+        addConnection(
+          source,
+          'out',
+          opNode,
+          inputBySourceId.get(source.id) ?? 'in',
+          source.table?.role === 'cte' ? 'cte' : 'join-input',
+          stage,
+          source.table?.role === 'cte' ? 'cte' : 'value',
+        )
+      }
       previousBottom = opNode
 
       // Rejected/skipped rows branch to the right.
@@ -459,10 +813,12 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
           id: `branch-${stage}`,
           kind: 'branch',
           stage,
+          blockId: rootId,
+          stageKey: stageKeyFor(rootId, stage, rootId),
           label: branchLabel(stage, snapshot.removedRows.length),
           detail: snapshot.label,
           hint: branchHint(stage),
-          x: SIDE_X,
+          x: sideX,
           y: row.opY + OP_H + 24,
           width: SIDE_W,
           height: BRANCH_H,
@@ -477,6 +833,7 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
           snapshot,
           removedRows: snapshot.removedRows,
           revealsAt: stage,
+          revealsAtKey: stageKeyFor(rootId, stage, rootId),
           isRejected: true,
         }
         nodes.push(branchNode)
@@ -501,9 +858,11 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
             id: `group-${stage}-${group.index}`,
             kind: 'group',
             stage,
+            blockId: rootId,
+            stageKey: stageKeyFor(rootId, stage, rootId),
             label: group.key,
             detail: `${group.rowIds.length} row${group.rowIds.length === 1 ? '' : 's'} in group`,
-            x: SIDE_X,
+            x: sideX,
             y: row.opY + OP_H + 16 + groupIndex * (GROUP_H + GROUP_GAP),
             width: SIDE_W,
             height: GROUP_H,
@@ -517,6 +876,7 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
             group,
             snapshot,
             revealsAt: stage,
+            revealsAtKey: stageKeyFor(rootId, stage, rootId),
           }
           nodes.push(groupNode)
           addConnection(opNode, groupSocket?.id ?? 'out-groups', groupNode, 'in', 'group-member', stage)
@@ -527,9 +887,11 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
             id: `group-${stage}-overflow`,
             kind: 'group',
             stage,
+            blockId: rootId,
+            stageKey: stageKeyFor(rootId, stage, rootId),
             label: `…+${overflowCount} more group${overflowCount === 1 ? '' : 's'}`,
             detail: 'All groups are listed in Table View',
-            x: SIDE_X,
+            x: sideX,
             y: row.opY + OP_H + 16 + MAX_GROUP_NODES * (GROUP_H + GROUP_GAP),
             width: SIDE_W,
             height: GROUP_H,
@@ -541,6 +903,7 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
               ),
             ],
             revealsAt: stage,
+            revealsAtKey: stageKeyFor(rootId, stage, rootId),
           }
           nodes.push(overflowNode)
           addConnection(
@@ -559,9 +922,11 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
       id: `data-${stage}`,
       kind: 'data',
       stage,
+      blockId: rootId,
+      stageKey: stageKeyFor(rootId, stage, rootId),
       label: `${DATA_LABELS[stage] ?? `${stage} result`} · ${snapshot.outputRowCount}`,
       detail: `${snapshot.inputRowCount} in → ${snapshot.outputRowCount} out`,
-      x: SPINE_X,
+      x: spineX,
       y: row.dataY,
       width: NODE_W,
       height: DATA_H,
@@ -582,6 +947,9 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
       snapshot,
       rows: snapshot.rows,
       revealsAt: stage,
+      revealsAtKey: stageKeyFor(rootId, stage, rootId),
+      incomplete: snapshot.incomplete === true,
+      incompleteReasons: [...(snapshot.incompleteReasons ?? [])],
     }
     nodes.push(dataNode)
     if (previousBottom !== null) {
@@ -591,6 +959,7 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
   }
 
   // --- phase 4: final result -------------------------------------------------
+  const finalStage = lastStageOf(trace)
   const finalNode: FlowGraphNode = {
     id: 'final',
     kind: 'final',
@@ -600,7 +969,7 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
       trace.capability.isReadOnly ? '' : ' · not read-only'
     }`,
     hint: 'These are the rows SQLite returns.',
-    x: SPINE_X,
+    x: spineX,
     y: rowTop,
     width: NODE_W,
     height: FINAL_H,
@@ -614,7 +983,10 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
     expandedHeight: expandedHeightFor(FINAL_H, trace.finalRows.length),
     rows: trace.finalRows,
     snapshot: trace.stageSnapshots[trace.stageSnapshots.length - 1],
-    revealsAt: lastStageOf(trace),
+    revealsAt: finalStage,
+    revealsAtKey: finalStage !== null ? stageKeyFor(rootId, finalStage, rootId) : null,
+    blockId: rootId,
+    stageKey: null,
   }
   nodes.push(finalNode)
   if (previousBottom !== null) {
@@ -653,29 +1025,34 @@ function lastStageOf(trace: VisualizationTrace): VisualizedStage | null {
  */
 export function deriveFlowState(
   graph: FlowGraph,
-  completedStages: ReadonlySet<VisualizedStage>,
-  activeStage: VisualizedStage | null,
+  completedStages: ReadonlySet<string>,
+  activeStage: string | null,
   finished: boolean,
 ): FlowGraphState {
   const byId = new Map(graph.nodes.map((node) => [node.id, node]))
   const nodes: Record<string, FlowElementStatus> = {}
   for (const node of graph.nodes) {
+    // Block-scoped keys keep the same stage name in two blocks distinct.
+    // Root nodes fall back to their bare stage, so single-query graphs
+    // behave exactly as before.
+    const revealsKey = node.revealsAtKey ?? node.revealsAt
+    const ownerKey = node.stageKey ?? node.stage
     if (node.kind === 'final') {
       // The final node is always visible as the destination; it only
       // counts as completed once its data actually exists.
-      const lastStage = node.revealsAt
       nodes[node.id] =
-        finished || (lastStage !== null && completedStages.has(lastStage)) ? 'completed' : 'pending'
+        finished || (revealsKey !== null && completedStages.has(revealsKey))
+          ? 'completed'
+          : 'pending'
       continue
     }
-    if (node.revealsAt !== null && !completedStages.has(node.revealsAt)) {
+    if (revealsKey !== null && !completedStages.has(revealsKey)) {
       nodes[node.id] = 'hidden'
       continue
     }
-    const owner = node.stage
-    if (owner !== null && completedStages.has(owner)) {
+    if (ownerKey !== null && completedStages.has(ownerKey)) {
       nodes[node.id] = 'completed'
-    } else if (owner !== null && owner === activeStage && node.kind === 'operation') {
+    } else if (ownerKey !== null && ownerKey === activeStage && node.kind === 'operation') {
       nodes[node.id] = 'active'
     } else if (node.kind === 'source' && node.revealsAt === null) {
       nodes[node.id] = 'completed' // FROM table data is loaded before playback
@@ -697,11 +1074,11 @@ export function deriveFlowState(
       edges[edge.id] = 'hidden'
       continue
     }
-    const stage = edge.stage
+    const stageKey = edge.stageKey ?? edge.stage
     let status: FlowElementStatus
-    if (stage !== null && completedStages.has(stage)) {
+    if (stageKey !== null && completedStages.has(stageKey)) {
       status = 'completed'
-    } else if (stage !== null && stage === activeStage) {
+    } else if (stageKey !== null && stageKey === activeStage) {
       status = 'active'
     } else {
       status = 'pending'

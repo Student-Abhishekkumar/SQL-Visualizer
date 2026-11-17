@@ -1,6 +1,10 @@
 import { useMemo } from 'react'
 import { mapQueryClauses } from '../../services/visualization/clauseMapper'
-import type { VisualizedStage } from '../../types/visualization'
+import type {
+  NestedQueryTrace,
+  QueryBlockId,
+  VisualizedStage,
+} from '../../types/visualization'
 
 /**
  * Synchronized query clause strip: one chip per SQL clause found in the
@@ -8,20 +12,44 @@ import type { VisualizedStage } from '../../types/visualization'
  * text (via the clause mapper). Clicking a chip jumps playback to that
  * clause's stage; the chip for the active stage is highlighted. Chips
  * for stages the simulator did not run are subdued and not clickable.
+ *
+ * Nested query blocks have their own clauses, so chips are identified by
+ * their block-scoped stage key rather than the bare stage name.
  */
 
 interface ClauseStripProps {
   query: string
-  activeStage: VisualizedStage | null
-  /** Stages that exist in the current trace (clickable targets). */
-  seekableStages: ReadonlySet<VisualizedStage>
-  onSeekStage: (stage: VisualizedStage) => void
+  activeStage?: VisualizedStage | null
+  /** Block-scoped form of `activeStage` (`q2:WHERE`). Wins when set. */
+  activeStageKey?: string | null
+  /** Block-scoped keys that exist in the current trace (clickable). */
+  seekableStages: ReadonlySet<string>
+  /** Nested blocks of the statement, used to attribute occurrences. */
+  nestedQueries?: NestedQueryTrace[]
+  rootBlockId?: QueryBlockId
+  onSeekStage: (stage: VisualizedStage, blockId?: QueryBlockId) => void
+  /** Preferred block-aware seek handler (receives `q2:WHERE`). */
+  onSeekStageKey?: (stageKey: string, stage: VisualizedStage, blockId: QueryBlockId) => void
 }
 
-export function ClauseStrip({ query, activeStage, seekableStages, onSeekStage }: ClauseStripProps) {
-  const spans = useMemo(() => mapQueryClauses(query), [query])
+export function ClauseStrip({
+  query,
+  activeStage = null,
+  activeStageKey = null,
+  seekableStages,
+  nestedQueries,
+  rootBlockId,
+  onSeekStage,
+  onSeekStageKey,
+}: ClauseStripProps) {
+  const spans = useMemo(
+    () => mapQueryClauses(query, { nestedQueries, rootBlockId }),
+    [query, nestedQueries, rootBlockId],
+  )
 
   if (spans.length === 0) return null
+
+  const activeKey = activeStageKey ?? activeStage
 
   return (
     <div
@@ -32,15 +60,21 @@ export function ClauseStrip({ query, activeStage, seekableStages, onSeekStage }:
       <span className="text-[9px] font-semibold tracking-wide text-text-muted uppercase">
         Query
       </span>
-      {spans.map((span, index) => {
-        const seekable = seekableStages.has(span.stage)
-        const isActive = activeStage === span.stage
+      {spans.map((span) => {
+        const seekable = seekableStages.has(span.stageKey)
+        const isActive = activeKey === span.stageKey
         return (
           <button
-            key={`${span.stage}-${index}`}
+            key={`${span.stageKey}-${span.start}`}
             type="button"
             disabled={!seekable}
-            onClick={() => onSeekStage(span.stage)}
+            onClick={() => {
+              if (onSeekStageKey !== undefined) {
+                onSeekStageKey(span.stageKey, span.stage, span.blockId)
+              } else {
+                onSeekStage(span.stage, span.blockId)
+              }
+            }}
             title={`${span.keyword} clause${seekable ? ' — jump to this stage' : ''}`}
             className={`rounded-md border px-1.5 py-0.5 font-mono text-[10px] transition-colors ${
               isActive

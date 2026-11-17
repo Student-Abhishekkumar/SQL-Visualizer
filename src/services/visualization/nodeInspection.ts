@@ -19,6 +19,7 @@ import type {
   VisualizedStage,
 } from '../../types/visualization'
 import { mapQueryClauses, spanOfStage } from './clauseMapper'
+import { blockSnapshots, blockLabelOf, rootBlockIdOf } from './queryBlocks'
 
 /** One real table of rows shown in the Input/Output tabs. */
 export interface InspectionTable {
@@ -46,6 +47,10 @@ export interface NodeInspection {
     operation: string
     stage: VisualizedStage | null
     badge: string
+    /** Query block that owns this node (null = unknown/root). */
+    blockId?: string | null
+    /** Human label, e.g. "Outer query" or "Scalar subquery · …". */
+    blockLabel?: string
   }
   overview: {
     description: string
@@ -69,16 +74,26 @@ export interface NodeInspection {
 export function inputSnapshotOf(
   trace: VisualizationTrace,
   stage: VisualizedStage | null,
+  blockId?: string | null,
 ): StageSnapshot | null {
   if (stage === null) return null
-  const index = trace.stageSnapshots.findIndex((snapshot) => snapshot.stage === stage)
+  const snapshots = blockSnapshots(trace, blockId)
+  const index = snapshots.findIndex((snapshot) => snapshot.stage === stage)
   if (index <= 0) return null
-  return trace.stageSnapshots[index - 1] ?? null
+  return snapshots[index - 1] ?? null
 }
 
 /** The real clause text of a stage, or null when it was not located. */
-function clauseTextFor(trace: VisualizationTrace, stage: VisualizedStage): string | null {
-  const span = spanOfStage(mapQueryClauses(trace.query), stage)
+function clauseTextFor(
+  trace: VisualizationTrace,
+  stage: VisualizedStage,
+  blockId?: string | null,
+): string | null {
+  const spans = mapQueryClauses(trace.query, {
+    nestedQueries: trace.nestedQueries,
+    rootBlockId: rootBlockIdOf(trace),
+  })
+  const span = spanOfStage(spans, stage, blockId)
   if (span === null) return null
   const text = trace.query.slice(span.start, span.end).trim()
   return text === '' ? null : text
@@ -99,7 +114,8 @@ function tableFromSnapshot(
   }
 }
 
-function joinsOf(trace: VisualizationTrace): InspectionJoin[] {
+function joinsOf(trace: VisualizationTrace, blockId?: string | null): InspectionJoin[] {
+  if (blockId !== undefined && blockId !== null && blockId !== rootBlockIdOf(trace)) return []
   return trace.sourceTables
     .filter((table) => table.role === 'join')
     .map((table) => ({
@@ -109,15 +125,20 @@ function joinsOf(trace: VisualizationTrace): InspectionJoin[] {
     }))
 }
 
-function snapshotDetails(trace: VisualizationTrace, snapshot: StageSnapshot | null) {
+function snapshotDetails(
+  trace: VisualizationTrace,
+  snapshot: StageSnapshot | null,
+  blockId?: string | null,
+) {
   const stage = snapshot?.stage ?? null
+  const owner = snapshot?.blockId ?? blockId ?? null
   const isFilterStage = stage === 'WHERE' || stage === 'HAVING'
   return {
-    clause: stage !== null ? clauseTextFor(trace, stage) : null,
-    filter: isFilterStage && stage !== null ? clauseTextFor(trace, stage) : null,
+    clause: stage !== null ? clauseTextFor(trace, stage, owner) : null,
+    filter: isFilterStage && stage !== null ? clauseTextFor(trace, stage, owner) : null,
     groupKeys: stage === 'GROUP_BY' ? snapshot?.groups.map((group) => group.key) ?? [] : [],
-    sort: stage === 'ORDER_BY' ? clauseTextFor(trace, stage) : null,
-    joins: stage === 'JOIN' ? joinsOf(trace) : [],
+    sort: stage === 'ORDER_BY' ? clauseTextFor(trace, stage, owner) : null,
+    joins: stage === 'JOIN' ? joinsOf(trace, owner) : [],
     accepted: snapshot?.outputRowCount ?? null,
     rejected: snapshot?.removedRows.length ?? null,
   }
@@ -129,12 +150,30 @@ function snapshotDetails(trace: VisualizationTrace, snapshot: StageSnapshot | nu
  * throwing when data is unavailable.
  */
 export function inspectNode(node: FlowGraphNode, trace: VisualizationTrace): NodeInspection {
+  const inspection = inspectNodeCore(node, trace)
+  const root = rootBlockIdOf(trace)
+  const blockId = node.blockId ?? null
+  const blockLabel = blockId === null || blockId === root ? 'Outer query' : blockLabelOf(trace, blockId)
+  return { ...inspection, header: { ...inspection.header, blockId, blockLabel } }
+}
+
+function inspectNodeCore(node: FlowGraphNode, trace: VisualizationTrace): NodeInspection {
   switch (node.kind) {
     case 'source': {
       const table = node.table
       const isFrom = table?.role === 'from'
-      const title = `Source table: ${table?.name ?? node.label}`
-      const operation = isFrom ? 'FROM' : (table?.joinType ?? 'JOIN')
+      const isNested = table?.role === 'subquery' || table?.role === 'cte'
+      const isSubquery = table?.role === 'subquery'
+      const title = isNested
+        ? `${isSubquery ? 'Subquery result' : 'CTE result'}: ${table?.name ?? node.label}`
+        : `Source table: ${table?.name ?? node.label}`
+      const operation = isFrom
+        ? 'FROM'
+        : isSubquery
+          ? 'Subquery'
+          : table?.role === 'cte'
+            ? 'CTE'
+            : (table?.joinType ?? 'JOIN')
       const inputs: InspectionTable[] = []
       const output: InspectionTable | null =
         table === undefined
@@ -143,8 +182,9 @@ export function inspectNode(node: FlowGraphNode, trace: VisualizationTrace): Nod
               key: 'source',
               columns: table.columns,
               rows: table.previewRows,
-              note:
-                table.previewRows.length < table.rowCount
+              note: isNested
+                ? `Real output of the nested query (${table.rowCount} row${table.rowCount === 1 ? '' : 's'}).`
+                : table.previewRows.length < table.rowCount
                   ? `Preview of ${table.rowCount} real rows in the table.`
                   : undefined,
             }
@@ -157,21 +197,35 @@ export function inspectNode(node: FlowGraphNode, trace: VisualizationTrace): Nod
           title,
           operation,
           stage: node.stage,
-          badge: isFrom ? 'FROM' : 'JOIN',
+          badge: isFrom
+            ? 'FROM'
+            : isSubquery
+              ? 'SUBQUERY'
+              : table?.role === 'cte'
+                ? 'CTE'
+                : 'JOIN',
         },
         overview: {
           description: isFrom
             ? 'This table is the query’s FROM source. It is loaded before any operation runs.'
-            : `Joined with ${table?.joinType ?? 'JOIN'}${
-                table?.on !== null && table?.on !== undefined ? ` ON ${table.on}` : ''
-              }.`,
+            : isSubquery
+              ? `This nested query is evaluated before the outer pipeline runs. Its real rows feed the ${table?.consumerStage ?? 'outer'} stage — it is not a physical SQLite plan.`
+              : table?.role === 'cte'
+                ? `This CTE is computed before the outer query reads it. Its real rows feed the ${table?.consumerStage ?? 'FROM'} stage.`
+                : `Joined with ${table?.joinType ?? 'JOIN'}${
+                    table?.on !== null && table?.on !== undefined ? ` ON ${table.on}` : ''
+                  }.`,
           inputRows: null,
           outputRows: table?.rowCount ?? null,
         },
         inputs,
         output,
         details: {
-          clause: node.stage !== null ? clauseTextFor(trace, node.stage) : null,
+          clause: isNested
+            ? null
+            : node.stage !== null
+              ? clauseTextFor(trace, node.stage)
+              : null,
           filter: null,
           groupKeys: [],
           sort: null,
@@ -195,12 +249,28 @@ export function inspectNode(node: FlowGraphNode, trace: VisualizationTrace): Nod
           })
         }
       } else {
-        const previous = inputSnapshotOf(trace, node.stage)
+        const previous = inputSnapshotOf(trace, node.stage, node.blockId)
         if (previous !== null) {
           inputs.push(
             tableFromSnapshot(previous, previous.rows, `Input (${previous.stage})`, 'input'),
           )
         }
+      }
+      // Nested results really are inputs to the consuming operation, so
+      // they appear alongside the main dataset instead of being hidden.
+      for (const table of trace.sourceTables) {
+        if (table.role !== 'subquery' && table.role !== 'cte') continue
+        if (table.consumerStage !== node.stage) continue
+        inputs.push({
+          key: `nested-${table.queryId ?? table.name}`,
+          label: table.name,
+          columns: table.columns,
+          rows: table.previewRows,
+          note:
+            table.role === 'subquery'
+              ? 'Computed before the outer pipeline; these are its real output rows.'
+              : 'CTE result read by this stage.',
+        })
       }
       return {
         header: {
@@ -216,13 +286,13 @@ export function inspectNode(node: FlowGraphNode, trace: VisualizationTrace): Nod
         },
         inputs,
         output: snapshot !== null ? tableFromSnapshot(snapshot, snapshot.rows, 'Output', 'output') : null,
-        details: snapshotDetails(trace, snapshot),
+        details: snapshotDetails(trace, snapshot, node.blockId),
       }
     }
 
     case 'data': {
       const snapshot = node.snapshot ?? null
-      const previous = inputSnapshotOf(trace, node.stage)
+      const previous = inputSnapshotOf(trace, node.stage, node.blockId)
       return {
         header: {
           title: `Intermediate result: ${node.stage ?? node.label}`,
@@ -243,7 +313,7 @@ export function inspectNode(node: FlowGraphNode, trace: VisualizationTrace): Nod
           snapshot !== null
             ? tableFromSnapshot(snapshot, node.rows ?? snapshot.rows, 'Output', 'output')
             : null,
-        details: snapshotDetails(trace, snapshot),
+        details: snapshotDetails(trace, snapshot, node.blockId),
       }
     }
 
@@ -278,7 +348,7 @@ export function inspectNode(node: FlowGraphNode, trace: VisualizationTrace): Nod
               )
             : null,
         details: {
-          ...snapshotDetails(trace, snapshot),
+          ...snapshotDetails(trace, snapshot, node.blockId),
           accepted: snapshot?.outputRowCount ?? null,
           rejected: node.removedRows?.length ?? null,
         },
@@ -287,7 +357,7 @@ export function inspectNode(node: FlowGraphNode, trace: VisualizationTrace): Nod
 
     case 'group': {
       const group = node.group
-      const previous = inputSnapshotOf(trace, node.stage)
+      const previous = inputSnapshotOf(trace, node.stage, node.blockId)
       const members =
         group !== undefined && previous !== null
           ? previous.rows.filter((row) => group.rowIds.includes(row.id))
@@ -334,7 +404,7 @@ export function inspectNode(node: FlowGraphNode, trace: VisualizationTrace): Nod
         inputs: input,
         output,
         details: {
-          clause: node.stage !== null ? clauseTextFor(trace, node.stage) : null,
+          clause: node.stage !== null ? clauseTextFor(trace, node.stage, node.blockId) : null,
           filter: null,
           groupKeys: group !== undefined ? [group.key] : [],
           sort: null,
@@ -380,10 +450,13 @@ export function inspectNode(node: FlowGraphNode, trace: VisualizationTrace): Nod
           note: trace.truncated ? 'Capped for display; the real result is complete.' : undefined,
         },
         details: {
-          clause: lastStage !== null ? clauseTextFor(trace, lastStage) : null,
+          clause: lastStage !== null ? clauseTextFor(trace, lastStage, rootBlockIdOf(trace)) : null,
           filter: null,
           groupKeys: [],
-          sort: lastStage === 'ORDER_BY' ? clauseTextFor(trace, lastStage) : null,
+          sort:
+            lastStage === 'ORDER_BY'
+              ? clauseTextFor(trace, lastStage, rootBlockIdOf(trace))
+              : null,
           joins: [],
           accepted: trace.finalRows.length,
           rejected: null,

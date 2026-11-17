@@ -1,11 +1,22 @@
 import { useMemo, useRef, useState } from 'react'
-import { ChevronLeft, ChevronRight, Maximize2, Minimize2, X } from 'lucide-react'
+import {
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  Maximize2,
+  Minimize2,
+  Minus,
+  X,
+} from 'lucide-react'
 import { RowTable } from '../RowTable'
+import { Tooltip } from '../../common/Tooltip'
 import {
   inspectNode,
   type InspectionTable,
 } from '../../../services/visualization/nodeInspection'
 import {
+  clampPosition,
   maximizeRect,
   moveRect,
   resizeRect,
@@ -17,6 +28,7 @@ import {
 } from '../../../services/visualization/floatingWindow'
 import type { FlowElementStatus, FlowGraphNode } from '../../../types/flowGraph'
 import type { VisualizationTrace } from '../../../types/visualization'
+import { accentColor, nodeAccentKey } from './nodeAccent'
 
 /**
  * Floating Node Inspector — a draggable, resizable data-inspection
@@ -24,13 +36,24 @@ import type { VisualizationTrace } from '../../../types/visualization'
  *
  * All content is resolved from the immutable trace by
  * `inspectNode`; this component owns only presentation and the
- * window interaction model (drag, eight-way resize, minimize/restore).
- * Geometry is owned by the workspace so position and size survive
- * switching nodes, closing and reopening, and playback updates.
+ * window interaction model (drag, eight-way resize, maximize).
+ *
+ * The window has three explicit modes, owned by the workspace so they
+ * survive node switches and playback updates:
+ *  - `expanded`  — the full draggable/resizable window
+ *  - `collapsed` — header-only, with the content removed from the layout
+ *  - `minimized` — hidden completely, represented by the inspector dock
+ *
+ * Geometry is also workspace-owned: the popup never stores its own
+ * position or size, so switching nodes, collapsing and restoring cannot
+ * lose the last full rectangle.
  */
 
-const HEADER_HEIGHT = 48
+/** Height of the title bar; also the height of the header-only window. */
+export const INSPECTOR_HEADER_HEIGHT = 52
 const PAGE_SIZE = 25
+
+export type InspectorWindowMode = 'expanded' | 'collapsed' | 'minimized'
 
 type InspectorTab = 'overview' | 'input' | 'output' | 'details'
 
@@ -48,6 +71,13 @@ const STATUS_TEXT: Record<FlowElementStatus, string> = {
   hidden: 'not available yet',
 }
 
+const STATUS_DOT: Record<FlowElementStatus, string> = {
+  pending: 'bg-text-muted/50',
+  active: 'bg-accent animate-pulse',
+  completed: 'bg-success',
+  hidden: 'bg-text-muted/40',
+}
+
 interface FloatingNodeInspectorProps {
   node: FlowGraphNode
   trace: VisualizationTrace
@@ -59,6 +89,9 @@ interface FloatingNodeInspectorProps {
   rect: WindowRect
   /** Available workspace size, used to clamp drag/resize. */
   bounds: WindowBounds
+  /** Current window mode (expanded, header-only or docked). */
+  mode: InspectorWindowMode
+  onModeChange: (mode: InspectorWindowMode) => void
   onRectChange: (rect: WindowRect) => void
   onClose: () => void
 }
@@ -69,7 +102,10 @@ interface InteractionState {
   pointerId: number
   startX: number
   startY: number
+  /** The currently visible rectangle (header-only when collapsed). */
   startRect: WindowRect
+  /** Saved expanded height, so a collapsed drag never overwrites it. */
+  expandedHeight: number
   /** Latest rectangle of the gesture, committed on release. */
   lastRect: WindowRect
 }
@@ -83,7 +119,7 @@ function PaginatedTable({ table }: { table: InspectionTable }) {
   const rows = table.rows.slice(start, start + PAGE_SIZE)
 
   return (
-    <div className="space-y-1.5">
+    <div className="node-inspector-table space-y-1.5">
       {table.label !== undefined && (
         <h4 className="text-[10px] font-semibold tracking-wide text-text-muted uppercase">
           {table.label}
@@ -99,7 +135,7 @@ function PaginatedTable({ table }: { table: InspectionTable }) {
       />
       {table.rows.length > PAGE_SIZE && (
         <div className="flex items-center justify-between text-[10px] text-text-muted">
-          <span>
+          <span className="tabular-nums">
             Rows {start + 1}–{start + rows.length} of {table.rows.length}
           </span>
           <div className="flex items-center gap-1">
@@ -108,7 +144,7 @@ function PaginatedTable({ table }: { table: InspectionTable }) {
               aria-label="Previous rows"
               disabled={currentPage === 0}
               onClick={() => setPage(currentPage - 1)}
-              className="rounded p-0.5 text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary disabled:opacity-40"
+              className="rounded p-1 text-text-secondary transition-colors hover:bg-surface-3 hover:text-text-primary disabled:opacity-40"
             >
               <ChevronLeft className="size-3.5" aria-hidden />
             </button>
@@ -120,7 +156,7 @@ function PaginatedTable({ table }: { table: InspectionTable }) {
               aria-label="Next rows"
               disabled={currentPage >= pageCount - 1}
               onClick={() => setPage(currentPage + 1)}
-              className="rounded p-0.5 text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary disabled:opacity-40"
+              className="rounded p-1 text-text-secondary transition-colors hover:bg-surface-3 hover:text-text-primary disabled:opacity-40"
             >
               <ChevronRight className="size-3.5" aria-hidden />
             </button>
@@ -131,16 +167,12 @@ function PaginatedTable({ table }: { table: InspectionTable }) {
   )
 }
 
-function Section({
-  title,
-  children,
-}: {
-  title: string
-  children: React.ReactNode
-}) {
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="space-y-2">
-      <h3 className="text-[10px] font-semibold tracking-wide text-text-muted uppercase">{title}</h3>
+      <h3 className="text-[10px] font-semibold tracking-[0.08em] text-text-muted uppercase">
+        {title}
+      </h3>
       {children}
     </section>
   )
@@ -148,9 +180,41 @@ function Section({
 
 function Empty({ children }: { children: React.ReactNode }) {
   return (
-    <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-[11px] text-text-muted">
+    <div
+      role="status"
+      className="rounded-lg border border-dashed border-border bg-surface-2/40 px-3 py-5 text-center text-[11px] leading-relaxed text-text-muted"
+    >
       {children}
     </div>
+  )
+}
+
+function IconControl({
+  label,
+  onClick,
+  pressed,
+  children,
+}: {
+  label: string
+  onClick: () => void
+  pressed?: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <Tooltip label={label}>
+      <button
+        type="button"
+        aria-label={label}
+        aria-pressed={pressed}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={onClick}
+        className={`inline-flex size-7 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-surface-3 hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none ${
+          pressed === true ? 'bg-surface-3 text-text-primary' : ''
+        }`}
+      >
+        {children}
+      </button>
+    </Tooltip>
   )
 }
 
@@ -161,11 +225,12 @@ export function FloatingNodeInspector({
   revealed = true,
   rect,
   bounds,
+  mode,
+  onModeChange,
   onRectChange,
   onClose,
 }: FloatingNodeInspectorProps) {
   const [tab, setTab] = useState<InspectorTab>('overview')
-  const [minimized, setMinimized] = useState(false)
   const [maximized, setMaximized] = useState(false)
   // In-flight drag/resize rectangle. Kept local so a pointermove only
   // re-renders this popup, never the workspace/canvas under it; the result
@@ -174,27 +239,45 @@ export function FloatingNodeInspector({
   const interactionRef = useRef<InteractionState | null>(null)
 
   const inspection = useMemo(() => inspectNode(node, trace), [node, trace])
+  const inspectionStatus = status ?? 'pending'
+  const accent = accentColor(nodeAccentKey(node))
 
+  const collapsed = mode === 'collapsed'
+  const minimized = mode === 'minimized'
   const fullRect = useMemo(() => maximizeRect(bounds), [bounds])
+  // `rect` is the saved expanded geometry. The visible rectangle is
+  // derived from it: collapsed mode keeps the width/position but its real
+  // height is the header, so no invisible expanded area survives. The
+  // visible rectangle is clamped itself, so a saved position from the
+  // other mode can never place content outside the workspace.
   const baseRect = maximized ? fullRect : (liveRect ?? rect)
-  const displayRect: WindowRect = minimized ? { ...rect, height: HEADER_HEIGHT } : baseRect
+  const displayRect: WindowRect = clampPosition(
+    collapsed ? { ...baseRect, height: INSPECTOR_HEADER_HEIGHT } : baseRect,
+    bounds,
+  )
 
   const beginInteraction = (
     kind: InteractionState['kind'],
     edge: ResizeEdge | null,
     event: React.PointerEvent<HTMLElement>,
   ): void => {
+    // Only a maximized window refuses to move: it is pinned to the
+    // workspace. A collapsed window is still a real header bar, so it
+    // must remain draggable exactly like the expanded window.
     if (kind === 'move' && maximized) return
     event.preventDefault()
     event.stopPropagation()
+    // Drag against the CURRENT visible box. Collapsed mode must clamp
+    // using the header height, never the saved expanded height.
     interactionRef.current = {
       kind,
       edge,
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
-      startRect: baseRect,
-      lastRect: baseRect,
+      startRect: displayRect,
+      expandedHeight: baseRect.height,
+      lastRect: displayRect,
     }
     try {
       event.currentTarget.setPointerCapture?.(event.pointerId)
@@ -224,7 +307,13 @@ export function FloatingNodeInspector({
     interactionRef.current = null
     setLiveRect(null)
     if (interaction.lastRect !== interaction.startRect) {
-      onRectChange(interaction.lastRect)
+      // Moving a collapsed window changes only its position: commit the
+      // saved expanded height so expanding restores the exact size.
+      const committed =
+        collapsed && interaction.kind === 'move'
+          ? { ...interaction.lastRect, height: interaction.expandedHeight }
+          : interaction.lastRect
+      onRectChange(committed)
     }
     try {
       event.currentTarget.releasePointerCapture?.(interaction.pointerId)
@@ -233,24 +322,38 @@ export function FloatingNodeInspector({
     }
   }
 
+  const toggleMaximized = (): void => {
+    if (collapsed) onModeChange('expanded')
+    setMaximized((value) => !value)
+  }
+
   const { details } = inspection
-  const showHandles = !minimized && !maximized
+  const showHandles = !collapsed && !maximized
   const outputDeferred = node.kind === 'final' && !revealed
+  const interacting = liveRect !== null
 
   return (
     <div
       role="dialog"
       aria-label="Node inspector"
       aria-modal={false}
+      aria-hidden={minimized || undefined}
       data-node-id={node.id}
+      data-mode={mode}
       data-maximized={maximized ? 'true' : undefined}
-      className="absolute z-50 flex flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-2xl shadow-black/25 ring-1 ring-black/5"
-      style={{
-        left: displayRect.x,
-        top: displayRect.y,
-        width: displayRect.width,
-        height: displayRect.height,
-      }}
+      className={`node-inspector absolute z-50 flex flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-2xl shadow-black/25 ring-1 ring-black/5 ${
+        interacting ? '' : 'transition-[height] duration-200 ease-out motion-reduce:transition-none'
+      }`}
+      style={
+        {
+          left: displayRect.x,
+          top: displayRect.y,
+          width: displayRect.width,
+          height: displayRect.height,
+          display: minimized ? 'none' : undefined,
+          '--inspector-accent': accent,
+        } as React.CSSProperties
+      }
       onPointerDown={(event) => event.stopPropagation()}
     >
       <header
@@ -259,86 +362,99 @@ export function FloatingNodeInspector({
         onPointerMove={handleInteractionMove}
         onPointerUp={endInteraction}
         onPointerCancel={endInteraction}
-        className={`flex shrink-0 items-center gap-2 border-b border-border bg-surface-2 px-3 ${
+        className={`node-inspector-header flex shrink-0 items-center gap-2 border-b border-border px-3 ${
           maximized ? '' : 'cursor-move'
         }`}
-        style={{ height: HEADER_HEIGHT }}
+        style={{ height: INSPECTOR_HEADER_HEIGHT }}
       >
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
-            <span className="shrink-0 rounded bg-surface-3 px-1.5 py-0.5 text-[9px] font-medium tracking-wide text-text-secondary uppercase">
+            <span className="node-inspector-badge shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold tracking-[0.08em] uppercase">
               {inspection.header.badge}
             </span>
             <span
-              className="truncate text-[12px] font-semibold text-text-primary"
+              className="truncate text-[12.5px] font-semibold tracking-tight text-text-primary"
               title={inspection.header.title}
             >
               {inspection.header.title}
             </span>
           </div>
-          <div className="mt-0.5 flex items-center gap-2 text-[10px] text-text-muted">
+          <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[10px] text-text-muted">
             <span className="truncate font-mono">{inspection.header.operation}</span>
+            {inspection.header.blockLabel !== undefined && (
+              <span className="truncate" title={inspection.header.blockLabel}>
+                {inspection.header.blockLabel}
+              </span>
+            )}
             {status !== undefined && (
-              <span data-testid="node-inspector-status">· {STATUS_TEXT[status]}</span>
+              <span
+                data-testid="node-inspector-status"
+                className="inline-flex shrink-0 items-center gap-1.5"
+              >
+                <span
+                  className={`size-1.5 rounded-full ${STATUS_DOT[inspectionStatus]}`}
+                  aria-hidden
+                />
+                {STATUS_TEXT[status]}
+              </span>
             )}
           </div>
         </div>
-        <button
-          type="button"
-          aria-label={minimized ? 'Restore node inspector' : 'Minimize node inspector'}
-          onPointerDown={(event) => event.stopPropagation()}
-          onClick={() => {
-            setMinimized((value) => !value)
-            setMaximized(false)
-          }}
-          className="rounded-md p-1 text-text-muted transition-colors hover:bg-surface-3 hover:text-text-primary"
-        >
-          {minimized ? (
-            <Maximize2 className="size-3.5" aria-hidden />
-          ) : (
-            <Minimize2 className="size-3.5" aria-hidden />
-          )}
-        </button>
-        <button
-          type="button"
-          aria-label={maximized ? 'Restore node inspector' : 'Maximize node inspector'}
-          onPointerDown={(event) => event.stopPropagation()}
-          onClick={() => {
-            setMaximized((value) => !value)
-            setMinimized(false)
-          }}
-          className="rounded-md p-1 text-text-muted transition-colors hover:bg-surface-3 hover:text-text-primary"
-        >
-          <Maximize2 className="size-3.5" aria-hidden />
-        </button>
-        <button
-          type="button"
-          aria-label="Close node inspector"
-          onPointerDown={(event) => event.stopPropagation()}
-          onClick={onClose}
-          className="rounded-md p-1 text-text-muted transition-colors hover:bg-surface-3 hover:text-text-primary"
-        >
-          <X className="size-3.5" aria-hidden />
-        </button>
+        <div className="flex shrink-0 items-center gap-0.5">
+          <IconControl
+            label={collapsed ? 'Expand node inspector' : 'Collapse node inspector'}
+            pressed={collapsed}
+            onClick={() => onModeChange(collapsed ? 'expanded' : 'collapsed')}
+          >
+            {collapsed ? (
+              <ChevronDown className="size-3.5" aria-hidden />
+            ) : (
+              <ChevronUp className="size-3.5" aria-hidden />
+            )}
+          </IconControl>
+          <IconControl
+            label="Minimize node inspector"
+            onClick={() => onModeChange('minimized')}
+          >
+            <Minus className="size-3.5" aria-hidden />
+          </IconControl>
+          <IconControl
+            label={maximized ? 'Restore node inspector size' : 'Maximize node inspector'}
+            pressed={maximized}
+            onClick={toggleMaximized}
+          >
+            {maximized ? (
+              <Minimize2 className="size-3.5" aria-hidden />
+            ) : (
+              <Maximize2 className="size-3.5" aria-hidden />
+            )}
+          </IconControl>
+          <span className="mx-0.5 h-4 w-px bg-border" aria-hidden />
+          <IconControl label="Close node inspector" onClick={onClose}>
+            <X className="size-3.5" aria-hidden />
+          </IconControl>
+        </div>
       </header>
 
-      {!minimized && (
+      {!collapsed && (
         <>
           <div
             role="tablist"
             aria-label="Inspector sections"
-            className="flex shrink-0 gap-0.5 border-b border-border bg-surface px-2 pt-1.5"
+            className="flex shrink-0 gap-1 overflow-x-auto border-b border-border bg-surface-2/60 px-2 py-1.5"
           >
             {TABS.map((entry) => (
               <button
                 key={entry.id}
                 role="tab"
+                id={`inspector-tab-${entry.id}`}
                 aria-selected={tab === entry.id}
+                aria-controls={`inspector-panel-${entry.id}`}
                 onClick={() => setTab(entry.id)}
-                className={`rounded-t-md px-2.5 py-1.5 text-[11px] font-medium transition-colors ${
+                className={`shrink-0 rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${
                   tab === entry.id
-                    ? 'border-b-2 border-accent text-text-primary'
-                    : 'text-text-muted hover:text-text-secondary'
+                    ? 'bg-surface text-text-primary shadow-sm ring-1 ring-border'
+                    : 'text-text-muted hover:bg-surface-3/60 hover:text-text-secondary'
                 }`}
               >
                 {entry.label}
@@ -348,6 +464,8 @@ export function FloatingNodeInspector({
 
           <div
             role="tabpanel"
+            id={`inspector-panel-${tab}`}
+            aria-labelledby={`inspector-tab-${tab}`}
             className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3"
           >
             {tab === 'overview' && (
@@ -359,22 +477,24 @@ export function FloatingNodeInspector({
                 </Section>
                 <Section title="Rows">
                   <dl className="grid grid-cols-2 gap-2">
-                    <div className="rounded-lg border border-border/70 bg-surface-2 px-2.5 py-1.5">
+                    <div className="rounded-lg border border-border/70 bg-surface-2 px-2.5 py-2">
                       <dt className="text-[9px] tracking-wide text-text-muted uppercase">rows in</dt>
-                      <dd className="font-mono text-sm text-text-primary">
+                      <dd className="mt-0.5 font-mono text-[15px] leading-none text-text-primary">
                         {inspection.overview.inputRows ?? '—'}
                       </dd>
                     </div>
-                    <div className="rounded-lg border border-border/70 bg-surface-2 px-2.5 py-1.5">
-                      <dt className="text-[9px] tracking-wide text-text-muted uppercase">rows out</dt>
-                      <dd className="font-mono text-sm text-text-primary">
+                    <div className="rounded-lg border border-border/70 bg-surface-2 px-2.5 py-2">
+                      <dt className="text-[9px] tracking-wide text-text-muted uppercase">
+                        rows out
+                      </dt>
+                      <dd className="mt-0.5 font-mono text-[15px] leading-none text-text-primary">
                         {inspection.overview.outputRows ?? '—'}
                       </dd>
                     </div>
                   </dl>
                 </Section>
                 <Section title="Execution status">
-                  <p className="text-xs text-text-secondary">
+                  <p className="text-xs leading-relaxed text-text-secondary">
                     <span className="font-medium text-text-primary">
                       {status !== undefined ? STATUS_TEXT[status] : 'unknown'}
                     </span>{' '}
@@ -413,8 +533,12 @@ export function FloatingNodeInspector({
             {tab === 'details' && (
               <>
                 <Section title="SQL operation">
-                  <dl className="space-y-1 text-[11px]">
+                  <dl className="space-y-1.5 text-[11px]">
                     <DetailRow label="Stage" value={inspection.header.stage ?? 'OUTPUT'} />
+                    <DetailRow
+                      label="Query block"
+                      value={inspection.header.blockLabel ?? 'Outer query'}
+                    />
                     <DetailRow label="Clause" value={details.clause} mono />
                   </dl>
                 </Section>
@@ -431,7 +555,7 @@ export function FloatingNodeInspector({
                       {details.groupKeys.map((key) => (
                         <span
                           key={key}
-                          className="rounded bg-surface-3 px-1.5 py-0.5 font-mono text-[10px] text-text-secondary"
+                          className="rounded border border-border bg-surface-3 px-1.5 py-0.5 font-mono text-[10px] text-text-secondary"
                         >
                           {key}
                         </span>

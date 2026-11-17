@@ -18,7 +18,8 @@
  *   is always reported and never affects real SQLite results.
  */
 
-import { interpretQuery, type Expression, type QueryStructure, type SelectItem } from './astInterpreter'
+import { interpretQuery, structureText, type Expression, type QueryStructure, type SelectItem, type SubqueryExpr } from './astInterpreter'
+import { detectCorrelation } from './correlation'
 import {
   compareNonNull,
   evaluateAggregate,
@@ -30,6 +31,8 @@ import {
 } from './expressionEvaluator'
 import type {
   GroupSnapshot,
+  NestedQueryDependency,
+  NestedQueryTrace,
   StageSnapshot,
   TraceSourceTable,
   VisualizedRow,
@@ -87,7 +90,18 @@ interface SimState {
   /** Display labels for snapshots (bare names where unambiguous). */
   displayLabels: string[]
   rows: SimRow[]
+  /** True when this block's own FROM/JOIN dropped rows for display. */
   truncated: boolean
+  /**
+   * True when the dataset is not the complete relation: own display cap
+   * or an incomplete CTE / nested query input. Kept separate from
+   * `truncated`, which only describes this block's own cap.
+   */
+  incomplete: boolean
+  /** Accumulated causes of `incomplete`, including upstream CTEs. */
+  incompleteReasons: string[]
+  /** Values of nested query blocks, keyed by SubqueryExpr.id. */
+  subqueryValues?: ReadonlyMap<string, unknown>
   /** Aggregates per group index, keyed by aggregate expression text. */
   aggregateValues?: Map<number, Record<string, unknown>>
   /** Groups produced by GROUP BY, kept in creation order. */
@@ -155,8 +169,13 @@ function sortCompare(a: unknown, b: unknown, descending: boolean): number {
   return descending ? -result : result
 }
 
-function contextOf(labels: string[], values: unknown[], aggregates?: Record<string, unknown>): RowContext {
-  return { columns: labels, values, aggregates }
+function contextOf(
+  labels: string[],
+  values: unknown[],
+  aggregates?: Record<string, unknown>,
+  subqueryValues?: ReadonlyMap<string, unknown>,
+): RowContext {
+  return { columns: labels, values, aggregates, subqueryValues }
 }
 
 function splitDisplayLabel(label: string): { table: string | null; name: string } {
@@ -165,22 +184,57 @@ function splitDisplayLabel(label: string): { table: string | null; name: string 
   return { table: null, name: label }
 }
 
+/** Stable, duplicate-free list of incompleteness reasons. */
+function uniqueReasons(reasons: readonly string[]): string[] {
+  const seen = new Set<string>()
+  const unique: string[] = []
+  for (const reason of reasons) {
+    const trimmed = reason.trim()
+    if (trimmed === '' || seen.has(trimmed)) continue
+    seen.add(trimmed)
+    unique.push(trimmed)
+  }
+  return unique
+}
+
+/**
+ * Why a source relation is incomplete. A CTE is named so downstream
+ * inspectors can identify the upstream block responsible, even when the
+ * CTE itself inherited the incompleteness from an earlier one.
+ */
+function sourceIncompleteReason(relation: ResolvedRelation): string {
+  if (relation.cte !== null) {
+    const causes = relation.incompleteReasons.length > 0
+      ? relation.incompleteReasons.join('; ')
+      : 'its result was capped for display'
+    return `Reads incomplete CTE "${relation.cte.name}": ${causes}`
+  }
+  return relation.incompleteReasons[0] ?? 'The source relation is incomplete.'
+}
+
+/** Why this block's own display cap applies (never a SQLite result cap). */
+function capReason(name: string, shown: number, total: number): string {
+  return `"${name}" was capped at ${shown} of ${total} rows for visualization; SQLite processes every row.`
+}
+
 // ---------------------------------------------------------------------------
 // FROM / JOIN
 // ---------------------------------------------------------------------------
 
 function loadFrom(
   structure: QueryStructure,
-  getTableData: (name: string) => TableData | null,
+  relation: ResolvedRelation,
   maxRows: number,
 ): SimState {
   const base = structure.from
-  const data = getTableData(base.name)
-  if (data === null) {
-    throw new SimulationAbort([`Table "${base.name}" does not exist in the current database.`])
-  }
   const alias = base.alias ?? base.name
+  const data = relation.data
   const keptRows = data.rows.slice(0, maxRows)
+  const reasons: string[] = []
+  if (relation.incomplete) reasons.push(sourceIncompleteReason(relation))
+  if (data.rows.length > keptRows.length) {
+    reasons.push(capReason(relation.cte?.name ?? structure.from.name, keptRows.length, data.rows.length))
+  }
   return {
     columnLabels: data.columns.map((column) => `${alias}.${column}`),
     displayLabels: [...data.columns],
@@ -189,20 +243,23 @@ function loadFrom(
       values: [...values],
     })),
     truncated: data.rows.length > keptRows.length,
+    incomplete: reasons.length > 0,
+    incompleteReasons: uniqueReasons(reasons),
   }
 }
 
 function joinStage(
   state: SimState,
   structure: QueryStructure,
-  getTableData: (name: string) => TableData | null,
+  joinRelations: ResolvedRelation[],
   maxRows: number,
 ): void {
-  for (const join of structure.joins) {
-    const data = getTableData(join.table.name)
-    if (data === null) {
+  structure.joins.forEach((join, joinIndex) => {
+    const relation = joinRelations[joinIndex]
+    if (relation === undefined) {
       throw new SimulationAbort([`Table "${join.table.name}" does not exist in the current database.`])
     }
+    const data = relation.data
     const alias = join.table.alias ?? join.table.name
     const rightLabels = data.columns.map((column) => `${alias}.${column}`)
     const rightDisplay = data.columns.map((column) =>
@@ -211,6 +268,9 @@ function joinStage(
 
     const joinedRows: SimRow[] = []
     let truncated = state.truncated
+    let joinCapped = false
+    const reasons: string[] = []
+    if (relation.incomplete) reasons.push(sourceIncompleteReason(relation))
 
     for (const leftRow of state.rows) {
       let matched = 0
@@ -219,6 +279,7 @@ function joinStage(
         if (rightValues === undefined) continue
         if (joinedRows.length >= maxRows) {
           truncated = true
+          joinCapped = true
           break
         }
         if (join.on !== null) {
@@ -227,6 +288,7 @@ function joinStage(
             verdict = evaluateCondition(join.on, {
               columns: [...state.columnLabels, ...rightLabels],
               values: [...leftRow.values, ...rightValues],
+              subqueryValues: state.subqueryValues,
             })
           } catch (error) {
             throw new SimulationAbort([evaluationMessage(error, 'JOIN condition')])
@@ -247,11 +309,18 @@ function joinStage(
       }
     }
 
+    if (joinCapped) {
+      reasons.push(
+        `The JOIN output was capped at ${maxRows} rows for visualization; SQLite processes every matching row.`,
+      )
+    }
     state.columnLabels = [...state.columnLabels, ...rightLabels]
     state.displayLabels = [...state.displayLabels, ...rightDisplay]
     state.rows = joinedRows
     state.truncated = state.truncated || truncated
-  }
+    state.incompleteReasons = uniqueReasons([...state.incompleteReasons, ...reasons])
+    state.incomplete = state.incomplete || truncated || reasons.length > 0
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -270,7 +339,7 @@ function whereStage(
   for (const row of state.rows) {
     let verdict: EvalVerdict
     try {
-      verdict = evaluateCondition(where, contextOf(state.columnLabels, row.values))
+      verdict = evaluateCondition(where, contextOf(state.columnLabels, row.values, undefined, state.subqueryValues))
     } catch (error) {
       throw new SimulationAbort([evaluationMessage(error, 'WHERE condition')])
     }
@@ -319,10 +388,11 @@ function computeAggregates(
   rows: SimRow[],
   structure: QueryStructure,
   columnLabels: string[],
+  subqueryValues?: ReadonlyMap<string, unknown>,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {}
   const seen = new Set<string>()
-  const contexts = rows.map((row) => contextOf(columnLabels, row.values))
+  const contexts = rows.map((row) => contextOf(columnLabels, row.values, undefined, subqueryValues))
   for (const call of structure.aggregates) {
     if (seen.has(call.text)) continue
     seen.add(call.text)
@@ -347,7 +417,7 @@ function groupContext(state: SimState, row: SimRow): RowContext {
   const baseValues = representative !== undefined ? representative.values : state.columnLabels.map(() => null)
   const labels = [...state.columnLabels, ...Object.keys(aggregates)]
   const values = [...baseValues, ...Object.values(aggregates)]
-  return contextOf(labels, values, aggregates)
+  return contextOf(labels, values, aggregates, state.subqueryValues)
 }
 
 function groupStage(
@@ -362,7 +432,12 @@ function groupStage(
   if (groupBy.length === 0) {
     // Implicit single group over all rows (SQLite behavior).
     const allRows = [...state.rows]
-    const aggregateValues = computeAggregates(allRows, structure, state.columnLabels)
+    const aggregateValues = computeAggregates(
+      allRows,
+      structure,
+      state.columnLabels,
+      state.subqueryValues,
+    )
     state.aggregateValues = new Map([[0, aggregateValues]])
     const representative = allRows[0]
     state.groups = [
@@ -393,7 +468,7 @@ function groupStage(
     const keyValues: unknown[] = []
     for (const expr of groupBy) {
       try {
-        keyValues.push(evaluateExpression(expr, contextOf(state.columnLabels, row.values)))
+        keyValues.push(evaluateExpression(expr, contextOf(state.columnLabels, row.values, undefined, state.subqueryValues)))
       } catch (error) {
         throw new SimulationAbort([evaluationMessage(error, 'GROUP BY expression')])
       }
@@ -415,7 +490,12 @@ function groupStage(
   orderedKeys.forEach((key, index) => {
     const bucket = buckets.get(key)
     if (bucket === undefined) return
-    const aggregateValues = computeAggregates(bucket.rows, structure, state.columnLabels)
+    const aggregateValues = computeAggregates(
+      bucket.rows,
+      structure,
+      state.columnLabels,
+      state.subqueryValues,
+    )
     aggregatePerGroup.set(index, aggregateValues)
     const keyText = groupBy
       .map((expr, i) => `${expr.text} = ${String(bucket.keyValues[i])}`)
@@ -514,7 +594,7 @@ function projectRows(state: SimState, structure: QueryStructure): {
     const ctx =
       row.groupIndex !== undefined
         ? groupContext(state, row)
-        : contextOf(state.columnLabels, row.values)
+        : contextOf(state.columnLabels, row.values, undefined, state.subqueryValues)
 
     const values: unknown[] = structure.selectAll
       ? [...row.values]
@@ -645,6 +725,391 @@ function toVisualizedProjected(rows: ProjectedRow[]): VisualizedRow[] {
 }
 
 // ---------------------------------------------------------------------------
+// Nested query blocks
+// ---------------------------------------------------------------------------
+
+/**
+ * State shared by one top-level simulation and the nested blocks it
+ * evaluates. Nested results are cached and recorded once, so a scalar
+ * subquery is never executed twice for the same outer query.
+ */
+interface CteRuntimeResult {
+  blockId: string
+  name: string
+  columns: string[]
+  rows: unknown[][]
+  /** True when the CTE's rows are not the complete relation. */
+  incomplete: boolean
+  /** Why the CTE is incomplete (its own cap and/or upstream CTEs). */
+  incompleteReasons: string[]
+}
+
+interface CteDeclaration {
+  name: string
+  blockId: string
+  /** Zero-based position in the WITH clause. */
+  index: number
+}
+
+interface SimulationRuntime {
+  nested: NestedQueryTrace[]
+  depth: number
+  cache: Map<string, unknown>
+  /**
+   * Ancestor query blocks, outermost → innermost. Used to classify
+   * unqualified column references before a block runs.
+   */
+  scopeStack: QueryStructure[]
+  /** CTE results visible at the current point in execution. */
+  cteResults: Map<string, CteRuntimeResult>
+  /** Every CTE declared by the root statement (for forward-ref errors). */
+  cteDeclarations: Map<string, CteDeclaration>
+  /** Number of CTEs that are visible right now (declaration order). */
+  cteVisibility: number
+}
+
+/** A physical table or a CTE result, resolved unambiguously by name. */
+interface ResolvedRelation {
+  data: TableData
+  /** The CTE block that produced the rows, or null for a physical table. */
+  cte: CteRuntimeResult | null
+  /** True when the relation's rows are not the complete result. */
+  incomplete: boolean
+  /** Why the relation is incomplete (empty for physical tables). */
+  incompleteReasons: string[]
+}
+
+const MAX_SUBQUERY_DEPTH = 6
+
+/**
+ * Resolve a relation name with SQLite-like scoping:
+ * 1. a visible CTE shadows a physical table of the same name;
+ * 2. otherwise the physical database table is used;
+ * 3. a name that only a not-yet-visible CTE declares is reported as a
+ *    forward/self reference instead of silently reading the wrong data.
+ */
+function resolveRelation(
+  name: string,
+  getTableData: (name: string) => TableData | null,
+  runtime: SimulationRuntime,
+): ResolvedRelation | null {
+  const key = name.toLowerCase()
+  const cte = runtime.cteResults.get(key)
+  if (cte !== undefined) {
+    return {
+      data: { columns: [...cte.columns], rows: cte.rows.map((row) => [...row]) },
+      cte,
+      incomplete: cte.incomplete,
+      incompleteReasons: [...cte.incompleteReasons],
+    }
+  }
+  const physical = getTableData(name)
+  if (physical !== null) {
+    return { data: physical, cte: null, incomplete: false, incompleteReasons: [] }
+  }
+  const declaration = runtime.cteDeclarations.get(key)
+  if (declaration !== undefined && declaration.index >= runtime.cteVisibility) {
+    throw new SimulationAbort([
+      declaration.index === runtime.cteVisibility
+        ? `CTE "${declaration.name}" refers to itself. Recursive CTEs (WITH RECURSIVE) are not supported.`
+        : `CTE "${declaration.name}" is referenced before it is defined. Forward references to later CTEs are not supported.`,
+    ])
+  }
+  return null
+}
+
+function selectSummaryOf(structure: QueryStructure): string {
+  if (structure.selectAll) return '*'
+  const summary = structure.selectItems.map((item) => item.text).join(', ')
+  return summary.length > 48 ? `${summary.slice(0, 45)}…` : summary
+}
+
+/** Stage where a source relation's rows are consumed (never a name guess). */
+function dependencyStageOf(table: TraceSourceTable): VisualizedStage {
+  if (table.consumerStage !== null && table.consumerStage !== undefined) return table.consumerStage
+  return table.role === 'cte' ? 'FROM' : 'SELECT'
+}
+
+/**
+ * Direct dependencies of one block, derived only from the block's own
+ * resolved source relations. A `cte` source is the CTE block that
+ * produced the rows; a `subquery` source is a nested block (usually a
+ * scalar) evaluated before this block's pipeline. Physical tables are
+ * never dependencies, and names are irrelevant: ids come from resolution.
+ */
+function directDependenciesOf(trace: VisualizationTrace): NestedQueryDependency[] {
+  const dependencies: NestedQueryDependency[] = []
+  const seen = new Set<string>()
+  for (const table of trace.sourceTables) {
+    if (table.queryId === undefined) continue
+    if (table.role !== 'cte' && table.role !== 'subquery') continue
+    const stage = dependencyStageOf(table)
+    const key = `${table.queryId}|${stage}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    dependencies.push({ blockId: table.queryId, stage })
+  }
+  return dependencies
+}
+
+/** Duplicate dependency references (same block and consuming stage) collapse. */
+function dedupeDependencies(dependencies: NestedQueryDependency[]): NestedQueryDependency[] {
+  const seen = new Set<string>()
+  const unique: NestedQueryDependency[] = []
+  for (const dependency of dependencies) {
+    const key = `${dependency.blockId}|${dependency.stage}|${dependency.viaBlockId ?? ''}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    unique.push(dependency)
+  }
+  return unique
+}
+
+/** Every nested block below `parentId`, direct and transitive. */
+function descendantBlocksOf(runtime: SimulationRuntime, parentId: string): NestedQueryTrace[] {
+  const descendants: NestedQueryTrace[] = []
+  const visit = (id: string): void => {
+    for (const block of runtime.nested) {
+      if (block.parentId !== id) continue
+      descendants.push(block)
+      visit(block.id)
+    }
+  }
+  visit(parentId)
+  return descendants
+}
+
+/**
+ * Dependencies of a CTE block: its own direct CTE/scalar reads plus
+ * dependencies reached through scalar subqueries nested inside its body.
+ * The transitive form records the scalar block that performed the read,
+ * so the graph can wire the exact intermediate block as well.
+ */
+function cteDependenciesOf(
+  trace: VisualizationTrace,
+  runtime: SimulationRuntime,
+  blockId: string,
+): NestedQueryDependency[] {
+  const dependencies = directDependenciesOf(trace)
+  for (const descendant of descendantBlocksOf(runtime, blockId)) {
+    for (const dependency of descendant.dependencies ?? []) {
+      if (dependency.blockId === blockId) continue
+      const stage = descendant.consumingStage ?? dependency.stage
+      dependencies.push({
+        blockId: dependency.blockId,
+        stage,
+        viaBlockId: descendant.id,
+        referenceStage: dependency.referenceStage ?? dependency.stage,
+      })
+    }
+  }
+  return dedupeDependencies(dependencies)
+}
+
+/**
+ * Evaluate one scalar subquery through the same logical simulator. The
+ * nested trace is recorded so its real intermediate snapshots remain
+ * inspectable; the scalar value respects SQLite semantics (empty → NULL,
+ * multiple rows → first row, exactly one output column).
+ */
+function evaluateScalarSubquery(
+  subquery: SubqueryExpr,
+  getTableData: (name: string) => TableData | null,
+  options: SimulationOptions,
+  runtime: SimulationRuntime,
+): unknown {
+  if (runtime.cache.has(subquery.id)) return runtime.cache.get(subquery.id)
+
+  // Correlation is decided against the real column names of this block
+  // and its ancestors. Nothing is simulated for a correlated block: an
+  // explicit unsupported reason is better than a misleading trace.
+  const relationData = (name: string): TableData | null =>
+    resolveRelation(name, getTableData, runtime)?.data ?? null
+  const correlation = detectCorrelation(subquery.query, runtime.scopeStack, relationData)
+  if (correlation.correlated) {
+    throw new SimulationAbort([
+      `Correlated subqueries are not visualizable yet: ${subquery.text} reads a column from the outer query${
+        correlation.reference !== undefined ? ` (${correlation.reference})` : ''
+      }.`,
+    ])
+  }
+
+  if (runtime.depth >= MAX_SUBQUERY_DEPTH) {
+    throw new SimulationAbort(['Subqueries are nested too deeply to visualize.'])
+  }
+  runtime.depth += 1
+  let outcome: SimulationOutcome
+  try {
+    outcome = simulateQuery(
+      structureText(subquery.query),
+      subquery.query,
+      getTableData,
+      options,
+      undefined,
+      runtime,
+    )
+  } finally {
+    runtime.depth -= 1
+  }
+
+  if (!outcome.ok) {
+    throw new SimulationAbort(
+      outcome.reasons.map((reason) => `Subquery ${subquery.text}: ${reason}`),
+    )
+  }
+  const trace = outcome.trace
+  if (trace.finalColumns.length !== 1) {
+    throw new SimulationAbort([
+      `Scalar subquery ${subquery.text} returns ${trace.finalColumns.length} columns; SQLite requires exactly one.`,
+    ])
+  }
+
+  const value = trace.finalRows[0]?.values[0] ?? null
+  runtime.cache.set(subquery.id, value)
+  runtime.nested.push({
+    id: subquery.query.id,
+    kind: 'scalar',
+    label: `Scalar subquery · ${selectSummaryOf(subquery.query)}`,
+    sql: structureText(subquery.query),
+    stageSnapshots: trace.stageSnapshots,
+    finalColumns: trace.finalColumns,
+    finalRows: trace.finalRows,
+    parentStage: subquery.parentStage,
+    consumingStage: subquery.parentStage,
+    parentId: subquery.query.parentId ?? undefined,
+    depth: subquery.query.depth,
+    correlated: subquery.correlated,
+    note:
+      trace.finalRows.length === 0
+        ? 'The subquery returned no rows, so SQLite uses NULL.'
+        : trace.finalRows.length > 1
+          ? `The subquery returned ${trace.finalRows.length} rows; SQLite uses the first row’s first column.`
+          : undefined,
+    // Nested playback uses the block's own real events. Each one is
+    // tagged with the block id, so it can never activate outer stages.
+    events: trace.events.map((event) => ({
+      ...event,
+      blockId: subquery.query.id,
+    })),
+    status: 'complete',
+    unavailableReasons: [],
+    truncated: trace.truncated,
+    incomplete: trace.incomplete === true,
+    incompleteReasons: [...(trace.incompleteReasons ?? [])],
+    dependencies: directDependenciesOf(trace),
+    hasDeterministicOrder: trace.hasDeterministicOrder,
+  })
+  return value
+}
+
+/** Evaluate every nested block used by a query structure, once each. */
+function evaluateSubqueries(
+  structure: QueryStructure,
+  getTableData: (name: string) => TableData | null,
+  options: SimulationOptions,
+  runtime: SimulationRuntime,
+): Map<string, unknown> {
+  const values = new Map<string, unknown>()
+  for (const subquery of structure.subqueries) {
+    values.set(
+      subquery.id,
+      evaluateScalarSubquery(subquery, getTableData, options, runtime),
+    )
+  }
+  return values
+}
+
+/**
+ * Evaluate every CTE of the root WITH clause, in declaration order.
+ * Each CTE is simulated through the same SELECT pipeline; its real
+ * output is registered so later CTEs and the outer query read it as a
+ * relation. Results are recorded as `kind: 'cte'` nested blocks with
+ * their own snapshots, events and dependency metadata.
+ */
+function evaluateCtes(
+  structure: QueryStructure,
+  getTableData: (name: string) => TableData | null,
+  options: SimulationOptions,
+  runtime: SimulationRuntime,
+): void {
+  const declarations = new Map<string, CteDeclaration>()
+  structure.ctes.forEach((cte, index) => {
+    declarations.set(cte.name.toLowerCase(), {
+      name: cte.name,
+      blockId: cte.query.id,
+      index,
+    })
+  })
+  runtime.cteDeclarations = declarations
+
+  structure.ctes.forEach((cte, index) => {
+    // Only earlier CTEs are in scope while this body runs.
+    runtime.cteVisibility = index
+    const sql = structureText(cte.query)
+    const outcome = simulateQuery(sql, cte.query, getTableData, options, undefined, runtime)
+    if (!outcome.ok) {
+      throw new SimulationAbort(
+        outcome.reasons.map((reason) => `CTE "${cte.name}": ${reason}`),
+      )
+    }
+    const trace = outcome.trace
+    if (cte.columns !== null && cte.columns.length !== trace.finalColumns.length) {
+      throw new SimulationAbort([
+        `CTE "${cte.name}" declares ${cte.columns.length} column$({
+          cte.columns.length === 1 ? '' : 's'
+        }) but its SELECT produces ${trace.finalColumns.length}.`,
+      ])
+    }
+    const columns = cte.columns !== null ? [...cte.columns] : [...trace.finalColumns]
+    const rows = trace.finalRows.map((row) => ({ id: row.id, values: [...row.values] }))
+
+    // Dependencies are the earlier CTE blocks (and nested scalar blocks)
+    // this body actually read. Scalar descendants contribute transitive
+    // dependencies too, so upstream tracing can follow them.
+    const dependencies = cteDependenciesOf(trace, runtime, cte.query.id)
+
+    runtime.cteResults.set(cte.name.toLowerCase(), {
+      blockId: cte.query.id,
+      name: cte.name,
+      columns,
+      rows: rows.map((row) => [...row.values]),
+      incomplete: trace.incomplete === true,
+      incompleteReasons: [...(trace.incompleteReasons ?? [])],
+    })
+    runtime.nested.push({
+      id: cte.query.id,
+      kind: 'cte',
+      label: `CTE ${cte.name} · ${selectSummaryOf(cte.query)}`,
+      sql,
+      cteName: cte.name,
+      cteColumns: cte.columns,
+      stageSnapshots: trace.stageSnapshots,
+      finalColumns: columns,
+      finalRows: rows,
+      parentStage: null,
+      consumingStage: null,
+      parentId: cte.query.parentId ?? undefined,
+      depth: cte.query.depth,
+      correlated: false,
+      note:
+        cte.columns !== null
+          ? `Declared column list maps to ${cte.columns.join(', ')}.`
+          : undefined,
+      events: trace.events.map((event) => ({ ...event, blockId: cte.query.id })),
+      status: 'complete',
+      unavailableReasons: [],
+      truncated: trace.truncated,
+      incomplete: trace.incomplete === true,
+      incompleteReasons: [...(trace.incompleteReasons ?? [])],
+      hasDeterministicOrder: trace.hasDeterministicOrder,
+      dependencies,
+    })
+    runtime.cteVisibility = index + 1
+  })
+  runtime.cteVisibility = structure.ctes.length
+}
+
+// ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
@@ -659,9 +1124,21 @@ export function simulateQuery(
   getTableData: (name: string) => TableData | null,
   options: SimulationOptions = {},
   capability?: VisualizationCapability,
+  runtimeIn?: SimulationRuntime,
 ): SimulationOutcome {
   const maxRows = options.maxRows ?? DEFAULT_MAX_ROWS
   const maxEvents = options.maxEvents ?? DEFAULT_MAX_EVENTS
+  const nestedRun = runtimeIn !== undefined
+  const runtime: SimulationRuntime =
+    runtimeIn ?? {
+      nested: [],
+      depth: 0,
+      cache: new Map(),
+      scopeStack: [],
+      cteResults: new Map(),
+      cteDeclarations: new Map(),
+      cteVisibility: 0,
+    }
   const events: BuildEvent[] = []
   let fineGrainedBudget = maxEvents
 
@@ -672,31 +1149,85 @@ export function simulateQuery(
     return true
   }
 
+  let scopePushed = false
   try {
-    const state = loadFrom(structure, getTableData, maxRows)
+    // CTEs are independent inputs: evaluate them before the outer query
+    // becomes a scope, so a CTE body can never be mistaken for a
+    // correlated subquery of the root.
+    if (!nestedRun && structure.ctes.length > 0) {
+      evaluateCtes(structure, getTableData, options, runtime)
+    }
+
+    // This block is now the innermost scope; nested blocks resolve
+    // unqualified column references against it before running.
+    runtime.scopeStack.push(structure)
+    scopePushed = true
+
+    // Nested blocks are inputs: evaluate them once against real data
+    // before the outer pipeline starts, and never per visible row.
+    const subqueryValues = evaluateSubqueries(structure, getTableData, options, runtime)
+
+    const fromRelation = resolveRelation(structure.from.name, getTableData, runtime)
+    if (fromRelation === null) {
+      throw new SimulationAbort([
+        `Table "${structure.from.name}" does not exist in the current database.`,
+      ])
+    }
+    const joinRelations = structure.joins.map((join) => {
+      const relation = resolveRelation(join.table.name, getTableData, runtime)
+      if (relation === null) {
+        throw new SimulationAbort([
+          `Table "${join.table.name}" does not exist in the current database.`,
+        ])
+      }
+      return relation
+    })
+
+    const state = loadFrom(structure, fromRelation, maxRows)
+    state.subqueryValues = subqueryValues
+
+    // Nested blocks are inputs too. If one was capped or read an
+    // incomplete CTE, this block's rows are also incomplete, even when
+    // its own FROM/JOIN data fit under the display cap.
+    for (const subquery of structure.subqueries) {
+      const nested = runtime.nested.find((entry) => entry.id === subquery.query.id)
+      if (nested?.incomplete !== true) continue
+      state.incomplete = true
+      state.incompleteReasons = uniqueReasons([
+        ...state.incompleteReasons,
+        `Reads incomplete nested block ${nested.label}: ${(nested.incompleteReasons ?? []).join('; ')}`,
+      ])
+    }
     const baseRows = [...state.rows]
     const baseLabels = [...state.displayLabels]
 
     // Real source-table metadata for the flow graph (capped previews,
-    // full row counts — straight from the loaded tables).
+    // full row counts — straight from the loaded tables). A relation that
+    // resolves to a CTE keeps the CTE's block id so the graph wires the
+    // block's real output to the stage that consumes it.
     const SOURCE_PREVIEW_LIMIT = 12
     const sourceTables: TraceSourceTable[] = []
-    const fromData = getTableData(structure.from.name)
-    if (fromData !== null) {
-      sourceTables.push({
-        name: structure.from.name,
-        alias: structure.from.alias,
-        columns: [...fromData.columns],
-        rowCount: fromData.rows.length,
-        previewRows: fromData.rows.slice(0, SOURCE_PREVIEW_LIMIT).map((values, index) => ({
-          id: `${structure.from.name}#${index + 1}`,
-          values: [...values],
-        })),
-        role: 'from',
-        joinType: null,
-        on: null,
-      })
-    }
+    const fromData = fromRelation.data
+    sourceTables.push({
+      name: fromRelation.cte?.name ?? structure.from.name,
+      alias: structure.from.alias,
+      columns: [...fromData.columns],
+      rowCount: fromData.rows.length,
+      realRowCount:
+        fromRelation.cte !== null && fromRelation.incomplete ? null : fromData.rows.length,
+      previewRows: fromData.rows.slice(0, SOURCE_PREVIEW_LIMIT).map((values, index) => ({
+        id: `${structure.from.name}#${index + 1}`,
+        values: [...values],
+      })),
+      role: fromRelation.cte !== null ? 'cte' : 'from',
+      joinType: null,
+      on: null,
+      incomplete: fromRelation.incomplete,
+      incompleteReasons: [...fromRelation.incompleteReasons],
+      ...(fromRelation.cte !== null
+        ? { queryId: fromRelation.cte.blockId, consumerStage: 'FROM' as VisualizedStage }
+        : {}),
+    })
 
     events.push({
       type: 'QUERY_STARTED',
@@ -727,10 +1258,8 @@ export function simulateQuery(
     let joinSnapshot: StageSnapshot | null = null
     if (structure.joins.length > 0) {
       const leftRowCount = state.rows.length
-      const joinTableCounts = structure.joins.map(
-        (join) => getTableData(join.table.name)?.rows.length ?? 0,
-      )
-      joinStage(state, structure, getTableData, maxRows)
+      const joinTableCounts = joinRelations.map((relation) => relation.data.rows.length)
+      joinStage(state, structure, joinRelations, maxRows)
       // Snapshot the joined rows *now*: later stages (WHERE, GROUP BY)
       // replace state.rows, and the JOIN node must keep showing what the
       // join itself produced.
@@ -748,23 +1277,55 @@ export function simulateQuery(
         // tables are inputs too, but a single count cannot express both).
         inputRowCount: leftRowCount,
       }
-      for (const join of structure.joins) {
-        const joinData = getTableData(join.table.name)
-        if (joinData === null) continue
+      structure.joins.forEach((join, joinIndex) => {
+        const relation = joinRelations[joinIndex]
+        if (relation === undefined) return
         sourceTables.push({
-          name: join.table.name,
+          name: relation.cte?.name ?? join.table.name,
           alias: join.table.alias,
-          columns: [...joinData.columns],
-          rowCount: joinData.rows.length,
-          previewRows: joinData.rows.slice(0, SOURCE_PREVIEW_LIMIT).map((values, index) => ({
+          columns: [...relation.data.columns],
+          rowCount: relation.data.rows.length,
+          realRowCount:
+            relation.cte !== null && relation.incomplete ? null : relation.data.rows.length,
+          previewRows: relation.data.rows.slice(0, SOURCE_PREVIEW_LIMIT).map((values, index) => ({
             id: `${join.table.name}#${index + 1}`,
             values: [...values],
           })),
-          role: 'join',
+          role: relation.cte !== null ? 'cte' : 'join',
           joinType: join.type,
           on: join.on?.text ?? null,
+          incomplete: relation.incomplete,
+          incompleteReasons: [...relation.incompleteReasons],
+          ...(relation.cte !== null
+            ? { queryId: relation.cte.blockId, consumerStage: 'JOIN' as VisualizedStage }
+            : {}),
         })
-      }
+      })
+    }
+
+    // Nested query blocks are logical inputs to the outer pipeline. Their
+    // rows come from their own simulated snapshots, not the outer result.
+    for (const subquery of structure.subqueries) {
+      const nested = runtime.nested.find((entry) => entry.id === subquery.query.id)
+      if (nested === undefined) continue
+      sourceTables.push({
+        name: nested.label,
+        alias: null,
+        columns: nested.finalColumns,
+        rowCount: nested.finalRows.length,
+        realRowCount: nested.incomplete === true ? null : nested.finalRows.length,
+        previewRows: nested.finalRows.slice(0, SOURCE_PREVIEW_LIMIT).map((row) => ({
+          id: row.id,
+          values: [...row.values],
+        })),
+        role: 'subquery',
+        joinType: null,
+        on: null,
+        queryId: nested.id,
+        consumerStage: subquery.parentStage,
+        incomplete: nested.incomplete === true,
+        incompleteReasons: [...(nested.incompleteReasons ?? [])],
+      })
     }
 
     // WHERE
@@ -955,7 +1516,9 @@ export function simulateQuery(
       finalRows = selected
     }
 
-    // Assemble stage snapshots; STAGE_COMPLETED events carry them.
+    // Assemble stage snapshots; STAGE_COMPLETED events carry them. Each
+    // snapshot is tagged with its owning block so a stage name is never
+    // ambiguous across nested blocks.
     const stageSnapshots: StageSnapshot[] = [fromSnapshot]
     if (joinSnapshot !== null) stageSnapshots.push(joinSnapshot)
     if (whereSnapshot !== null) stageSnapshots.push(whereSnapshot)
@@ -965,6 +1528,19 @@ export function simulateQuery(
     if (distinctSnapshot !== null) stageSnapshots.push(distinctSnapshot)
     if (orderSnapshot !== null) stageSnapshots.push(orderSnapshot)
     if (limitSnapshot !== null) stageSnapshots.push(limitSnapshot)
+    for (const snapshot of stageSnapshots) {
+      if (snapshot.blockId === undefined) snapshot.blockId = structure.id
+    }
+    // Every snapshot in an incomplete block is a partial view, whether
+    // the cap happened in this block or upstream. Snapshot-level flags
+    // make the limitation visible in playback and the inspector.
+    if (state.incomplete) {
+      const reasons = uniqueReasons(state.incompleteReasons)
+      for (const snapshot of stageSnapshots) {
+        snapshot.incomplete = true
+        snapshot.incompleteReasons = [...reasons]
+      }
+    }
 
     for (const snapshot of stageSnapshots) {
       events.push({
@@ -1022,10 +1598,11 @@ export function simulateQuery(
     if (queryCompleted !== undefined) orderedEvents.push(queryCompleted)
 
     const serialized: VisualizationEvent[] = orderedEvents.map((event, index) => ({
-      id: `evt${index + 1}`,
+      id: `${nestedRun ? `${structure.id}-` : ''}evt${index + 1}`,
       type: event.type,
       description: event.description,
       stage: event.stage,
+      blockId: structure.id,
       payload: event.payload,
       snapshot: event.snapshot,
     }))
@@ -1050,11 +1627,17 @@ export function simulateQuery(
       events: serialized,
       stageSnapshots,
       sourceTables,
+      nestedQueries: [...runtime.nested].sort(
+        (a, b) => Number(a.id.replace(/\D/g, '')) - Number(b.id.replace(/\D/g, '')),
+      ),
+      rootBlockId: structure.id,
       totalSteps: serialized.length,
       finalRows: toVisualizedProjected(finalRows),
       finalColumns: projection.columns,
       hasDeterministicOrder,
       truncated: state.truncated,
+      incomplete: state.incomplete,
+      incompleteReasons: uniqueReasons(state.incompleteReasons),
     }
     return { ok: true, trace }
   } catch (error) {
@@ -1062,6 +1645,8 @@ export function simulateQuery(
       return { ok: false, reasons: error.reasons }
     }
     return { ok: false, reasons: [`Simulation failed unexpectedly: ${String(error)}`] }
+  } finally {
+    if (scopePushed) runtime.scopeStack.pop()
   }
 }
 

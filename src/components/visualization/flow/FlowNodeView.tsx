@@ -383,6 +383,15 @@ export const FlowNodeView = memo(function FlowNodeView({
     if (!table) return null
     const expandable = table.previewRows.length > PREVIEW_ROWS
     const extraColumns = Math.max(0, table.columns.length - 4)
+    const isNested = table.role === 'subquery' || table.role === 'cte'
+    const badge =
+      table.role === 'from'
+        ? 'FROM'
+        : table.role === 'subquery'
+          ? 'SUBQUERY'
+          : table.role === 'cte'
+            ? 'CTE'
+            : (table.joinType?.replace(' JOIN', '') ?? 'JOIN')
     return (
       <NodeFrame
         node={node}
@@ -394,7 +403,7 @@ export const FlowNodeView = memo(function FlowNodeView({
         dragging={dragging}
         offsetX={offsetX}
         offsetY={offsetY}
-        ariaLabel={`Source table ${node.label}, ${table.rowCount} rows`}
+        ariaLabel={`${isNested ? 'Nested query result' : 'Source table'} ${node.label}, ${table.rowCount} rows`}
         onSelect={onSelect}
         onHover={onHover}
       >
@@ -402,7 +411,7 @@ export const FlowNodeView = memo(function FlowNodeView({
           <NodeHeader
             icon={Database}
             title={node.label}
-            badge={table.role === 'from' ? 'FROM' : (table.joinType?.replace(' JOIN', '') ?? 'JOIN')}
+            badge={badge}
             status={status}
             unsupported={node.unsupported}
           >
@@ -414,7 +423,11 @@ export const FlowNodeView = memo(function FlowNodeView({
                 {table.rowCount} row{table.rowCount === 1 ? '' : 's'}
               </CountBadge>
               <span className="flow-meta-text truncate">
-                {table.alias !== null ? `alias ${table.alias}` : 'source table'}
+                {isNested
+                  ? 'computed first'
+                  : table.alias !== null
+                    ? `alias ${table.alias}`
+                    : 'source table'}
               </span>
             </div>
             <div className="flow-column-list" title={table.columns.join(', ')}>

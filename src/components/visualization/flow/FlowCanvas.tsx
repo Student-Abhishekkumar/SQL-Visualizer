@@ -8,7 +8,6 @@ import type {
   FlowGraphEdge,
   FlowGraphNode,
 } from '../../../types/flowGraph'
-import type { VisualizedStage } from '../../../types/visualization'
 import {
   curveMidpoint,
   curvePath,
@@ -121,6 +120,7 @@ function computePlacements(
 const EDGE_ACCENT: Record<FlowEdgeKind, NodeAccentKey | null> = {
   main: null,
   'join-input': 'join',
+  cte: 'join',
   rejected: 'rejected',
   'group-member': 'group',
   final: 'final',
@@ -156,8 +156,11 @@ interface FlowCanvasProps {
   selectedNodeId: string | null
   /** While true, the camera keeps the running stage in view. */
   following?: boolean
-  /** Stage the user just sought to; its node is scrolled into view. */
-  focusStage?: VisualizedStage | null
+  /**
+   * Block-scoped stage key the user just sought to (`q2:WHERE`), whose
+   * operation node is scrolled into view. Null means no focus.
+   */
+  focusStageKey?: string | null
   onSelectNode: (node: FlowGraphNode) => void
 }
 
@@ -168,7 +171,7 @@ export function FlowCanvas({
   packetEdgeIds,
   selectedNodeId,
   following = false,
-  focusStage = null,
+  focusStageKey = null,
   onSelectNode,
 }: FlowCanvasProps) {
   const reducedMotion = useReducedMotion()
@@ -403,22 +406,22 @@ export function FlowCanvas({
   // Seeking to a stage (clause strip, pipeline, node click) should bring the
   // node that produced it into view. Only the first matching operation node
   // moves the camera, so branch/group nodes stay where they are.
-  const focusRef = useRef<{ stage: VisualizedStage; zoom: number } | null>(null)
+  const focusRef = useRef<{ stage: string; zoom: number } | null>(null)
   useEffect(() => {
-    if (focusStage === null) {
+    if (focusStageKey === null) {
       focusRef.current = null
       return
     }
-    if (focusRef.current?.stage === focusStage && focusRef.current.zoom === zoom) return
+    if (focusRef.current?.stage === focusStageKey && focusRef.current.zoom === zoom) return
     const container = containerRef.current
     if (container === null || container.clientHeight === 0) return
     const target = graph.nodes.find(
-      (node) => node.stage === focusStage && node.kind === 'operation',
+      (node) => node.stageKey === focusStageKey && node.kind === 'operation',
     )
     if (target === undefined) return
     const placement = placements.get(target.id)
     if (placement === undefined) return
-    focusRef.current = { stage: focusStage, zoom }
+    focusRef.current = { stage: focusStageKey, zoom }
     const height = container.clientHeight
     const margin = Math.min(90, height * 0.22)
     setPan((current) => {
@@ -428,7 +431,7 @@ export function FlowCanvas({
       if (top < margin) return { ...current, y: margin - placement.y * zoom }
       return { ...current, y: height - margin - (placement.y + placement.height) * zoom }
     })
-  }, [focusStage, graph.nodes, placements, zoom])
+  }, [focusStageKey, graph.nodes, placements, zoom])
 
   const zoomAt = useCallback(
     (factor: number, anchor?: { x: number; y: number }) => {
@@ -943,6 +946,10 @@ export function FlowCanvas({
         data-selected-node={selectedNodeId ?? undefined}
         data-hovered-node={hoverActive && hoveredNodeId !== null ? hoveredNodeId : undefined}
         data-trace-mode={traceMode ?? undefined}
+        style={{
+          backgroundSize: `${Math.max(12, 24 * zoom)}px ${Math.max(12, 24 * zoom)}px`,
+          backgroundPosition: `${pan.x}px ${pan.y}px`,
+        }}
       >
         <div
           className="absolute origin-top-left"

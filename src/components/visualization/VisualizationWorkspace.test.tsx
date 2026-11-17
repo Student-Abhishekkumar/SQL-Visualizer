@@ -383,12 +383,11 @@ describe('Flow View behavior', () => {
       document.querySelector('[data-selected-node]')?.getAttribute('data-selected-node'),
     ).toBe('data-WHERE')
     expect(document.querySelector('[data-selected-path="true"]')).not.toBeNull()
-    // Narrow layouts would replace the canvas with the inspector; the
-    // trace must stay visible until Details is explicitly opened.
-    expect(screen.getByRole('button', { name: 'Details' })).toHaveAttribute(
-      'aria-pressed',
-      'false',
-    )
+    // Node inspection is independent of the documentation sidebar and
+    // must not force it closed or replace the canvas.
+    expect(
+      screen.getByRole('button', { name: 'Toggle documentation sidebar' }),
+    ).toHaveAttribute('aria-pressed', 'true')
   })
 
   it('switching to Table View keeps the playback position', async () => {
@@ -671,6 +670,26 @@ describe('Floating node inspector', () => {
     expect(screen.getByRole('dialog', { name: 'Node inspector' })).toBeInTheDocument()
   })
 
+  it('resizes the popup without panning or zooming the canvas', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+    const dialog = screen.getByRole('dialog', { name: 'Node inspector' })
+    const surface = screen.getByRole('application').firstElementChild as HTMLElement
+    const transform = surface.style.transform
+    const width = Number.parseFloat(dialog.style.width)
+
+    const handle = dialog.querySelector('[data-edge="se"]')!
+    fireEvent.pointerDown(handle, { pointerId: 11, clientX: 200, clientY: 200 })
+    fireEvent.pointerMove(handle, { pointerId: 11, clientX: 260, clientY: 250 })
+    fireEvent.pointerUp(handle, { pointerId: 11 })
+
+    expect(Number.parseFloat(dialog.style.width)).toBeGreaterThan(width)
+    expect(surface.style.transform).toBe(transform)
+  })
+
   it('keeps the selected node and popup position when playback changes', async () => {
     const user = userEvent.setup()
     readyWorkspace()
@@ -691,6 +710,145 @@ describe('Floating node inspector', () => {
     expect(after.style.left).toBe(left)
     expect(after.style.width).toBe(width)
     expect(useVisualizationStore.getState().eventIndex).toBeGreaterThan(eventIndex)
+  })
+
+  it('collapses to the header without reserving height and restores geometry and tab', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+    await user.click(screen.getByRole('tab', { name: 'Details' }))
+    const before = screen.getByRole('dialog', { name: 'Node inspector' })
+    const geometry = {
+      left: before.style.left,
+      top: before.style.top,
+      width: before.style.width,
+      height: before.style.height,
+    }
+
+    await user.click(screen.getByRole('button', { name: 'Collapse node inspector' }))
+    const collapsed = screen.getByRole('dialog', { name: 'Node inspector' })
+    expect(collapsed).toHaveAttribute('data-mode', 'collapsed')
+    expect(collapsed).toHaveStyle({ height: '52px' })
+    expect(collapsed.style.left).toBe(geometry.left)
+    expect(collapsed.style.width).toBe(geometry.width)
+    // Content is removed from the layout, not merely hidden.
+    expect(screen.queryByRole('tabpanel')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Expand node inspector' }))
+    const restored = screen.getByRole('dialog', { name: 'Node inspector' })
+    expect(restored).toHaveAttribute('data-mode', 'expanded')
+    expect(restored.style.left).toBe(geometry.left)
+    expect(restored.style.top).toBe(geometry.top)
+    expect(restored.style.width).toBe(geometry.width)
+    expect(restored.style.height).toBe(geometry.height)
+    expect(screen.getByRole('tab', { name: 'Details' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
+  })
+
+  it('drags the collapsed header using its real height and restores the saved height', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+    const expanded = screen.getByRole('dialog', { name: 'Node inspector' })
+    const savedWidth = expanded.style.width
+    const savedHeight = expanded.style.height
+    expect(savedHeight).toBe('576px')
+
+    await user.click(screen.getByRole('button', { name: 'Collapse node inspector' }))
+    const collapsed = screen.getByRole('dialog', { name: 'Node inspector' })
+    expect(collapsed).toHaveStyle({ height: '52px', width: savedWidth })
+
+    // Drag far past the bottom: the visible header is clamped by its real
+    // 52px height (800 - 52 = 748), not by the saved 576px expanded height.
+    const header = screen.getByTestId('node-inspector-header')
+    fireEvent.pointerDown(header, { pointerId: 21, clientX: 100, clientY: 100 })
+    fireEvent.pointerMove(header, { pointerId: 21, clientX: 100, clientY: 9000 })
+    fireEvent.pointerUp(header, { pointerId: 21 })
+
+    const dragged = screen.getByRole('dialog', { name: 'Node inspector' })
+    expect(dragged).toHaveStyle({ height: '52px', top: '748px', width: savedWidth })
+    expect(dragged.style.top).toBe('748px')
+    // Nothing from the expanded layout survives below the header.
+    expect(screen.queryByRole('tabpanel')).not.toBeInTheDocument()
+    expect(document.querySelector('[data-edge]')).toBeNull()
+
+    // Expanding restores the saved height exactly; the full rectangle is
+    // clamped back inside the 800px workspace (800 - 576 = 224).
+    await user.click(screen.getByRole('button', { name: 'Expand node inspector' }))
+    const restored = screen.getByRole('dialog', { name: 'Node inspector' })
+    expect(restored).toHaveAttribute('data-mode', 'expanded')
+    expect(restored).toHaveStyle({ width: savedWidth, height: savedHeight, top: '224px' })
+  })
+
+  it('minimizes into a dock item and restores the same window', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+    const before = screen.getByRole('dialog', { name: 'Node inspector' })
+    const geometry = {
+      left: before.style.left,
+      top: before.style.top,
+      width: before.style.width,
+      height: before.style.height,
+    }
+
+    await user.click(screen.getByRole('button', { name: 'Minimize node inspector' }))
+    expect(screen.queryByRole('dialog', { name: 'Node inspector' })).not.toBeInTheDocument()
+    const dock = screen.getByTestId('inspector-dock')
+    expect(dock).toHaveTextContent('Filtered rows · 3')
+    // The dock layer must never intercept canvas gestures.
+    expect(dock.className).toContain('pointer-events-none')
+
+    await user.click(
+      screen.getByRole('button', {
+        name: 'Restore inspector for Filtered rows · 3',
+      }),
+    )
+    const restored = screen.getByRole('dialog', { name: 'Node inspector' })
+    expect(restored.style.left).toBe(geometry.left)
+    expect(restored.style.top).toBe(geometry.top)
+    expect(restored.style.width).toBe(geometry.width)
+    expect(restored.style.height).toBe(geometry.height)
+    expect(screen.queryByTestId('inspector-dock')).not.toBeInTheDocument()
+  })
+
+  it('updates the dock identity when another node is selected while minimized', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+    await user.click(screen.getByRole('button', { name: 'Minimize node inspector' }))
+    await user.click(screen.getByLabelText(/Operation SELECT/))
+
+    const dock = screen.getByTestId('inspector-dock')
+    expect(dock).toHaveTextContent('SELECT')
+    await user.click(
+      screen.getByRole('button', { name: 'Restore inspector for SELECT' }),
+    )
+    expect(screen.getByRole('dialog', { name: 'Node inspector' })).toHaveAttribute(
+      'data-node-id',
+      'op-SELECT',
+    )
+  })
+
+  it('closes a minimized inspector from its dock item', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+    await user.click(screen.getByRole('button', { name: 'Minimize node inspector' }))
+    await user.click(screen.getByRole('button', { name: 'Close minimized inspector' }))
+    expect(screen.queryByTestId('inspector-dock')).not.toBeInTheDocument()
   })
 
   it('keeps cursor-hover tracing working while the popup is open', async () => {
@@ -754,5 +912,101 @@ describe('Floating node inspector', () => {
     document.documentElement.classList.add('dark')
     expect(screen.getByRole('dialog', { name: 'Node inspector' })).toBeInTheDocument()
     document.documentElement.classList.remove('dark')
+  })
+})
+
+describe('Documentation sidebar', () => {
+  it('opens and closes independently, releasing the canvas width', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    const sidebar = screen.getByTestId('documentation-sidebar')
+    const toggle = screen.getByRole('button', { name: 'Toggle documentation sidebar' })
+    expect(sidebar).toHaveAttribute('data-state', 'open')
+    expect(toggle).toHaveAttribute('aria-pressed', 'true')
+    expect(sidebar.style.width).not.toBe('0px')
+    expect(screen.queryByRole('button', { name: 'Open documentation sidebar' })).not.toBeInTheDocument()
+
+    await user.click(toggle)
+    expect(sidebar).toHaveAttribute('data-state', 'closed')
+    expect(sidebar).toHaveAttribute('aria-hidden', 'true')
+    expect(sidebar).toHaveStyle({ width: '0px' })
+    expect(toggle).toHaveAttribute('aria-pressed', 'false')
+    // A compact edge tab keeps the hidden panel reachable.
+    const edgeTab = screen.getByRole('button', { name: 'Open documentation sidebar' })
+    expect(edgeTab).toBeInTheDocument()
+
+    await user.click(edgeTab)
+    expect(sidebar).toHaveAttribute('data-state', 'open')
+    expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('preserves canvas pan and zoom when the sidebar is toggled', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    const canvas = screen.getByRole('application')
+    const surface = canvas.firstElementChild as HTMLElement
+    await user.click(screen.getByRole('button', { name: 'Zoom in' }))
+    fireEvent.pointerDown(canvas, { button: 0, pointerId: 40, clientX: 500, clientY: 300 })
+    fireEvent.pointerMove(canvas, { pointerId: 40, clientX: 560, clientY: 340 })
+    fireEvent.pointerUp(canvas, { pointerId: 40 })
+    const transform = surface.style.transform
+    const zoomLabel = screen.getByText(/%$/).textContent
+
+    await user.click(screen.getByRole('button', { name: 'Toggle documentation sidebar' }))
+    await user.click(screen.getByRole('button', { name: 'Open documentation sidebar' }))
+
+    expect(surface.style.transform).toBe(transform)
+    expect(screen.getByText(/%$/).textContent).toBe(zoomLabel)
+  })
+
+  it('preserves documentation scroll position while closed', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    const explanation = screen.getByLabelText('Explanation')
+    explanation.scrollTop = 180
+    expect(explanation.scrollTop).toBe(180)
+
+    await user.click(screen.getByRole('button', { name: 'Toggle documentation sidebar' }))
+    await user.click(screen.getByRole('button', { name: 'Open documentation sidebar' }))
+
+    // The same mounted element, so its scroll offset was never reset.
+    expect(screen.getByLabelText('Explanation')).toBe(explanation)
+    expect(explanation.scrollTop).toBe(180)
+  })
+
+  it('closes with the keyboard while focus is inside the sidebar', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    const sidebar = screen.getByTestId('documentation-sidebar')
+    const levelTab = screen.getByRole('tab', { name: 'Beginner' })
+    levelTab.focus()
+    await user.keyboard('{Escape}')
+    expect(sidebar).toHaveAttribute('data-state', 'closed')
+  })
+
+  it('is independent of the floating inspector', async () => {
+    const user = userEvent.setup()
+    readyWorkspace()
+    render(<VisualizationWorkspace queryName="demo" onClose={() => {}} />)
+
+    await user.click(screen.getByLabelText(/Intermediate result after WHERE/))
+    const inspector = screen.getByRole('dialog', { name: 'Node inspector' })
+    const left = inspector.style.left
+
+    await user.click(screen.getByRole('button', { name: 'Toggle documentation sidebar' }))
+    expect(screen.getByTestId('documentation-sidebar')).toHaveAttribute('data-state', 'closed')
+    expect(screen.getByRole('dialog', { name: 'Node inspector' }).style.left).toBe(left)
+
+    await user.click(screen.getByRole('button', { name: 'Close node inspector' }))
+    expect(screen.queryByRole('dialog', { name: 'Node inspector' })).not.toBeInTheDocument()
+    expect(screen.getByTestId('documentation-sidebar')).toHaveAttribute('data-state', 'closed')
   })
 })

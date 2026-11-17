@@ -515,3 +515,86 @@ describe('deriveFlowState', () => {
     expect(state.edges[dataWhereEdge.id]).toBe('hidden')
   })
 })
+
+describe('buildFlowGraph — nested query sources', () => {
+  const subqueryTrace = makeTrace({
+    sourceTables: [
+      sourceTable('employees', 'from', 8),
+      {
+        name: 'Scalar subquery · AVG(salary)',
+        alias: null,
+        columns: ['AVG(salary)'],
+        rowCount: 1,
+        previewRows: [{ id: 'q#r1', values: [54250] }],
+        role: 'subquery',
+        joinType: null,
+        on: null,
+        queryId: 'q2',
+        consumerStage: 'WHERE',
+      },
+    ],
+    nestedQueries: [
+      {
+        id: 'q2',
+        kind: 'scalar',
+        label: 'Scalar subquery · AVG(salary)',
+        sql: 'SELECT AVG(salary) FROM employees',
+        stageSnapshots: [],
+        finalColumns: ['AVG(salary)'],
+        finalRows: [{ id: 'q#r1', values: [54250] }],
+        parentStage: 'WHERE',
+        correlated: false,
+      },
+    ],
+  })
+
+  it('creates a real source node for the nested result', () => {
+    const graph = buildFlowGraph(subqueryTrace)
+    const nested = graph.nodes.find((node) => node.table?.role === 'subquery')
+    expect(nested).toBeDefined()
+    expect(nested?.stage).toBe('WHERE')
+    expect(nested?.label).toBe('Scalar subquery · AVG(salary)')
+    expect(nested?.detail).toContain('Nested query result')
+    expect(nested?.table?.previewRows[0]?.values[0]).toBe(54250)
+  })
+
+  it('wires the nested result into the consuming operation only', () => {
+    const graph = buildFlowGraph(subqueryTrace)
+    const nested = graph.nodes.find((node) => node.table?.role === 'subquery')!
+    const incoming = graph.edges.filter((edge) => edge.from === nested.id)
+    expect(incoming).toHaveLength(1)
+    expect(incoming[0]).toMatchObject({
+      to: 'op-WHERE',
+      stage: 'WHERE',
+      kind: 'join-input',
+      label: 'value',
+    })
+    const op = graph.nodes.find((node) => node.id === 'op-WHERE')!
+    expect(op.sockets.some((socket) => socket.id === incoming[0]?.toSocket)).toBe(true)
+    // Nothing is wired into the SELECT operation from the subquery.
+    expect(
+      graph.edges.some((edge) => edge.from === nested.id && edge.to === 'op-SELECT'),
+    ).toBe(false)
+  })
+
+  it('stacks nested sources below real tables so nodes never overlap', () => {
+    const graph = buildFlowGraph(subqueryTrace)
+    const primary = graph.nodes.find((node) => node.table?.role === 'from')!
+    const nested = graph.nodes.find((node) => node.table?.role === 'subquery')!
+    expect(nested.y).toBeGreaterThan(primary.y + primary.height)
+    for (const node of graph.nodes) {
+      expect(node.y + node.height).toBeLessThanOrEqual(graph.bounds.height)
+    }
+  })
+
+  it('treats the nested result as available before playback (computed first)', () => {
+    const graph = buildFlowGraph(subqueryTrace)
+    const nested = graph.nodes.find((node) => node.table?.role === 'subquery')!
+    const state = deriveFlowState(graph, new Set(), null, false)
+    expect(state.nodes[nested.id]).toBe('completed')
+  })
+
+  it('stays deterministic for the same nested trace', () => {
+    expect(buildFlowGraph(subqueryTrace)).toEqual(buildFlowGraph(subqueryTrace))
+  })
+})

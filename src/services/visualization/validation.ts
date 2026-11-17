@@ -17,7 +17,13 @@
  */
 
 import type { SQLiteDatabase } from '../database/sqliteService'
-import type { VisualizedRow, ValidationResult } from '../../types/visualization'
+import type {
+  NestedBlockValidation,
+  NestedQueryTrace,
+  ValidationResult,
+  VisualizationTrace,
+  VisualizedRow,
+} from '../../types/visualization'
 import { interpretQuery } from './astInterpreter'
 import { simulateQuery, type SimulationOptions, type SimulationOutcome, type TableData } from './simulator'
 
@@ -177,6 +183,171 @@ export function readTableFromDb(db: SQLiteDatabase, name: string): TableData | n
   }
 }
 
+/** Quote an identifier for the SQLite standalone-validation wrapper. */
+function quoteIdentifier(name: string): string {
+  return `"${name.replace(/"/g, '""')}"`
+}
+
+/**
+ * Build a standalone SQLite statement for a CTE block. The body alone
+ * would lose explicit column names and would not resolve earlier CTEs,
+ * so dependencies are re-declared first and the target CTE is selected
+ * as a relation. This is the same real SQL the CTE block represents.
+ */
+function cteValidationSql(block: NestedQueryTrace, trace: VisualizationTrace): string | null {
+  if (block.kind !== 'cte' || block.cteName === undefined || block.cteName === '') return null
+  const blocks = trace.nestedQueries ?? []
+  const byId = new Map(blocks.map((candidate) => [candidate.id, candidate]))
+  const needed = new Set<string>()
+  const visit = (blockId: string): void => {
+    if (needed.has(blockId)) return
+    const dependency = byId.get(blockId)
+    if (dependency === undefined) return
+    needed.add(blockId)
+    for (const transitive of dependency.dependencies ?? []) visit(transitive.blockId)
+  }
+  for (const dependency of block.dependencies ?? []) visit(dependency.blockId)
+
+  const definitions: string[] = []
+  for (const candidate of blocks) {
+    if (candidate.kind !== 'cte' || !needed.has(candidate.id)) continue
+    const definition = cteDefinitionSql(candidate)
+    if (definition === null) return null
+    definitions.push(definition)
+  }
+  const target = cteDefinitionSql(block)
+  if (target === null) return null
+  definitions.push(target)
+  return `WITH ${definitions.join(', ')} SELECT * FROM ${quoteIdentifier(block.cteName)}`
+}
+
+function cteDefinitionSql(block: NestedQueryTrace): string | null {
+  if (block.cteName === undefined || block.cteName === '' || block.sql.trim() === '') return null
+  const columnList =
+    block.cteColumns !== null && block.cteColumns !== undefined
+      ? `(${block.cteColumns.map(quoteIdentifier).join(', ')})`
+      : ''
+  return `${quoteIdentifier(block.cteName)}${columnList} AS (${block.sql})`
+}
+
+/**
+ * Independently validate every nested block the simulator produced.
+ *
+ * Each block is executed on its own against SQLite. A block that was
+ * truncated for display is never reported as validated, and a block
+ * SQLite cannot execute in isolation is reported as a limitation (`skipped`)
+ * rather than invented. Correlated blocks never reach this point: the
+ * simulator aborts before producing a trace.
+ */
+export function validateNestedBlocks(
+  trace: VisualizationTrace,
+  db: SQLiteDatabase,
+): NestedBlockValidation[] {
+  const results: NestedBlockValidation[] = []
+  for (const block of trace.nestedQueries ?? []) {
+    const method: NestedBlockValidation['method'] = block.hasDeterministicOrder
+      ? 'ordered'
+      : 'unordered'
+    if (block.status === 'unsupported') {
+      results.push({
+        blockId: block.id,
+        label: block.label,
+        validated: false,
+        method,
+        skipped: true,
+        detail:
+          block.unavailableReasons?.[0] ?? 'This nested block could not be simulated.',
+      })
+      continue
+    }
+    if (block.truncated === true) {
+      results.push({
+        blockId: block.id,
+        label: block.label,
+        validated: false,
+        method,
+        skipped: true,
+        incomplete: block.incomplete === true,
+        detail:
+          'The nested block was capped for display, so its parity with SQLite cannot be claimed.',
+      })
+      continue
+    }
+    if (block.incomplete === true) {
+      const reasons = block.incompleteReasons ?? []
+      results.push({
+        blockId: block.id,
+        label: block.label,
+        validated: false,
+        method,
+        skipped: true,
+        incomplete: true,
+        detail: `This block read an incomplete intermediate result${
+          reasons.length > 0 ? ` (${reasons.join('; ')})` : ''
+        }, so its parity with SQLite cannot be claimed.`,
+      })
+      continue
+    }
+    if (block.sql.trim() === '') {
+      results.push({
+        blockId: block.id,
+        label: block.label,
+        validated: false,
+        method,
+        skipped: true,
+        detail: 'The nested block has no executable SQL text.',
+      })
+      continue
+    }
+    // CTE blocks are validated through a WITH wrapper: the body alone
+    // would lose the declared column list and earlier CTE dependencies.
+    const validationSql = block.kind === 'cte' ? cteValidationSql(block, trace) : block.sql
+    if (validationSql === null) {
+      results.push({
+        blockId: block.id,
+        label: block.label,
+        validated: false,
+        method,
+        skipped: true,
+        detail:
+          'This CTE cannot be validated independently because a prerequisite CTE definition is unavailable.',
+      })
+      continue
+    }
+    let actual: { columns: string[]; values: unknown[][] }
+    try {
+      const result = db.queryAll(validationSql)
+      actual = { columns: [...result.columns], values: result.values.map((row) => [...row]) }
+    } catch (error) {
+      results.push({
+        blockId: block.id,
+        label: block.label,
+        validated: false,
+        method,
+        skipped: true,
+        detail: `SQLite could not execute this block in isolation: ${String(error)}`,
+      })
+      continue
+    }
+    const comparison = compareSimulationWithSqlite(
+      {
+        finalColumns: block.finalColumns,
+        finalRows: block.finalRows,
+        hasDeterministicOrder: block.hasDeterministicOrder === true,
+      },
+      actual,
+    )
+    results.push({
+      blockId: block.id,
+      label: block.label,
+      validated: comparison.validated,
+      method: comparison.method,
+      detail: comparison.detail,
+    })
+  }
+  return results
+}
+
 export interface SimulateAndValidateOutcome {
   simulation: SimulationOutcome
   /** SQLite's real result, when the query executed. */
@@ -219,6 +390,28 @@ export function simulateAndValidate(
 
   if (simulation.ok && execution !== null) {
     validation = compareSimulationWithSqlite(simulation.trace, execution)
+    if ((simulation.trace.nestedQueries?.length ?? 0) > 0) {
+      validation = { ...validation, nested: validateNestedBlocks(simulation.trace, db) }
+    }
+    // Parity describes the real SQLite result, but a visualization cap
+    // means the simulator never saw the complete relation. A row match
+    // must never be reported as validation in that case.
+    if (simulation.trace.incomplete === true) {
+      const reasons = simulation.trace.incompleteReasons ?? []
+      const note = `The visualization is incomplete${
+        reasons.length > 0 ? ` (${reasons.join('; ')})` : ''
+      }, so the displayed rows are not the complete relation.`
+      validation = {
+        ...validation,
+        validated: false,
+        incomplete: true,
+        incompleteReasons: reasons,
+        detail:
+          validation.detail === undefined || validation.detail === ''
+            ? `${note} Parity with SQLite cannot be claimed.`
+            : `${validation.detail} ${note}`,
+      }
+    }
   }
 
   return { simulation, execution, validation }

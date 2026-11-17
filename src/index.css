@@ -64,6 +64,10 @@
   --node-rejected-fg: #7f1d1d;
   --scrollbar-thumb: #c4cfe0;
   --shadow-panel: 0 1px 3px rgba(16, 24, 40, 0.08);
+  --shadow-window:
+    0 24px 60px -18px rgba(16, 24, 40, 0.4),
+    0 4px 14px -4px rgba(16, 24, 40, 0.16);
+  --canvas-dot: rgba(100, 116, 139, 0.22);
   color-scheme: light;
 }
 
@@ -125,6 +129,10 @@
   --node-rejected-fg: #fecaca;
   --scrollbar-thumb: #2c3a5c;
   --shadow-panel: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-window:
+    0 28px 70px -20px rgba(0, 0, 0, 0.8),
+    0 6px 18px -6px rgba(0, 0, 0, 0.55);
+  --canvas-dot: rgba(111, 130, 161, 0.2);
   color-scheme: dark;
 }
 
@@ -199,6 +207,155 @@ body {
   background: var(--accent-soft);
   border-bottom: 2px solid var(--accent);
   border-radius: 3px;
+}
+
+/*
+  Documentation sidebar. On wide containers it is a real flex column
+  whose width animates, so the canvas reclaims the space. In narrow
+  containers it slides in as an overlay instead of squeezing the canvas.
+  The panel stays mounted while closed to preserve scroll/learning state.
+
+  `overflow: clip` (not `hidden`) is deliberate: a hidden-overflow box is
+  still a scroll container, so the browser could scroll it — for example
+  to reveal an absolutely-positioned tooltip label or a focused control —
+  and leave the whole panel permanently shifted with its left edge
+  clipped. Clipping makes the shell unscrollable; only the content area
+  scrolls.
+*/
+.docs-sidebar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  width: min(22rem, 92%);
+  max-width: 100%;
+  overflow: clip;
+  transform: translateX(100%);
+  border-left: 1px solid var(--border);
+  opacity: 0;
+  box-shadow: var(--shadow-window);
+  pointer-events: none;
+  transition:
+    width 200ms cubic-bezier(0.2, 0, 0, 1),
+    transform 200ms cubic-bezier(0.2, 0, 0, 1),
+    opacity 150ms ease;
+}
+
+.docs-sidebar[data-state='open'] {
+  transform: none;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@container (min-width: 56rem) {
+  .docs-sidebar {
+    position: static;
+    z-index: auto;
+    width: 0;
+    transform: none;
+    border-left-width: 0;
+    opacity: 0;
+    box-shadow: none;
+  }
+
+  .docs-sidebar[data-state='open'] {
+    width: 20rem;
+    border-left-width: 1px;
+    opacity: 1;
+  }
+}
+
+/*
+  Floating inspector chrome. The operation accent is supplied inline as
+  --inspector-accent, so every node keeps its own identity without
+  introducing a second palette.
+*/
+.node-inspector {
+  isolation: isolate;
+  box-shadow: var(--shadow-window);
+}
+
+.node-inspector::before {
+  content: '';
+  position: absolute;
+  z-index: 4;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    var(--inspector-accent) 0%,
+    color-mix(in srgb, var(--inspector-accent) 36%, transparent) 42%,
+    transparent 100%
+  );
+  pointer-events: none;
+}
+
+.node-inspector-header {
+  background: linear-gradient(
+    100deg,
+    color-mix(in srgb, var(--inspector-accent) 9%, var(--surface-2)) 0%,
+    var(--surface-2) 58%
+  );
+  user-select: none;
+}
+
+.node-inspector-badge {
+  border: 1px solid color-mix(in srgb, var(--inspector-accent) 32%, transparent);
+  background: color-mix(in srgb, var(--inspector-accent) 13%, transparent);
+  color: color-mix(in srgb, var(--inspector-accent) 82%, var(--text-primary));
+}
+
+.node-inspector-table tbody tr {
+  transition: background-color 120ms ease;
+}
+
+.node-inspector-table tbody tr:hover {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.node-inspector-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-2);
+}
+
+.inspector-dock-item {
+  animation: inspector-dock-in 160ms ease-out;
+}
+
+@keyframes inspector-dock-in {
+  from {
+    transform: translateY(4px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+/*
+  Canvas dot grid. The size/position are set inline by FlowCanvas so the
+  grid follows pan and zoom instead of looking like a static image.
+*/
+.flow-canvas {
+  background-image: radial-gradient(circle, var(--canvas-dot) 1px, transparent 1px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .docs-sidebar,
+  .node-inspector,
+  .node-inspector-table tbody tr {
+    transition: none !important;
+  }
+
+  .inspector-dock-item {
+    animation: none !important;
+  }
 }
 
 /*
