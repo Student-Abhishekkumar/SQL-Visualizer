@@ -11,7 +11,7 @@
 
 <p align="center">
   <img alt="Status: active development" src="https://img.shields.io/badge/status-active_development-F59E0B?style=flat-square" />
-  <img alt="319 tests passing" src="https://img.shields.io/badge/tests-319_passing-2EA043?style=flat-square" />
+  <img alt="429 tests passing" src="https://img.shields.io/badge/tests-429_passing-2EA043?style=flat-square" />
 </p>
 
 <p align="center">
@@ -76,7 +76,7 @@ canvas and watch the logical pipeline process the same data.
     <td width="50%" align="center" valign="top">
       <img src="docs/assets/node-inspector.png" alt="Node inspector showing rows in and rows out for the WHERE operation" width="100%" />
       <br />
-      <sub><b>Node inspector</b> — click a node for its clause, row counts and, where available, the underlying rows.</sub>
+      <sub><b>Floating node inspector</b> — click a node to open a draggable, resizable window with its clause, row counts and, where available, the underlying rows.</sub>
     </td>
     <td width="50%" align="center" valign="top">
       <img src="docs/assets/stage-explanation.png" alt="Synchronized explanation panel with learning levels, what happened and a knowledge check" width="100%" />
@@ -107,7 +107,8 @@ canvas and watch the logical pipeline process the same data.
 | **Animated data-flow canvas** | Renders the logical query pipeline as connected nodes: sources, joins, filters, grouping, projection and the final result. |
 | **Stage-by-stage playback** | Play, pause, step, seek, restart or change speed (0.5×–2×). Snapshots carry real rows through every stage. |
 | **Synchronized table view** | Switch from Flow to Table to inspect accepted, filtered, duplicated, grouped or skipped rows for the current stage. |
-| **Node inspector** | Click a node to see its operation and input/output counts, plus row previews for source, intermediate, branch, group and final nodes. |
+| **Floating node inspector** | Click a node to open a draggable, resizable window over the canvas with Overview, Input, Output and Details sections — operation, input/output counts, clauses, group keys, JOIN info, accepted/rejected stats and row previews for source, intermediate, branch, group and final nodes. Clicking another node reuses the same window and keeps its position and size. |
+| **Upstream tracing** | Hover a node to temporarily animate the branch-aware upstream path that produced it; click to pin that trace and open the inspector. Leaving a hover restores the pinned selection or the default full-pipeline animation. |
 | **Synchronized explanations** | Beginner, Intermediate and Advanced explanations update with the active stage, alongside documentation links and optional knowledge checks. |
 
 ### 🧑‍💻 SQL workspace
@@ -222,7 +223,7 @@ Open <http://localhost:5173>. The University example database is created on firs
 |:---|:---|
 | `npm run dev` | Start the Vite development server. |
 | `npm run build` | Type-check and build production assets to `dist/`. |
-| `npm test` | Run the full Vitest suite (22 files, 319 tests). |
+| `npm test` | Run the full Vitest suite (28 files, 429 tests). |
 | `npm run lint` | Lint the project with oxlint. |
 | `npm run typecheck` | Run the TypeScript project build without emitting. |
 
@@ -292,7 +293,7 @@ The roadmap is directional, not a release commitment.
 - [x] Monaco SQL editor with results, messages and query information
 - [x] Multiple independent databases with templates, custom SQL, import/export and IndexedDB persistence
 - [x] Animated logical pipeline with stage snapshots, playback and speed control
-- [x] Flow and Table views, node inspector, synchronized explanations and knowledge checks
+- [x] Flow and Table views, a floating draggable/resizable node inspector, synchronized explanations and knowledge checks
 - [x] SQLite result-parity validation and conservative unsupported-query reporting
 
 ### 🚧 In progress
