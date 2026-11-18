@@ -26,6 +26,8 @@ function StageDescription({ stage }: { stage: VisualizedStage }) {
       return 'Groups that fail the condition are removed.'
     case 'DISTINCT':
       return 'Duplicate projected rows are struck through and removed.'
+    case 'COMPOUND':
+      return 'The SELECT branches are combined here; UNION strikes through duplicates it removes, UNION ALL keeps every row.'
     case 'ORDER_BY':
       return 'Rows animate into their sorted positions.'
     case 'LIMIT':

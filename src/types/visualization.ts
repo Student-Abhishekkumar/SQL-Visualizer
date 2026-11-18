@@ -26,6 +26,7 @@ export type VisualizedStage =
   | 'HAVING'
   | 'SELECT'
   | 'DISTINCT'
+  | 'COMPOUND'
   | 'ORDER_BY'
   | 'LIMIT'
 
@@ -37,6 +38,7 @@ export const STAGE_ORDER: readonly VisualizedStage[] = [
   'HAVING',
   'SELECT',
   'DISTINCT',
+  'COMPOUND',
   'ORDER_BY',
   'LIMIT',
 ]
@@ -285,6 +287,25 @@ export interface TraceSourceTable {
 /** How a nested query block participates in the outer query. */
 export type NestedQueryKind = 'scalar' | 'in' | 'exists' | 'cte' | 'compound'
 
+/** Set operator of a compound (UNION) query. */
+export type SetOperator = 'UNION' | 'UNION ALL'
+
+/** One SELECT branch of a compound query, identified by its block. */
+export interface CompoundBranchRef {
+  blockId: QueryBlockId
+  /** Operator combining this branch with the accumulated result. */
+  operator: SetOperator | null
+}
+
+/**
+ * Compound-query metadata stored on the trace. Branches are recorded by
+ * block id in evaluation order, so the graph and UI never infer a branch
+ * from display names.
+ */
+export interface CompoundTraceInfo {
+  branches: CompoundBranchRef[]
+}
+
 /**
  * Explicit data dependency between nested blocks. A CTE can read an
  * earlier CTE in the same WITH clause; the edge is recorded by block id,
@@ -360,6 +381,8 @@ export interface NestedQueryTrace {
   cteName?: string
   /** Explicit CTE column list from `WITH name(a, b) AS …`, or null. */
   cteColumns?: string[] | null
+  /** Set operator that combines this branch with the previous one. */
+  setOperator?: SetOperator | null
   /**
    * Earlier query blocks this block reads directly. For CTEs these are
    * the CTE definitions it consumes; the consuming stage is recorded so
@@ -383,6 +406,8 @@ export interface VisualizationTrace {
   sourceTables: TraceSourceTable[]
   /** Nested query blocks (scalar subqueries today) with real snapshots. */
   nestedQueries?: NestedQueryTrace[]
+  /** Compound-query branch metadata (only for UNION / UNION ALL traces). */
+  compound?: CompoundTraceInfo
   totalSteps: number
   /** Final projected rows of the logical simulation (post LIMIT). */
   finalRows: VisualizedRow[]

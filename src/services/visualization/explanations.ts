@@ -56,6 +56,11 @@ export const DOC_SOURCES: DocSource[] = [
     url: 'https://www.sqlite.org/lang_select.html#limitoffset',
     stages: ['LIMIT'],
   },
+  {
+    label: 'SQLite: compound SELECT (UNION / UNION ALL)',
+    url: 'https://www.sqlite.org/lang_select.html#compound',
+    stages: ['COMPOUND'],
+  },
 ]
 
 /** Human-readable stage titles. */
@@ -67,6 +72,7 @@ export const STAGE_TITLES: Record<VisualizedStage, string> = {
   HAVING: 'HAVING — filter groups',
   SELECT: 'SELECT — project columns',
   DISTINCT: 'DISTINCT — remove duplicates',
+  COMPOUND: 'COMPOUND — combine SELECT branches',
   ORDER_BY: 'ORDER BY — sort the result',
   LIMIT: 'LIMIT — keep the first rows',
 }
@@ -137,6 +143,14 @@ const CONCEPTS: Record<VisualizedStage, Record<LearningLevel, string>> = {
     advanced:
       'SQLite sorts with a B-tree or external merge for large sets and applies collation rules for text. Ties are not guaranteed to keep any particular order — the simulator shows a stable order, but only untied orders are validated against SQLite.',
   },
+  COMPOUND: {
+    beginner:
+      'UNION stacks the rows of two or more SELECT statements. UNION removes rows that appear more than once; UNION ALL keeps every row, including duplicates.',
+    intermediate:
+      'Each SELECT branch is evaluated independently, then the branches are combined left to right. Every branch must return the same number of columns, and the first branch determines the output column names. NULLs compare equal when UNION removes duplicates.',
+    advanced:
+      'Compound operators are left-associative: A UNION B UNION ALL C means (A UNION B) UNION ALL C. UNION deduplicates the whole accumulated result, not just the incoming branch. The simulator folds branches in that order and marks which rows UNION removed.',
+  },
   LIMIT: {
     beginner:
       'LIMIT keeps only the first N rows of the sorted result. OFFSET skips rows first — LIMIT 3 OFFSET 1 skips one row, then keeps three.',
@@ -156,6 +170,7 @@ const WHY: Record<VisualizedStage, string> = {
   HAVING: 'Groups themselves may need filtering.',
   SELECT: 'The output must contain exactly the requested columns.',
   DISTINCT: 'Duplicates in projected output are usually unwanted.',
+  COMPOUND: 'Some questions need rows from more than one independent SELECT.',
   ORDER_BY: 'Users expect results in a meaningful order.',
   LIMIT: 'Top-N results are the most common read pattern.',
 }
@@ -191,6 +206,10 @@ function describeSnapshot(stage: VisualizedStage, snapshot: StageSnapshot): stri
       return removed === 0
         ? 'No duplicate rows existed — the result is unchanged.'
         : `Removed ${removed} duplicate row${removed === 1 ? '' : 's'}; ${output} unique row${output === 1 ? '' : 's'} remain.`
+    case 'COMPOUND':
+      return removed === 0
+        ? `Combined the branch results into ${output} row${output === 1 ? '' : 's'} without removing duplicates.`
+        : `Combined the branch results into ${output} row${output === 1 ? '' : 's'}; UNION removed ${removed} duplicate row${removed === 1 ? '' : 's'}.`
     case 'ORDER_BY':
       return `All ${output} row${output === 1 ? '' : 's'} were rearranged into sorted order.`
     case 'LIMIT':

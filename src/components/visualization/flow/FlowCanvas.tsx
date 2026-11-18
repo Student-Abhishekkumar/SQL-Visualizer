@@ -121,6 +121,7 @@ const EDGE_ACCENT: Record<FlowEdgeKind, NodeAccentKey | null> = {
   main: null,
   'join-input': 'join',
   cte: 'join',
+  compound: 'distinct',
   rejected: 'rejected',
   'group-member': 'group',
   final: 'final',

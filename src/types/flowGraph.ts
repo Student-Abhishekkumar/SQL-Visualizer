@@ -22,7 +22,7 @@ import type {
 
 export type FlowNodeKind = 'source' | 'operation' | 'data' | 'branch' | 'group' | 'final'
 
-export type FlowEdgeKind = 'main' | 'join-input' | 'cte' | 'rejected' | 'group-member' | 'final'
+export type FlowEdgeKind = 'main' | 'join-input' | 'cte' | 'compound' | 'rejected' | 'group-member' | 'final'
 
 /** Edge of a node that a wire attaches to. */
 export type FlowSocketSide = 'top' | 'bottom' | 'left' | 'right'

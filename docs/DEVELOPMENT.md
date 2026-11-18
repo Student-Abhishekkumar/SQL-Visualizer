@@ -37,7 +37,7 @@ No environment variables are required. SQLite WASM assets and Monaco are bundled
 
 ## Testing
 
-The suite currently covers 38 files and 600 tests.
+The suite currently covers 40 files and 623 tests.
 
 - Vitest is configured in `vite.config.ts`.
 - Domain, service and store tests run in the default Node environment.
@@ -59,11 +59,13 @@ npm test
 - **Parser and interpreter changes:** supported constructs, aliases, unsupported reasons.
 - **Capability analysis:** detected stages, warnings and conservative failure.
 - **Simulator:** row roles, ordering, grouping, joins, limits, scalar / `IN` / `EXISTS` subqueries,
-  CTEs, stable ids, truncation and incomplete propagation.
+  CTEs, `UNION` / `UNION ALL` folding and duplicate removal, stable ids, truncation and incomplete
+  propagation.
 - **Query blocks:** deterministic block ids, parent/child scope, dependency edges (including CTE reads
   inside nested subqueries), correlation rejection and per-block validation.
 - **Validation:** ordered and unordered comparison, column mismatches, floating-point tolerance.
-- **Graph layout:** node/edge determinism, branch visibility, subquery sources and connectivity.
+- **Graph layout:** node/edge determinism, branch visibility, subquery sources, compound-branch wiring
+  and connectivity.
 - **Playback:** event folding, seeking, speed and database-switch invalidation.
 - **Window geometry:** move, clamp, resize, maximize and header-height collapsed boxes.
 - **Components:** user-visible behavior rather than implementation details — including actual
@@ -85,10 +87,11 @@ These rules keep the educational visualization honest:
    results, zoom, selection or playback when toggling views.
 9. **The inspector's visible box is the interaction box.** Collapsed mode uses the real header
    height for layout, dragging and clamping; the saved expanded geometry is kept separately.
-10. **Nested blocks are real inputs.** Evaluate each scalar / `IN` / `EXISTS` / CTE block once from
-    live data, reuse its cached value, and propagate truncation and incompleteness through real
-    dependency edges. Never fabricate intermediate rows, and never claim parity for an incomplete
-    trace.
+10. **Nested blocks are real inputs.** Evaluate each scalar / `IN` / `EXISTS` / CTE / compound-branch
+    block once from live data, reuse its cached value, and propagate truncation and incompleteness
+    through real dependency edges. Compound branches fold left-to-right and every branch feeds the
+    shared `COMPOUND` node. Never fabricate intermediate rows, and never claim parity for an
+    incomplete trace.
 
 If a change would violate one of these rules, discuss the design before implementing it.
 
@@ -156,7 +159,8 @@ Before a release or a README asset refresh:
 - [ ] Visualize a simple filter, a join, and a grouped query with `HAVING` and `ORDER BY`.
 - [ ] Visualize a non-correlated scalar subquery and confirm its nested source appears.
 - [ ] Visualize an uncorrelated `IN` / `EXISTS` subquery and a non-recursive CTE; confirm each is its own query block, plays independently and connects to the consuming stage in the canvas.
-- [ ] Try an unsupported query (for example a correlated subquery, `WITH RECURSIVE` or `UNION`) and confirm the reasons appear.
+- [ ] Visualize a `UNION` / `UNION ALL` query; confirm each branch plays independently, both branches feed the shared `COMPOUND` node, and `UNION` duplicates branch off.
+- [ ] Try an unsupported query (for example a correlated subquery, `WITH RECURSIVE`, `INTERSECT` or `EXCEPT`) and confirm the reasons appear.
 - [ ] Confirm the validation badge matches SQLite for each supported query.
 - [ ] Step backward and forward through playback; seek to a stage from the clause strip.
 - [ ] Switch Flow/Table and Query/Canvas; confirm state is preserved.

@@ -44,12 +44,13 @@ const OPERATION_STAGES = new Set<VisualizedStage>([
   'HAVING',
   'SELECT',
   'DISTINCT',
+  'COMPOUND',
   'ORDER_BY',
   'LIMIT',
 ])
 
 /** Stages whose snapshot carries a rejected/skipped branch. */
-const BRANCH_STAGES = new Set<VisualizedStage>(['WHERE', 'HAVING', 'DISTINCT', 'LIMIT'])
+const BRANCH_STAGES = new Set<VisualizedStage>(['WHERE', 'HAVING', 'DISTINCT', 'COMPOUND', 'LIMIT'])
 
 const MAX_GROUP_NODES = 8
 
@@ -87,6 +88,7 @@ const STAGE_HINTS: Partial<Record<VisualizedStage, string>> = {
   HAVING: 'Groups are filtered by an aggregate condition.',
   SELECT: 'Only these columns are kept (or calculated).',
   DISTINCT: 'Duplicate result rows are removed.',
+  COMPOUND: 'Branch results are combined with UNION or UNION ALL.',
   ORDER_BY: 'Rows are arranged in this order.',
   LIMIT: 'Only the requested number of rows is kept.',
 }
@@ -99,6 +101,7 @@ const DATA_LABELS: Partial<Record<VisualizedStage, string>> = {
   HAVING: 'Kept groups',
   SELECT: 'Projected rows',
   DISTINCT: 'Unique rows',
+  COMPOUND: 'Compound rows',
   ORDER_BY: 'Sorted rows',
   LIMIT: 'Limited rows',
 }
@@ -106,6 +109,7 @@ const DATA_LABELS: Partial<Record<VisualizedStage, string>> = {
 /** Socket label for an operation's secondary (branch) output. */
 function branchSocketLabel(stage: VisualizedStage): string {
   if (stage === 'DISTINCT') return 'duplicates'
+  if (stage === 'COMPOUND') return 'duplicates'
   if (stage === 'LIMIT') return 'offset'
   return 'rejected'
 }
@@ -168,6 +172,7 @@ interface StageRow {
 
 function branchLabel(stage: VisualizedStage, count: number): string {
   if (stage === 'DISTINCT') return `Duplicates (${count})`
+  if (stage === 'COMPOUND') return `Duplicates removed (${count})`
   if (stage === 'LIMIT') return `Skipped by OFFSET (${count})`
   if (stage === 'HAVING') return `Rejected groups (${count})`
   return `Rejected rows (${count})`
@@ -175,6 +180,7 @@ function branchLabel(stage: VisualizedStage, count: number): string {
 
 function branchHint(stage: VisualizedStage): string {
   if (stage === 'DISTINCT') return 'These rows duplicated an earlier row.'
+  if (stage === 'COMPOUND') return 'UNION removed these rows because the compound result already contained them.'
   if (stage === 'LIMIT') return 'These rows were skipped by OFFSET.'
   if (stage === 'HAVING') return 'These groups did not pass the condition.'
   return 'These rows did not pass the condition.'
@@ -183,6 +189,7 @@ function branchHint(stage: VisualizedStage): string {
 function branchEdgeLabel(stage: VisualizedStage): string {
   if (stage === 'LIMIT') return 'offset'
   if (stage === 'DISTINCT') return 'duplicates'
+  if (stage === 'COMPOUND') return 'duplicates'
   return 'rejected'
 }
 
@@ -368,6 +375,7 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
   // pipeline. Only queries with nested blocks pay the layout shift, so a
   // single-block query keeps exactly the same coordinates as before.
   const nestedBlocks = trace.nestedQueries ?? []
+  const compoundBranches = trace.compound?.branches ?? []
   const nestedMaxDepth = nestedBlocks.reduce(
     (max, block) => Math.max(max, Math.max(1, block.depth ?? 1)),
     0,
@@ -590,6 +598,7 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
 
   // --- phase 3: operations, datasets, branches, groups ---------------------
   let previousBottom: FlowGraphNode | null = mainSource ?? null
+  const compoundInputByBranch = new Map<string, string>()
 
   const addConnection = (
     from: FlowGraphNode,
@@ -599,6 +608,7 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
     kind: FlowEdgeKind,
     stage: VisualizedStage | null,
     label?: string,
+    stageKeyOverride?: string | null,
   ): void => {
     const curve = routeEdgeCurve(from, fromSocket, to, toSocket)
     if (curve.length < 4) return
@@ -608,7 +618,12 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
       to: to.id,
       kind,
       stage,
-      stageKey: stage !== null ? stageKeyFor(rootId, stage, rootId) : null,
+      stageKey:
+        stageKeyOverride !== undefined
+          ? stageKeyOverride
+          : stage !== null
+            ? stageKeyFor(rootId, stage, rootId)
+            : null,
       fromSocket,
       toSocket,
       label,
@@ -666,6 +681,27 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
             ),
           )
         }
+      } else if (stage === 'COMPOUND' && compoundBranches.length > 0) {
+        // A compound operation has one real input per SELECT branch. Each
+        // branch subgraph ends in a data node that feeds its own port.
+        compoundBranches.forEach((branch, index) => {
+          const id = `in-branch-${index}`
+          inputs.push(
+            makeSocket(
+              {
+                id,
+                direction: 'input',
+                kind: 'data',
+                side: 'left',
+                label: `branch ${index + 1}`,
+              },
+              NODE_W,
+              OP_H,
+              { y: (OP_H * (index + 1)) / (compoundBranches.length + 1) },
+            ),
+          )
+          compoundInputByBranch.set(branch.blockId, id)
+        })
       } else {
         const side: FlowSocketSide = previousBottom?.kind === 'source' ? 'left' : 'top'
         inputs.push(
@@ -804,6 +840,29 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
           stage,
           source.table?.role === 'cte' ? 'cte' : 'value',
         )
+      }
+      // Branch results feed the shared COMPOUND operation, each through its
+      // own port. The edge becomes active when that branch finishes, and
+      // upstream tracing therefore follows the exact branch subgraph.
+      if (stage === 'COMPOUND') {
+        for (const branch of compoundBranches) {
+          const from = nested.lastByBlock.get(branch.blockId)
+          const socket = compoundInputByBranch.get(branch.blockId)
+          if (from === undefined || socket === undefined) continue
+          const branchBlock = nestedBlocks.find((block) => block.id === branch.blockId)
+          const lastStage =
+            branchBlock?.stageSnapshots[branchBlock.stageSnapshots.length - 1]?.stage ?? null
+          addConnection(
+            from,
+            'out',
+            opNode,
+            socket,
+            'compound',
+            lastStage,
+            branch.operator ?? 'UNION',
+            lastStage !== null ? stageKeyFor(branch.blockId, lastStage, rootId) : null,
+          )
+        }
       }
       previousBottom = opNode
 

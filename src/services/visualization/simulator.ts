@@ -1129,6 +1129,445 @@ function evaluateCtes(
 }
 
 // ---------------------------------------------------------------------------
+// Compound SELECT (UNION / UNION ALL)
+// ---------------------------------------------------------------------------
+
+/** SQLite NULL-safe value identity used to eliminate UNION duplicates. */
+function compoundValueKey(values: unknown[]): string {
+  // NULLs compare equal for UNION deduplication, integers and reals of the
+  // same numeric value are equal, and different storage classes stay
+  // distinct. This mirrors the simulator's row identity elsewhere.
+  return stableValueKey(values)
+}
+
+/**
+ * Simulate a compound statement: every SELECT branch runs through the
+ * ordinary pipeline as an independent query block, then the branches are
+ * folded left-to-right into the shared COMPOUND stage.
+ *
+ * SQLite semantics implemented here:
+ * - compound operators are left-associative, so `A UNION B UNION ALL C`
+ *   is `(A UNION B) UNION ALL C`;
+ * - UNION removes duplicate rows across the whole accumulated result
+ *   (NULL counts as equal to NULL), UNION ALL keeps every row;
+ * - trailing ORDER BY / LIMIT belong to the compound result, not to the
+ *   last branch.
+ */
+function simulateCompoundQuery(
+  sql: string,
+  structure: QueryStructure,
+  getTableData: (name: string) => TableData | null,
+  options: SimulationOptions,
+  capability?: VisualizationCapability,
+  runtimeIn?: SimulationRuntime,
+): SimulationOutcome {
+  const compound = structure.compound
+  if (compound === null) {
+    return { ok: false, reasons: ['Internal error: the query has no compound branches.'] }
+  }
+  const maxRows = options.maxRows ?? DEFAULT_MAX_ROWS
+  const maxEvents = options.maxEvents ?? DEFAULT_MAX_EVENTS
+  const nestedRun = runtimeIn !== undefined
+  const runtime: SimulationRuntime =
+    runtimeIn ?? {
+      nested: [],
+      depth: 0,
+      cache: new Map(),
+      scopeStack: [],
+      cteResults: new Map(),
+      cteDeclarations: new Map(),
+      cteVisibility: 0,
+    }
+  const fineEvents: BuildEvent[] = []
+  let fineGrainedBudget = maxEvents
+  const pushFine = (event: BuildEvent): boolean => {
+    if (fineGrainedBudget <= 0) return false
+    fineEvents.push(event)
+    fineGrainedBudget--
+    return true
+  }
+  let scopePushed = false
+
+  try {
+    // The root WITH clause is evaluated once and is visible to every
+    // branch, exactly as SQLite scopes it across the compound.
+    if (!nestedRun && structure.ctes.length > 0) {
+      evaluateCtes(structure, getTableData, options, runtime)
+    }
+    runtime.scopeStack.push(structure)
+    scopePushed = true
+
+    const branchRows: VisualizedRow[][] = []
+    const branchIncompleteReasons: string[] = []
+    let columns: string[] | null = null
+    let totalBranchRows = 0
+    let anyBranchTruncated = false
+
+    compound.branches.forEach((branch, index) => {
+      if (runtime.depth >= MAX_SUBQUERY_DEPTH) {
+        throw new SimulationAbort(['Compound queries are nested too deeply to visualize.'])
+      }
+      const branchSql = structureText(branch.query)
+      runtime.depth += 1
+      let outcome: SimulationOutcome
+      try {
+        outcome = simulateQuery(branchSql, branch.query, getTableData, options, undefined, runtime)
+      } finally {
+        runtime.depth -= 1
+      }
+      if (!outcome.ok) {
+        throw new SimulationAbort(
+          outcome.reasons.map((reason) => `Compound branch ${index + 1}: ${reason}`),
+        )
+      }
+      const trace = outcome.trace
+      if (columns === null) {
+        columns = [...trace.finalColumns]
+      } else if (trace.finalColumns.length !== columns.length) {
+        throw new SimulationAbort([
+          `Compound SELECT branches must return the same number of columns: branch 1 returns ${columns.length}, branch ${index + 1} returns ${trace.finalColumns.length}.`,
+        ])
+      }
+      const rows: VisualizedRow[] = trace.finalRows.map((row) => ({
+        id: `${branch.query.id}:${row.id}`,
+        values: [...row.values],
+      }))
+      branchRows.push(rows)
+      totalBranchRows += rows.length
+      anyBranchTruncated = anyBranchTruncated || trace.truncated === true
+      if (trace.incomplete === true) {
+        branchIncompleteReasons.push(
+          `Branch ${index + 1} is incomplete${
+            (trace.incompleteReasons ?? []).length > 0
+              ? `: ${(trace.incompleteReasons ?? []).join('; ')}`
+              : '.'
+          }`,
+        )
+      }
+
+      runtime.nested.push({
+        id: branch.query.id,
+        kind: 'compound',
+        label: `Branch ${index + 1} · ${selectSummaryOf(branch.query)}`,
+        sql: branchSql,
+        stageSnapshots: trace.stageSnapshots,
+        finalColumns: [...trace.finalColumns],
+        finalRows: rows.map((row) => ({ id: row.id, values: [...row.values] })),
+        parentStage: 'COMPOUND',
+        consumingStage: 'COMPOUND',
+        parentId: structure.id,
+        depth: branch.query.depth,
+        correlated: false,
+        setOperator: branch.operator,
+        note:
+          branch.operator === null
+            ? 'The first branch establishes the compound result.'
+            : `${branch.operator} combines this branch with the result so far.`,
+        events: trace.events.map((event) => ({
+          ...event,
+          blockId: branch.query.id,
+        })),
+        status: 'complete',
+        unavailableReasons: [],
+        truncated: trace.truncated,
+        incomplete: trace.incomplete === true,
+        incompleteReasons: [...(trace.incompleteReasons ?? [])],
+        dependencies: directDependenciesOf(trace),
+        hasDeterministicOrder: trace.hasDeterministicOrder,
+      })
+    })
+
+    if (columns === null) {
+      throw new SimulationAbort(['A compound SELECT has no branches to visualize.'])
+    }
+
+    // --- fold the branches left-to-right ---------------------------------
+    let rows: VisualizedRow[] = [...(branchRows[0] ?? [])]
+    const duplicates: VisualizedRow[] = []
+    for (let index = 1; index < branchRows.length; index++) {
+      const operator = compound.branches[index]?.operator ?? 'UNION'
+      const incoming = branchRows[index] ?? []
+      if (operator === 'UNION ALL') {
+        rows = [...rows, ...incoming]
+        continue
+      }
+      // UNION deduplicates the whole accumulated result, not just the
+      // incoming branch: `A UNION ALL B UNION C` removes duplicates that
+      // A/B themselves introduced.
+      const seen = new Set<string>()
+      const deduped: VisualizedRow[] = []
+      for (const row of [...rows, ...incoming]) {
+        const key = compoundValueKey(row.values)
+        if (seen.has(key)) {
+          duplicates.push(row)
+          pushFine({
+            type: 'DUPLICATE_DETECTED',
+            stage: 'COMPOUND',
+            description: `Row ${row.id} duplicates a row already in the compound result and is removed by ${operator}.`,
+            payload: { rowId: row.id },
+          })
+          continue
+        }
+        seen.add(key)
+        deduped.push(row)
+      }
+      rows = deduped
+    }
+
+    // --- display cap ------------------------------------------------------
+    let truncated = false
+    const incompleteReasons = uniqueReasons(branchIncompleteReasons)
+    if (rows.length > maxRows) {
+      incompleteReasons.push(
+        `The compound result was capped at ${maxRows} of ${rows.length} rows for visualization; SQLite combines every row.`,
+      )
+      rows = rows.slice(0, maxRows)
+      truncated = true
+    }
+
+    const operators = compound.branches
+      .slice(1)
+      .map((branch) => branch.operator ?? 'UNION')
+    const operatorSummary = [...new Set(operators)].join(' / ')
+    const compoundLabel = `${operatorSummary} · ${compound.branches.length} branches`
+    const hasUnion = operators.includes('UNION')
+    const hasUnionAll = operators.includes('UNION ALL')
+    const explanationParts = [
+      `Combined ${compound.branches.length} SELECT branches (${totalBranchRows} row${totalBranchRows === 1 ? '' : 's'}) into one compound result.`,
+    ]
+    if (hasUnion) {
+      explanationParts.push(
+        duplicates.length === 0
+          ? 'UNION found no duplicate rows across the accumulated result.'
+          : `UNION removed ${duplicates.length} duplicate row${duplicates.length === 1 ? '' : 's'} across the accumulated result; NULLs compare equal to NULLs.`,
+      )
+    }
+    if (hasUnionAll) {
+      explanationParts.push('UNION ALL kept every row from those branches, including duplicates.')
+    }
+    if (truncated) {
+      explanationParts.push(`Only the first ${maxRows} rows are displayed.`)
+    }
+
+    const compoundSnapshot = snapshotOf(
+      'COMPOUND',
+      compoundLabel,
+      columns,
+      rows,
+      duplicates,
+      explanationParts.join(' '),
+      truncated,
+    )
+    compoundSnapshot.inputRowCount = totalBranchRows
+    for (const row of duplicates) compoundSnapshot.roles[row.id] = 'duplicated'
+
+    // --- compound ORDER BY ------------------------------------------------
+    let finalRows: VisualizedRow[] = rows
+    let orderSnapshot: StageSnapshot | null = null
+    let hasDeterministicOrder = false
+    if (structure.orderBy.length > 0) {
+      const comparators = structure.orderBy.map((term) => ({
+        extractor: resolveSortKey(term.expression, columns as string[]),
+        descending: term.direction === 'DESC',
+      }))
+      const projected: ProjectedRow[] = finalRows.map((row) => ({
+        id: row.id,
+        values: [...row.values],
+        sortContext: contextOf(columns as string[], row.values),
+      }))
+      const indexed = projected.map((row, index) => ({ row, index }))
+      indexed.sort((a, b) => {
+        for (const comparator of comparators) {
+          const result = sortCompare(
+            comparator.extractor(a.row),
+            comparator.extractor(b.row),
+            comparator.descending,
+          )
+          if (result !== 0) return result
+        }
+        return a.index - b.index
+      })
+      hasDeterministicOrder =
+        indexed.length <= 1 ||
+        indexed.every((entry, index) => {
+          if (index === 0) return true
+          const previous = indexed[index - 1]
+          if (previous === undefined) return true
+          return comparators.some(
+            (comparator) =>
+              sortCompare(
+                comparator.extractor(previous.row),
+                comparator.extractor(entry.row),
+                false,
+              ) !== 0,
+          )
+        })
+      indexed.forEach((entry, newIndex) => {
+        if (entry.index !== newIndex) {
+          pushFine({
+            type: 'ROW_SORTED',
+            stage: 'ORDER_BY',
+            description: `Row ${entry.row.id} moves from position ${entry.index + 1} to ${newIndex + 1}.`,
+            payload: { rowId: entry.row.id, fromIndex: entry.index, toIndex: newIndex },
+          })
+        }
+      })
+      finalRows = indexed.map((entry) => ({
+        id: entry.row.id,
+        values: [...entry.row.values],
+      }))
+      orderSnapshot = snapshotOf(
+        'ORDER_BY',
+        `ORDER BY ${structure.orderBy.map((term) => `${term.text} ${term.direction}`).join(', ')}`,
+        columns,
+        finalRows,
+        [],
+        `ORDER BY rearranged all ${finalRows.length} compound rows. SQLite sorts NULLs first ascending (last descending); ties keep a stable order.`,
+        truncated,
+      )
+    }
+
+    // --- compound LIMIT / OFFSET -----------------------------------------
+    let limitSnapshot: StageSnapshot | null = null
+    if (structure.limit !== null) {
+      const offset = structure.limit.offset
+      const limit = structure.limit.limit
+      const skipped = finalRows.slice(0, offset)
+      const selected = finalRows.slice(offset, offset + limit)
+      for (const row of skipped) {
+        pushFine({
+          type: 'ROW_SKIPPED',
+          stage: 'LIMIT',
+          description: `Row ${row.id} is skipped by OFFSET ${offset}.`,
+          payload: { rowId: row.id },
+        })
+      }
+      for (const row of selected) {
+        pushFine({
+          type: 'ROW_SELECTED',
+          stage: 'LIMIT',
+          description: `Row ${row.id} is selected within LIMIT ${limit}.`,
+          payload: { rowId: row.id },
+        })
+      }
+      limitSnapshot = snapshotOf(
+        'LIMIT',
+        structure.limit.text,
+        columns,
+        selected,
+        skipped,
+        `LIMIT ${limit}${offset > 0 ? ` after skipping OFFSET ${offset}` : ''} keeps ${selected.length} of ${finalRows.length} compound rows — this is the final result set.`,
+        truncated,
+      )
+      finalRows = selected
+    }
+
+    const stageSnapshots: StageSnapshot[] = [compoundSnapshot]
+    if (orderSnapshot !== null) stageSnapshots.push(orderSnapshot)
+    if (limitSnapshot !== null) stageSnapshots.push(limitSnapshot)
+    for (const snapshot of stageSnapshots) {
+      if (snapshot.blockId === undefined) snapshot.blockId = structure.id
+    }
+
+    const incomplete =
+      incompleteReasons.length > 0 || anyBranchTruncated || branchIncompleteReasons.length > 0
+    if (incomplete) {
+      const reasons = uniqueReasons(incompleteReasons)
+      for (const snapshot of stageSnapshots) {
+        snapshot.incomplete = true
+        snapshot.incompleteReasons = [...reasons]
+      }
+    }
+
+    const events: BuildEvent[] = [
+      {
+        type: 'QUERY_STARTED',
+        stage: null,
+        description: `Visualizing the logical execution of: ${sql.trim()}`,
+      },
+    ]
+    for (const snapshot of stageSnapshots) {
+      for (const event of fineEvents) {
+        if (event.stage === snapshot.stage) events.push(event)
+      }
+      events.push({
+        type: 'STAGE_COMPLETED',
+        stage: snapshot.stage,
+        description: `${snapshot.stage} completed: ${snapshot.outputRowCount} row${snapshot.outputRowCount === 1 ? '' : 's'} out.`,
+        snapshot,
+      })
+    }
+    events.push({
+      type: 'QUERY_VISUALIZATION_COMPLETED',
+      stage: null,
+      description: `Logical simulation finished with ${finalRows.length} row${finalRows.length === 1 ? '' : 's'}.`,
+    })
+
+    const serialized: VisualizationEvent[] = events.map((event, index) => ({
+      id: `${nestedRun ? `${structure.id}-` : ''}evt${index + 1}`,
+      type: event.type,
+      description: event.description,
+      stage: event.stage,
+      blockId: structure.id,
+      payload: event.payload,
+      snapshot: event.snapshot,
+    }))
+
+    const stages = stageSnapshots.map((snapshot) => snapshot.stage)
+    const trace: VisualizationTrace = {
+      query: sql,
+      statementType: structure.statementType,
+      capability:
+        capability ?? {
+          supported: true,
+          supportedStages: stages,
+          unsupportedFeatures: [],
+          warnings: [],
+          detected: [
+            {
+              kind: 'compound',
+              detail: `${compound.branches.length} branches · ${operatorSummary}`,
+            },
+          ],
+          isReadOnly: true,
+          hasAggregation: compound.branches.some((branch) => branch.query.aggregates.length > 0),
+          hasJoin: compound.branches.some((branch) => branch.query.joins.length > 0),
+          estimatedComplexity: truncated ? 'large' : 'small',
+        },
+      stages,
+      events: serialized,
+      stageSnapshots,
+      sourceTables: [],
+      nestedQueries: [...runtime.nested].sort(
+        (a, b) => Number(a.id.replace(/\D/g, '')) - Number(b.id.replace(/\D/g, '')),
+      ),
+      compound: {
+        branches: compound.branches.map((branch) => ({
+          blockId: branch.query.id,
+          operator: branch.operator,
+        })),
+      },
+      rootBlockId: structure.id,
+      totalSteps: serialized.length,
+      finalRows,
+      finalColumns: [...columns],
+      hasDeterministicOrder,
+      truncated: truncated || anyBranchTruncated,
+      incomplete,
+      incompleteReasons: uniqueReasons(incompleteReasons),
+    }
+    return { ok: true, trace }
+  } catch (error) {
+    if (error instanceof SimulationAbort) {
+      return { ok: false, reasons: error.reasons }
+    }
+    return { ok: false, reasons: [`Simulation failed unexpectedly: ${String(error)}`] }
+  } finally {
+    if (scopePushed) runtime.scopeStack.pop()
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
@@ -1145,6 +1584,9 @@ export function simulateQuery(
   capability?: VisualizationCapability,
   runtimeIn?: SimulationRuntime,
 ): SimulationOutcome {
+  if (structure.compound !== null) {
+    return simulateCompoundQuery(sql, structure, getTableData, options, capability, runtimeIn)
+  }
   const maxRows = options.maxRows ?? DEFAULT_MAX_ROWS
   const maxEvents = options.maxEvents ?? DEFAULT_MAX_EVENTS
   const nestedRun = runtimeIn !== undefined

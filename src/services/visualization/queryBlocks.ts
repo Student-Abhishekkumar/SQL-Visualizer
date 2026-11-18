@@ -158,6 +158,11 @@ function kindOf(block: NestedQueryTrace): QueryBlockKind {
   return block.kind
 }
 
+/** True when the trace's root block is a UNION / UNION ALL compound. */
+export function isCompoundTrace(trace: VisualizationTrace | null | undefined): boolean {
+  return trace?.compound !== undefined || trace?.stages.includes('COMPOUND') === true
+}
+
 /**
  * All blocks of a trace (root first, then nested in interpretation
  * order) with the metadata the UI needs to identify them.
@@ -167,7 +172,7 @@ export function blocksOf(trace: VisualizationTrace): QueryBlockDescriptor[] {
   const blocks: QueryBlockDescriptor[] = [
     {
       id: rootId,
-      label: 'Outer query',
+      label: isCompoundTrace(trace) ? 'Compound result' : 'Outer query',
       kind: 'root',
       depth: 0,
       parentId: null,
@@ -195,6 +200,8 @@ export function blockLabelOf(
   blockId: QueryBlockId | null | undefined,
 ): string {
   if (trace === null || trace === undefined) return 'Outer query'
-  if (isRootBlock(blockId, rootBlockIdOf(trace))) return 'Outer query'
+  if (isRootBlock(blockId, rootBlockIdOf(trace))) {
+    return isCompoundTrace(trace) ? 'Compound result' : 'Outer query'
+  }
   return nestedBlockOf(trace, blockId)?.label ?? String(blockId)
 }

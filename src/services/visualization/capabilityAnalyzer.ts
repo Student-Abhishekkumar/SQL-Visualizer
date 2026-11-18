@@ -127,6 +127,88 @@ export function analyzeCapability(
   const detected: DetectedConstruct[] = []
   const warnings: DetectedConstruct[] = []
 
+  // --- compound SELECT (UNION / UNION ALL) --------------------------------
+  // The synthetic compound root has no FROM of its own; every fact worth
+  // reporting comes from its independent SELECT branches.
+  if (structure.compound !== null) {
+    const branches = structure.compound.branches
+    const operators = branches
+      .slice(1)
+      .map((branch) => branch.operator ?? 'UNION')
+    detected.push({
+      kind: 'compound',
+      detail: `${branches.length} SELECT branches combined with ${[...new Set(operators)].join(', ')}`,
+    })
+    if (structure.ctes.length > 0) {
+      detected.push({
+        kind: 'cte',
+        detail: `${structure.ctes.length} common table expression${structure.ctes.length === 1 ? '' : 's'}: ${structure.ctes
+          .map((cte) => cte.name)
+          .join(', ')}`,
+      })
+    }
+    for (const [index, branch] of branches.entries()) {
+      const query = branch.query
+      const tables = [query.from.name, ...query.joins.map((join) => join.table.name)]
+        .filter((name) => name !== '')
+      if (tables.length > 0) {
+        detected.push({
+          kind: 'source-table',
+          detail: `branch ${index + 1}: ${tables.join(', ')}`,
+        })
+      }
+      for (const join of query.joins) {
+        detected.push({ kind: 'join', detail: `branch ${index + 1}: ${join.type} on ${join.table.name}` })
+      }
+      if (query.aggregates.length > 0) {
+        detected.push({
+          kind: 'aggregation',
+          detail: `branch ${index + 1}: ${[...new Set(query.aggregates.map(aggregateLabel))].join(', ')}`,
+        })
+      }
+    }
+    if (structure.orderBy.length > 0) {
+      detected.push({
+        kind: 'order-by',
+        detail: `compound: ${structure.orderBy.map((term) => `${term.text} ${term.direction}`).join(', ')}`,
+      })
+    }
+    if (structure.limit !== null) {
+      detected.push({ kind: 'limit', detail: `compound: ${structure.limit.text}` })
+    }
+
+    let estimatedComplexity: VisualizationCapability['estimatedComplexity'] = 'unknown'
+    if (tableSizes !== undefined) {
+      const sizes = branches.flatMap((branch) =>
+        [branch.query.from.name, ...branch.query.joins.map((join) => join.table.name)]
+          .map((name) => tableSizes[name])
+          .filter((size): size is number => typeof size === 'number'),
+      )
+      if (sizes.length > 0) {
+        const product = sizes.reduce((acc, size) => acc * size, 1)
+        estimatedComplexity = product <= SMALL_TABLE ? 'small' : product <= LARGE_TABLE ? 'medium' : 'large'
+      }
+    }
+
+    const supported = unsupportedFeatures.length === 0
+    const stages: VisualizedStage[] = ['COMPOUND']
+    if (structure.orderBy.length > 0) stages.push('ORDER_BY')
+    if (structure.limit !== null) stages.push('LIMIT')
+
+    return {
+      supported,
+      supportedStages: supported ? stages : [],
+      unsupportedFeatures,
+      warnings,
+      detected,
+      isReadOnly: true,
+      hasAggregation: branches.some((branch) => branch.query.aggregates.length > 0),
+      hasJoin: branches.some((branch) => branch.query.joins.length > 0),
+      estimatedComplexity,
+      unsupportedReason: supported ? undefined : unsupportedFeatures[0]?.detail,
+    }
+  }
+
   // --- detect constructs -------------------------------------------------
   detected.push({
     kind: 'source-table',

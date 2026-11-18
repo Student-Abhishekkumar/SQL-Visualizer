@@ -134,7 +134,12 @@ function snapshotDetails(
   const owner = snapshot?.blockId ?? blockId ?? null
   const isFilterStage = stage === 'WHERE' || stage === 'HAVING'
   return {
-    clause: stage !== null ? clauseTextFor(trace, stage, owner) : null,
+    clause:
+      stage === 'COMPOUND'
+        ? (snapshot?.label ?? 'COMPOUND')
+        : stage !== null
+          ? clauseTextFor(trace, stage, owner)
+          : null,
     filter: isFilterStage && stage !== null ? clauseTextFor(trace, stage, owner) : null,
     groupKeys: stage === 'GROUP_BY' ? snapshot?.groups.map((group) => group.key) ?? [] : [],
     sort: stage === 'ORDER_BY' ? clauseTextFor(trace, stage, owner) : null,
@@ -272,6 +277,23 @@ function inspectNodeCore(node: FlowGraphNode, trace: VisualizationTrace): NodeIn
               : 'CTE result read by this stage.',
         })
       }
+      // A compound operation consumes every SELECT branch's real output.
+      if (node.stage === 'COMPOUND') {
+        const rootId = rootBlockIdOf(trace)
+        for (const block of trace.nestedQueries ?? []) {
+          if (block.kind !== 'compound' || (block.parentId ?? rootId) !== rootId) continue
+          inputs.push({
+            key: `branch-${block.id}`,
+            label: block.label,
+            columns: block.finalColumns,
+            rows: block.finalRows,
+            note:
+              block.setOperator === null || block.setOperator === undefined
+                ? 'First branch of the compound; it establishes the result columns.'
+                : `${block.setOperator} combines this branch with the result so far.`,
+          })
+        }
+      }
       return {
         header: {
           title: `Operation: ${node.label}`,
@@ -324,7 +346,9 @@ function inspectNodeCore(node: FlowGraphNode, trace: VisualizationTrace): NodeIn
           ? 'These rows were skipped by OFFSET and are not part of the final result.'
           : snapshot?.stage === 'DISTINCT'
             ? 'These projected rows duplicated an earlier row and were removed.'
-            : node.hint ?? 'These rows did not pass the condition and did not continue.'
+            : snapshot?.stage === 'COMPOUND'
+              ? 'UNION removed these rows because the accumulated compound result already contained an equal row (NULLs compare equal).'
+              : node.hint ?? 'These rows did not pass the condition and did not continue.'
       return {
         header: {
           title: node.label,

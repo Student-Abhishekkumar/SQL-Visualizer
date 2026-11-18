@@ -217,10 +217,10 @@ export interface QueryStructure {
   /** Stable query-block id (root and each nested block get one). */
   id: string
   /**
-   * Block kind: root statement, scalar subquery, CTE body, or the
-   * subquery form of IN / EXISTS.
+   * Block kind: root statement, scalar subquery, CTE body, the subquery
+   * form of IN / EXISTS, or one SELECT branch of a compound statement.
    */
-  blockKind: 'root' | 'scalar' | 'cte' | 'in' | 'exists'
+  blockKind: 'root' | 'scalar' | 'cte' | 'in' | 'exists' | 'compound'
   /** Parent block id, null for the root block. */
   parentId: string | null
   /** Nesting depth relative to the root block (root = 0). */
@@ -242,7 +242,28 @@ export interface QueryStructure {
   ctes: CteDefinition[]
   /** Nested query blocks used by expressions in this block. */
   subqueries: SubqueryExpr[]
+  /**
+   * Compound (set-operation) branches in evaluation order. Set on the
+   * synthetic root block of a UNION / UNION ALL statement and null for
+   * every ordinary SELECT block.
+   */
+  compound: CompoundSelect | null
   statementType: StatementType
+}
+
+/** Set operator of a compound query (INTERSECT / EXCEPT are unsupported). */
+export type SetOperator = 'UNION' | 'UNION ALL'
+
+/** One SELECT branch of a compound query and its combining operator. */
+export interface CompoundBranch {
+  query: QueryStructure
+  /** Operator combining this branch with the previous one (null for first). */
+  operator: SetOperator | null
+}
+
+/** Ordered branches of one compound SELECT. */
+export interface CompoundSelect {
+  branches: CompoundBranch[]
 }
 
 export interface InterpretationResult {
@@ -283,6 +304,9 @@ function cteNameOf(raw: Raw): string {
 function relationNamesOf(structure: QueryStructure, out: Set<string> = new Set()): Set<string> {
   out.add(structure.from.name.toLowerCase())
   for (const join of structure.joins) out.add(join.table.name.toLowerCase())
+  if (structure.compound !== null) {
+    for (const branch of structure.compound.branches) relationNamesOf(branch.query, out)
+  }
   for (const subquery of structure.subqueries) relationNamesOf(subquery.query, out)
   return out
 }
@@ -407,6 +431,20 @@ function isPotentiallyCorrelated(structure: QueryStructure): boolean {
 
 /** Compact SQL text for a nested block, used in labels and inspector data. */
 export function structureText(structure: QueryStructure): string {
+  if (structure.compound !== null) {
+    let text = structure.compound.branches
+      .map((branch, index) =>
+        index === 0 || branch.operator === null
+          ? structureText(branch.query)
+          : `${branch.operator} ${structureText(branch.query)}`,
+      )
+      .join(' ')
+    if (structure.orderBy.length > 0) {
+      text += ` ORDER BY ${structure.orderBy.map((term) => `${term.text} ${term.direction}`).join(', ')}`
+    }
+    if (structure.limit !== null) text += ` ${structure.limit.text}`
+    return text
+  }
   const columns = structure.selectAll
     ? '*'
     : structure.selectItems
@@ -682,6 +720,60 @@ function textOfRaw(raw: Raw): string {
   }
 }
 
+/** Interpret an AST ORDER BY list into typed terms. */
+function interpretOrderByList(
+  raw: Raw,
+  context: InterpretContext,
+  unsupportedReasons: string[],
+  label: string,
+): OrderByTerm[] {
+  const orderBy: OrderByTerm[] = []
+  if (!Array.isArray(raw)) return orderBy
+  for (const term of raw) {
+    const expr = interpretExpression(term.expr, context)
+    if (expr === null) {
+      unsupportedReasons.push(`${label} expression "${textOfRaw(term.expr)}" is not visualizable yet.`)
+      continue
+    }
+    orderBy.push({
+      expression: expr,
+      direction: String(term.type ?? 'ASC').toUpperCase() === 'DESC' ? 'DESC' : 'ASC',
+      text: expr.text,
+    })
+  }
+  return orderBy
+}
+
+/** Interpret an AST LIMIT clause (both `LIMIT n OFFSET m` forms). */
+function interpretLimitClause(
+  raw: Raw,
+  context: InterpretContext,
+  unsupportedReasons: string[],
+): LimitClause | null {
+  if (raw == null) return null
+  const values: Raw[] = Array.isArray(raw.value) ? raw.value : []
+  const evaluated = values.map((value) => interpretExpression(value, context))
+  if (evaluated.some((value) => value === null || value.kind !== 'literal' || typeof value.value !== 'number')) {
+    unsupportedReasons.push('LIMIT / OFFSET must use constant numbers to be visualizable.')
+    return null
+  }
+  // Two numeric forms exist:
+  //   `LIMIT n OFFSET m`  → seperator "offset", value = [n, m]
+  //   `LIMIT m, n`        → seperator ",",     value = [m, n]
+  // SQLite semantics for the comma form: first number is the OFFSET,
+  // second is the COUNT.
+  const commaForm = String(raw.seperator ?? '') === ','
+  const first = (evaluated[0] as LiteralExpr).value as number
+  const second = evaluated.length > 1 ? ((evaluated[1] as LiteralExpr).value as number) : 0
+  const limitCount = commaForm ? second : first
+  const offsetCount = commaForm ? first : second
+  return {
+    limit: limitCount,
+    offset: offsetCount,
+    text: `LIMIT ${limitCount}${offsetCount > 0 ? ` OFFSET ${offsetCount}` : ''}`,
+  }
+}
+
 /**
  * Interpret one SELECT AST node (root or nested) into a QueryStructure.
  * Reasons accumulate in `context.reasons`; returns null when the block
@@ -693,7 +785,7 @@ function textOfRaw(raw: Raw): string {
 function interpretSelectAst(
   ast: Raw,
   context: InterpretContext,
-  blockKind?: 'scalar' | 'cte',
+  blockKind?: 'scalar' | 'cte' | 'compound',
 ): QueryStructure | null {
   const unsupportedReasons = context.reasons
   if (ast == null || ast.type !== 'select') {
@@ -785,10 +877,94 @@ function interpretSelectAst(
     }
   }
 
-  // Compound selects and derived tables remain out of scope.
-  if (Array.isArray(ast.options)) unsupportedReasons.push('Compound selects (UNION / INTERSECT / EXCEPT) are not visualizable yet.')
-  if (ast._next != null || ast.previous != null) {
-    unsupportedReasons.push('Compound selects (UNION / INTERSECT / EXCEPT) are not visualizable yet.')
+  // --- compound SELECT (UNION / UNION ALL) -------------------------------
+  // node-sql-parser chains branches through `_next` and stores the
+  // operator joining the current node to the next one on `set_op`. The
+  // whole compound's ORDER BY / LIMIT are attached to the terminal branch
+  // AST, so they are hoisted to the compound root before branches run.
+  const compoundAsts: Raw[] = []
+  let cursor: Raw = ast
+  while (cursor != null) {
+    compoundAsts.push(cursor)
+    cursor = cursor._next
+  }
+
+  if (compoundAsts.length > 1) {
+    const operators: SetOperator[] = []
+    for (let index = 0; index < compoundAsts.length - 1; index++) {
+      const rawOperator = String(compoundAsts[index]?.set_op ?? '').toLowerCase()
+      if (rawOperator !== 'union' && rawOperator !== 'union all') {
+        unsupportedReasons.push(
+          'Only UNION and UNION ALL compound selects are visualizable; INTERSECT and EXCEPT are not supported.',
+        )
+        return null
+      }
+      operators.push(rawOperator === 'union all' ? 'UNION ALL' : 'UNION')
+    }
+
+    const terminal: Raw = compoundAsts[compoundAsts.length - 1]
+    const hoistedOrderBy = terminal?.orderby ?? null
+    const hoistedLimit = terminal?.limit ?? null
+
+    const branches: CompoundBranch[] = []
+    for (let index = 0; index < compoundAsts.length; index++) {
+      const branchAst: Raw = { ...(compoundAsts[index] as Raw) }
+      // A branch is an independent SELECT block: it never owns the chain,
+      // the root WITH clause, or the compound's trailing clauses.
+      delete branchAst._next
+      delete branchAst.previous
+      delete branchAst.set_op
+      delete branchAst.with
+      branchAst.orderby = null
+      branchAst.limit = null
+
+      const branchContext: InterpretContext = {
+        ...blockContext,
+        parentStage: 'COMPOUND',
+        collected: [],
+        allowCtes: false,
+      }
+      const branchQuery = interpretSelectAst(branchAst, branchContext, 'compound')
+      if (branchQuery === null) {
+        unsupportedReasons.push(`Compound branch ${index + 1} could not be interpreted.`)
+        return null
+      }
+      branches.push({
+        query: branchQuery,
+        operator: index === 0 ? null : (operators[index - 1] ?? 'UNION'),
+      })
+    }
+
+    const orderBy = interpretOrderByList(
+      hoistedOrderBy,
+      clause('ORDER_BY'),
+      unsupportedReasons,
+      'Compound ORDER BY',
+    )
+    const limit = interpretLimitClause(hoistedLimit, clause('LIMIT'), unsupportedReasons)
+
+    return {
+      id,
+      blockKind: context.blockId === null ? 'root' : (blockKind ?? 'scalar'),
+      parentId: context.blockId,
+      depth: context.depth,
+      consumingStage: context.blockId === null ? null : context.parentStage,
+      distinct: false,
+      selectItems: [],
+      selectAll: false,
+      from: { name: '', alias: null },
+      joins: [],
+      where: null,
+      groupBy: [],
+      having: null,
+      orderBy,
+      limit,
+      aggregates: [],
+      ctes,
+      subqueries,
+      compound: { branches },
+      statementType: 'SELECT',
+    }
   }
 
   const fromList: Raw[] = Array.isArray(ast.from) ? ast.from : []
@@ -889,46 +1065,8 @@ function interpretSelectAst(
     unsupportedReasons.push(`HAVING uses an expression that is not visualizable yet (${textOfRaw(ast.having)}).`)
   }
 
-  const orderBy: OrderByTerm[] = []
-  if (Array.isArray(ast.orderby)) {
-    for (const term of ast.orderby) {
-      const expr = interpretExpression(term.expr, clause('ORDER_BY'))
-      if (expr === null) {
-        unsupportedReasons.push(`ORDER BY expression "${textOfRaw(term.expr)}" is not visualizable yet.`)
-        continue
-      }
-      orderBy.push({
-        expression: expr,
-        direction: String(term.type ?? 'ASC').toUpperCase() === 'DESC' ? 'DESC' : 'ASC',
-        text: expr.text,
-      })
-    }
-  }
-
-  let limit: LimitClause | null = null
-  if (ast.limit != null) {
-    const values: Raw[] = Array.isArray(ast.limit.value) ? ast.limit.value : []
-    const evaluated = values.map((value) => interpretExpression(value, clause('LIMIT')))
-    if (evaluated.some((value) => value === null || value.kind !== 'literal' || typeof value.value !== 'number')) {
-      unsupportedReasons.push('LIMIT / OFFSET must use constant numbers to be visualizable.')
-    } else {
-      // Two numeric forms exist:
-      //   `LIMIT n OFFSET m`  → seperator "offset", value = [n, m]
-      //   `LIMIT m, n`        → seperator ",",     value = [m, n]
-      // SQLite semantics for the comma form: first number is the OFFSET,
-      // second is the COUNT.
-      const commaForm = String(ast.limit.seperator ?? '') === ','
-      const first = (evaluated[0] as LiteralExpr).value as number
-      const second = evaluated.length > 1 ? ((evaluated[1] as LiteralExpr).value as number) : 0
-      const limitCount = commaForm ? second : first
-      const offsetCount = commaForm ? first : second
-      limit = {
-        limit: limitCount,
-        offset: offsetCount,
-        text: `LIMIT ${limitCount}${offsetCount > 0 ? ` OFFSET ${offsetCount}` : ''}`,
-      }
-    }
-  }
+  const orderBy = interpretOrderByList(ast.orderby, clause('ORDER_BY'), unsupportedReasons, 'ORDER BY')
+  const limit = interpretLimitClause(ast.limit, clause('LIMIT'), unsupportedReasons)
 
   // Collect aggregates across select list and HAVING. Subqueries are
   // separate query blocks and their aggregates do not belong to this one.
@@ -980,6 +1118,7 @@ function interpretSelectAst(
     aggregates,
     ctes,
     subqueries,
+    compound: null,
     statementType: 'SELECT',
   }
 

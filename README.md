@@ -11,7 +11,7 @@
 
 <p align="center">
   <img alt="Status: active development" src="https://img.shields.io/badge/status-active_development-F59E0B?style=flat-square" />
-  <img alt="600 tests passing" src="https://img.shields.io/badge/tests-600_passing-2EA043?style=flat-square" />
+  <img alt="623 tests passing" src="https://img.shields.io/badge/tests-623_passing-2EA043?style=flat-square" />
 </p>
 
 <p align="center">
@@ -85,7 +85,7 @@ guessing.
 | Feature | What it does |
 |:---|:---|
 | **Animated logical pipeline** | Renders the supported query pipeline as connected nodes: sources, joins, filters, grouping, projection and the final result. The default animation covers the full pipeline; hover or selection narrows the highlighted upstream path. |
-| **Nested query blocks** | Scalar subqueries, uncorrelated `IN` / `EXISTS` subqueries and non-recursive CTEs run as their own real pipelines, with dependency edges into the stage that consumes them and block-specific playback. |
+| **Nested query blocks** | Scalar subqueries, uncorrelated `IN` / `EXISTS` subqueries and non-recursive CTEs run as their own real pipelines, with dependency edges into the stage that consumes them and block-specific playback. Every `UNION` / `UNION ALL` branch is likewise an independent block feeding a shared compound stage. |
 | **Stage snapshots and playback** | Snapshots carry real rows through every stage. Play, pause, step, seek, restart or jump to the end, at 0.5×, 1×, 1.5× or 2× speed. |
 | **Flow and Table views** | Switch between the node canvas and a row-level table for the current stage, including accepted, filtered, duplicated, grouped or skipped rows. |
 | **Branch-aware tracing** | Hover a node to temporarily animate its upstream path; click to pin the selection and open the inspector. Rejected rows branch visibly at filters and `HAVING`. |
@@ -178,21 +178,23 @@ faithfully, visualization stops with explicit reasons.
 | `HAVING` | Groups accepted or rejected by the group predicate. |
 | `SELECT` | Projected columns and computed values. |
 | `DISTINCT` | Duplicate projected rows removed. |
+| `COMPOUND` | Independent `SELECT` branches combined with `UNION` or `UNION ALL`; `UNION` removes duplicate rows across the accumulated result. |
 | `ORDER BY` | Rows sorted by the requested keys. |
 | `LIMIT` / `OFFSET` | Rows kept or skipped at the end of the pipeline. |
-| Nested query block | A non-correlated scalar subquery, `IN` / `NOT IN` subquery, `EXISTS` / `NOT EXISTS` subquery, or non-recursive CTE simulated as its own real pipeline and wired into the stage that consumes it. |
+| Nested query block | A non-correlated scalar subquery, `IN` / `NOT IN` subquery, `EXISTS` / `NOT EXISTS` subquery, non-recursive CTE, or one `SELECT` branch of a compound query, simulated as its own real pipeline and wired into the stage that consumes it. |
 
 <details>
 <summary><b>Scope and honest limits</b></summary>
 
-- Visualization is for **single `SELECT` statements**. DDL and DML still execute normally in SQLite, but are not visualized.
+- Visualization is for **supported `SELECT` statements**, including `UNION` / `UNION ALL` compounds. DDL and DML still execute normally in SQLite, but are not visualized.
 - Supported joins: INNER, LEFT and CROSS. Comma cross joins are not supported.
 - Supported expressions include comparisons, `AND`/`OR`/`NOT`, `IN`, `BETWEEN`, `IS NULL`, `LIKE`, arithmetic and `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`.
 - **Non-correlated scalar subqueries** are supported in `WHERE`, `SELECT` and `JOIN … ON`, following SQLite's rules: an empty result becomes `NULL`, multiple rows use the first row, and the subquery must return one column.
 - **Uncorrelated `IN` / `NOT IN` subqueries** are supported with SQLite three-valued logic: an empty result is `false` (`true` for `NOT IN`), a `NULL` outer value is unknown, a `NULL` member makes `NOT IN` unknown, and the subquery must return exactly one column.
 - **Uncorrelated `EXISTS` / `NOT EXISTS`** are supported; the subquery's column count is irrelevant and only row presence affects the result.
 - **Non-recursive CTEs** (`WITH`) are supported: multiple definitions, chained dependencies, explicit column lists, and supported scalar / `IN` / `EXISTS` subqueries inside a CTE body.
-- Not yet visualizable: **correlated** subqueries (including correlated `IN` / `EXISTS`), recursive CTEs (`WITH RECURSIVE`), compound selects (`UNION` / `UNION ALL` / `INTERSECT` / `EXCEPT`), derived tables in `FROM`, `RIGHT`/`FULL OUTER JOIN`, window functions, `CASE`, and other constructs the parser cannot model conservatively.
+- **`UNION` and `UNION ALL`** compound selects are supported. Each `SELECT` branch is simulated as an independent query block and every branch feeds one shared compound stage. Branches are folded left-to-right, matching SQLite's left associativity: `A UNION B UNION ALL C` means `(A UNION B) UNION ALL C`. `UNION` removes duplicate rows across the accumulated result, treating `NULL` as equal to `NULL`; `UNION ALL` keeps every row, including duplicates. A trailing compound `ORDER BY` / `LIMIT` is applied after folding and belongs to the whole compound, not the last branch.
+- Not yet visualizable: **correlated** subqueries (including correlated `IN` / `EXISTS`), recursive CTEs (`WITH RECURSIVE`), compound selects using `INTERSECT` / `EXCEPT`, derived tables in `FROM`, `RIGHT`/`FULL OUTER JOIN`, window functions, `CASE`, and other constructs the parser cannot model conservatively.
 - `INTERSECT` and `EXCEPT` are not parsed by the current `node-sql-parser` version, so they are reported as unsupported rather than partially analyzed.
 - Large inputs are capped for visualization (500 rows, 2,000 events). The real SQLite result remains complete and is never truncated.
 
@@ -297,7 +299,7 @@ Open <http://localhost:5173>. The University example database is created on firs
 | `npm run dev` | Start the Vite development server with HMR. |
 | `npm run build` | Type-check and build production assets to `dist/`. |
 | `npm run preview` | Serve the production build locally. |
-| `npm test` | Run the full Vitest suite (38 files, 600 tests). |
+| `npm test` | Run the full Vitest suite (40 files, 623 tests). |
 | `npm run test:watch` | Run Vitest in watch mode. |
 | `npm run lint` | Lint the project with oxlint. |
 | `npm run typecheck` | Run the TypeScript project build without emitting. |
@@ -337,11 +339,11 @@ their implementation.
 - **Storage is browser-managed.** Clearing site data removes databases, history and saved queries.
   Private browsing modes may reject IndexedDB writes.
 - **Single user.** Concurrent editing from multiple tabs is not coordinated.
-- **Single `SELECT` visualization.** DDL, DML, transactions and other statements execute in SQLite
-  but cannot be visualized.
+- **`SELECT` visualization.** Supported `SELECT` statements, including `UNION` / `UNION ALL` compounds, can be visualized. DDL, DML, transactions and other statements execute in SQLite but cannot be visualized.
 - **Unsupported SELECT constructs.** Correlated subqueries (including correlated `IN` / `EXISTS`),
-  recursive CTEs (`WITH RECURSIVE`), compound selects, derived tables, `RIGHT`/`FULL OUTER JOIN`,
-  `CASE`, window functions and non-constant `LIMIT`/`OFFSET` are reported instead of approximated.
+  recursive CTEs (`WITH RECURSIVE`), compound selects using `INTERSECT` / `EXCEPT`, derived tables,
+  `RIGHT`/`FULL OUTER JOIN`, `CASE`, window functions and non-constant `LIMIT`/`OFFSET` are reported
+  instead of approximated.
 - **Simulation caps.** Visualization is capped at 500 rows and 2,000 events; source previews show up
   to 12 rows. Real SQLite output is never truncated.
 - **Educational model, not a query planner.** The simulator models logical stages only; it does not
@@ -367,16 +369,18 @@ The roadmap is directional, not a release commitment.
 - [x] Non-correlated scalar subqueries simulated as nested pipelines
 - [x] Non-recursive CTEs (multiple, chained, explicit columns) with query-block playback and dependency tracing
 - [x] Uncorrelated `IN` / `NOT IN` and `EXISTS` / `NOT EXISTS` subqueries with SQLite three-valued logic
+- [x] `UNION` / `UNION ALL` compound selects with an independent pipeline per branch, a shared compound stage and SQLite parity
 - [x] SQLite result-parity validation and conservative unsupported-query reporting
 
 ### 🚧 Next up
 
-- [ ] Compound selects (`UNION`, `UNION ALL`, `INTERSECT`, `EXCEPT`), subject to parser support
+- [ ] `INTERSECT` / `EXCEPT` compound selects, subject to parser support
 
 ### 🧭 Planned
 
 - [ ] Recursive CTEs (`WITH RECURSIVE`)
 - [ ] General correlated subquery evaluation, scope-aware and SQLite-validated
+- [ ] Derived tables in `FROM` / `JOIN`
 - [ ] Guided SQL exercises built on the explanation and knowledge-check panels
 - [ ] Shareable visualization traces
 - [ ] Export a visualization as an image or recording
@@ -406,9 +410,10 @@ For larger changes, open an issue first so the approach can be discussed. See th
 
 ## License
 
-No `LICENSE` file is currently included in this repository, so no reuse license is granted by
-default. The source is publicly available for reading and learning. If you would like to reuse the
-code, please open an issue to discuss terms first.
+SQL Visualizer is licensed under the [MIT License](LICENSE).
+
+The MIT License permits use, modification, distribution, and private or commercial use, subject to
+its terms. Third-party libraries, assets, fonts and icons remain under their own licenses.
 
 ---
 

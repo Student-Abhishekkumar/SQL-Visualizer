@@ -45,6 +45,7 @@ const STAGE_ACCENT: Record<VisualizedStage, NodeAccentKey> = {
   HAVING: 'having',
   SELECT: 'select',
   DISTINCT: 'distinct',
+  COMPOUND: 'distinct',
   ORDER_BY: 'order',
   LIMIT: 'limit',
 }

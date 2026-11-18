@@ -12,6 +12,7 @@ import {
   FilterX,
   Gauge,
   GitMerge,
+  Layers,
   Scissors,
   SlidersHorizontal,
   Sparkles,
@@ -50,6 +51,7 @@ const STAGE_ICONS: Partial<Record<VisualizedStage, typeof Filter>> = {
   HAVING: SlidersHorizontal,
   SELECT: Scissors,
   DISTINCT: Sparkles,
+  COMPOUND: Layers,
   ORDER_BY: ArrowDownUp,
   LIMIT: Gauge,
 }
