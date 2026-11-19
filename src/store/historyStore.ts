@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { HistoryEntry, QueryExecutionResult, SavedQuery } from '../types/query'
 import {
+  HISTORY_LIMIT,
   addHistoryEntry,
   clearHistory,
   deleteHistoryEntry,
@@ -28,7 +29,7 @@ interface HistoryState {
   loaded: boolean
 
   loadFromStorage: () => Promise<void>
-  recordExecution: (result: QueryExecutionResult, databaseId?: string) => void
+  recordExecution: (result: QueryExecutionResult, databaseId?: string) => Promise<void>
   removeHistoryEntry: (id: string) => Promise<void>
   clearAllHistory: () => Promise<void>
   addSavedQuery: (name: string, sql: string, databaseId?: string) => Promise<SavedQuery>
@@ -46,14 +47,29 @@ export const useHistoryStore = create<HistoryState>()((set, get) => ({
       loadHistory(),
       loadSavedQueries(),
     ])
-    set({ history, savedQueries, loaded: true })
+    set((state) => {
+      // Keep entries recorded while IndexedDB hydration was in flight. The
+      // current in-memory entries come first so timestamp ties keep the
+      // newest local insertion ahead of older persisted records.
+      const byId = new Map<string, HistoryEntry>()
+      for (const entry of [...state.history, ...history]) {
+        if (!byId.has(entry.id)) byId.set(entry.id, entry)
+      }
+      return {
+        history: [...byId.values()]
+          .sort((a, b) => b.timestamp - a.timestamp)
+          .slice(0, HISTORY_LIMIT),
+        savedQueries,
+        loaded: true,
+      }
+    })
   },
 
   recordExecution: (result, databaseId) => {
     const entry: HistoryEntry = {
       id: newId(),
       sql: result.query,
-      timestamp: Date.now(),
+      timestamp: Math.max(Date.now(), (get().history[0]?.timestamp ?? 0) + 1),
       success: result.success,
       executionTime: result.executionTime,
       rowCount: result.rowCount,
@@ -61,9 +77,9 @@ export const useHistoryStore = create<HistoryState>()((set, get) => ({
       databaseId: databaseId ?? result.databaseId,
     }
     set((state) => ({
-      history: [entry, ...state.history].slice(0, 200),
+      history: [entry, ...state.history].slice(0, HISTORY_LIMIT),
     }))
-    void addHistoryEntry(entry)
+    return addHistoryEntry(entry)
   },
 
   removeHistoryEntry: async (id) => {

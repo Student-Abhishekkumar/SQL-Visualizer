@@ -16,8 +16,8 @@ export function MessagesPanel({ result }: MessagesPanelProps) {
           query in the editor.
         </Message>
         <Message>
-          Multiple statements separated by semicolons run sequentially —
-          execution stops at the first error.
+          Multiple statements run as one atomic batch — execution stops at
+          the first error and earlier changes are rolled back.
         </Message>
         <Message>
           Use the Examples menu for ready-to-run queries against the seeded
@@ -77,7 +77,9 @@ export function MessagesPanel({ result }: MessagesPanelProps) {
           <XCircle className="mt-0.5 size-4 shrink-0 text-danger" />
           <div className="min-w-0">
             <p className="text-xs font-semibold text-danger">
-              Statement #{(result.errorStatementIndex ?? 0) + 1} failed
+              {result.persistencePending
+                ? 'SQLite committed; persistence failed'
+                : `Statement #${(result.errorStatementIndex ?? 0) + 1} failed`}
             </p>
             <p className="mt-1 text-sm text-danger">{result.error}</p>
           </div>

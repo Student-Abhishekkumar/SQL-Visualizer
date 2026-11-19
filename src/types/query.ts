@@ -76,6 +76,14 @@ export interface QueryExecutionResult {
   errorStatementIndex?: number
   /** Database the query actually ran against (set by the store). */
   databaseId?: string
+  /** True when SQLite committed the batch, even if durable persistence failed. */
+  committed?: boolean
+  /** True when the application-managed transaction was rolled back. */
+  rolledBack?: boolean
+  /** True when committed bytes still need a successful persistence retry. */
+  persistencePending?: boolean
+  /** Persistence-specific failure after a successful SQLite commit. */
+  persistenceError?: string
   /**
    * Stage 2 hook: the visualization engine will attach an execution
    * trace here. Stage 1 never populates it.

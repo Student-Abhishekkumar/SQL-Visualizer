@@ -121,7 +121,7 @@ export const useDatabaseStore = create<DatabaseState>()((set, get) => ({
     const databaseId = getActiveDatabaseId() ?? undefined
 
     if (!hasExecutableSql(sql)) {
-      return {
+      const result: QueryExecutionResult = {
         success: false,
         query: sql,
         columns: [],
@@ -132,12 +132,17 @@ export const useDatabaseStore = create<DatabaseState>()((set, get) => ({
         statements: [],
         databaseId,
         error: 'No SQL statement to execute. Write a query or pick an example first.',
+        committed: false,
+        rolledBack: false,
+        persistencePending: false,
       }
+      set({ lastResult: result })
+      return result
     }
 
     const db = getLiveDatabase()
     if (!db) {
-      return {
+      const result: QueryExecutionResult = {
         success: false,
         query: sql,
         columns: [],
@@ -148,7 +153,12 @@ export const useDatabaseStore = create<DatabaseState>()((set, get) => ({
         statements: [],
         databaseId,
         error: 'No database is open. Create or open one from the database selector.',
+        committed: false,
+        rolledBack: false,
+        persistencePending: false,
       }
+      set({ lastResult: result })
+      return result
     }
 
     set({ isExecuting: true })
@@ -171,6 +181,9 @@ export const useDatabaseStore = create<DatabaseState>()((set, get) => ({
         statementType: statements[0]?.statementType ?? 'UNKNOWN',
         statements,
         databaseId,
+        committed: true,
+        rolledBack: false,
+        persistencePending: false,
       }
 
       // Persist schema-affecting/data changes and refresh the explorer.
@@ -178,11 +191,36 @@ export const useDatabaseStore = create<DatabaseState>()((set, get) => ({
         isMutatingStatementType(statement.statementType),
       )
       if (mutating) {
-        await persistActiveDatabase(db)
-        // Only refresh if this connection is still the active one.
+        let persistenceError: string | null = null
+        try {
+          const persisted = await persistActiveDatabase(db)
+          if (!persisted) persistenceError = 'The database snapshot could not be saved.'
+        } catch (error) {
+          persistenceError = messageOf(error, 'The database snapshot could not be saved.')
+        }
+
+        // Refresh committed schema even when durable persistence fails.
         if (getLiveDatabase() === db) {
           get().refreshSchema()
           set({ databases: [...getDatabases()] })
+        }
+
+        if (persistenceError !== null) {
+          const pending: QueryExecutionResult = {
+            ...result,
+            success: false,
+            committed: true,
+            rolledBack: false,
+            persistencePending: true,
+            persistenceError,
+            error: `SQLite committed, but persistence failed: ${persistenceError} The committed changes remain in memory and can be saved by retrying persistence.`,
+          }
+          if (getLiveDatabase() === db) {
+            set({ isExecuting: false, lastResult: pending })
+          } else {
+            set({ isExecuting: false })
+          }
+          return pending
         }
       }
 
@@ -203,6 +241,7 @@ export const useDatabaseStore = create<DatabaseState>()((set, get) => ({
           ? error.message
           : String(error)
 
+      const rolledBack = sqliteError?.rolledBack === true
       const result: QueryExecutionResult = {
         success: false,
         query: sql,
@@ -213,8 +252,11 @@ export const useDatabaseStore = create<DatabaseState>()((set, get) => ({
         statementType: 'UNKNOWN' as StatementType,
         statements: [],
         databaseId,
-        error: message,
+        error: sqliteError?.rollbackError ?? (rolledBack ? `Batch rolled back: ${message}` : message),
         errorStatementIndex: sqliteError?.statementIndex,
+        committed: false,
+        rolledBack,
+        persistencePending: false,
       }
       if (getLiveDatabase() === db) {
         set({ isExecuting: false, lastResult: result })

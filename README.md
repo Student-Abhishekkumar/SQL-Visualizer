@@ -11,7 +11,7 @@
 
 <p align="center">
   <img alt="Status: active development" src="https://img.shields.io/badge/status-active_development-F59E0B?style=flat-square" />
-  <img alt="623 tests passing" src="https://img.shields.io/badge/tests-623_passing-2EA043?style=flat-square" />
+  <img alt="748 tests passing" src="https://img.shields.io/badge/tests-748_passing-2EA043?style=flat-square" />
 </p>
 
 <p align="center">
@@ -67,7 +67,7 @@ guessing.
 | **Results, messages and query info** | Tabbed output with display types, row counts, execution time, statement breakdown and error messages. |
 | **Multiple statements** | Run scripts separated by semicolons; results and messages report per-statement outcomes. |
 | **Saved queries and history** | Named queries and an execution log persist across refreshes; history can be filtered by database. |
-| **Query / Canvas toggle** | Both workspaces stay mounted, so editor state, results, zoom, selection and playback survive the switch. `Ctrl/Cmd + Shift + M`. |
+| **Query / Canvas toggle** | Query is the startup default, including after reload. Both workspaces stay mounted, so editor state, results, zoom, selection and playback survive the switch. `Ctrl/Cmd + Shift + M`. |
 
 ### Database workspace
 
@@ -85,7 +85,7 @@ guessing.
 | Feature | What it does |
 |:---|:---|
 | **Animated logical pipeline** | Renders the supported query pipeline as connected nodes: sources, joins, filters, grouping, projection and the final result. The default animation covers the full pipeline; hover or selection narrows the highlighted upstream path. |
-| **Nested query blocks** | Scalar subqueries, uncorrelated `IN` / `EXISTS` subqueries and non-recursive CTEs run as their own real pipelines, with dependency edges into the stage that consumes them and block-specific playback. Every `UNION` / `UNION ALL` branch is likewise an independent block feeding a shared compound stage. |
+| **Nested query blocks** | Scalar subqueries, uncorrelated `IN` / `EXISTS` subqueries and non-recursive CTEs run as their own real pipelines, with dependency edges into the stage that consumes them and block-specific playback. Every `UNION` / `UNION ALL` / `INTERSECT` / `EXCEPT` branch is likewise an independent block feeding the actual left-to-right compound operation sequence. |
 | **Stage snapshots and playback** | Snapshots carry real rows through every stage. Play, pause, step, seek, restart or jump to the end, at 0.5×, 1×, 1.5× or 2× speed. |
 | **Flow and Table views** | Switch between the node canvas and a row-level table for the current stage, including accepted, filtered, duplicated, grouped or skipped rows. |
 | **Branch-aware tracing** | Hover a node to temporarily animate its upstream path; click to pin the selection and open the inspector. Rejected rows branch visibly at filters and `HAVING`. |
@@ -178,24 +178,24 @@ faithfully, visualization stops with explicit reasons.
 | `HAVING` | Groups accepted or rejected by the group predicate. |
 | `SELECT` | Projected columns and computed values. |
 | `DISTINCT` | Duplicate projected rows removed. |
-| `COMPOUND` | Independent `SELECT` branches combined with `UNION` or `UNION ALL`; `UNION` removes duplicate rows across the accumulated result. |
+| `COMPOUND` | Independent `SELECT` branches combined left-to-right with `UNION`, `UNION ALL`, `INTERSECT` or `EXCEPT`; distinct set semantics remove duplicates with NULL-safe whole-row comparison. |
 | `ORDER BY` | Rows sorted by the requested keys. |
 | `LIMIT` / `OFFSET` | Rows kept or skipped at the end of the pipeline. |
-| Nested query block | A non-correlated scalar subquery, `IN` / `NOT IN` subquery, `EXISTS` / `NOT EXISTS` subquery, non-recursive CTE, or one `SELECT` branch of a compound query, simulated as its own real pipeline and wired into the stage that consumes it. |
+| Nested query block | A non-correlated scalar subquery, `IN` / `NOT IN` subquery, `EXISTS` / `NOT EXISTS` subquery, non-recursive CTE, or one `SELECT` branch of a compound query, simulated as its own real pipeline and wired into the stage that consumes it. Compound operations expose their accumulated left input, next right input, retained rows, excluded rows and duplicates. |
 
 <details>
 <summary><b>Scope and honest limits</b></summary>
 
-- Visualization is for **supported `SELECT` statements**, including `UNION` / `UNION ALL` compounds. DDL and DML still execute normally in SQLite, but are not visualized.
+- Visualization is for **supported `SELECT` statements**, including `UNION`, `UNION ALL`, `INTERSECT` and `EXCEPT` compounds. DDL and DML still execute normally in SQLite, but are not visualized.
 - Supported joins: INNER, LEFT and CROSS. Comma cross joins are not supported.
 - Supported expressions include comparisons, `AND`/`OR`/`NOT`, `IN`, `BETWEEN`, `IS NULL`, `LIKE`, arithmetic and `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`.
 - **Non-correlated scalar subqueries** are supported in `WHERE`, `SELECT` and `JOIN … ON`, following SQLite's rules: an empty result becomes `NULL`, multiple rows use the first row, and the subquery must return one column.
 - **Uncorrelated `IN` / `NOT IN` subqueries** are supported with SQLite three-valued logic: an empty result is `false` (`true` for `NOT IN`), a `NULL` outer value is unknown, a `NULL` member makes `NOT IN` unknown, and the subquery must return exactly one column.
 - **Uncorrelated `EXISTS` / `NOT EXISTS`** are supported; the subquery's column count is irrelevant and only row presence affects the result.
 - **Non-recursive CTEs** (`WITH`) are supported: multiple definitions, chained dependencies, explicit column lists, and supported scalar / `IN` / `EXISTS` subqueries inside a CTE body.
-- **`UNION` and `UNION ALL`** compound selects are supported. Each `SELECT` branch is simulated as an independent query block and every branch feeds one shared compound stage. Branches are folded left-to-right, matching SQLite's left associativity: `A UNION B UNION ALL C` means `(A UNION B) UNION ALL C`. `UNION` removes duplicate rows across the accumulated result, treating `NULL` as equal to `NULL`; `UNION ALL` keeps every row, including duplicates. A trailing compound `ORDER BY` / `LIMIT` is applied after folding and belongs to the whole compound, not the last branch.
-- Not yet visualizable: **correlated** subqueries (including correlated `IN` / `EXISTS`), recursive CTEs (`WITH RECURSIVE`), compound selects using `INTERSECT` / `EXCEPT`, derived tables in `FROM`, `RIGHT`/`FULL OUTER JOIN`, window functions, `CASE`, and other constructs the parser cannot model conservatively.
-- `INTERSECT` and `EXCEPT` are not parsed by the current `node-sql-parser` version, so they are reported as unsupported rather than partially analyzed.
+- **`UNION`, `UNION ALL`, `INTERSECT` and `EXCEPT`** compound selects are supported. Each `SELECT` branch is simulated independently, then operators fold strictly left-to-right: `A UNION B INTERSECT C` means `(A UNION B) INTERSECT C`, not `A UNION (B INTERSECT C)`. `UNION` removes duplicates across the accumulated result, `UNION ALL` preserves them until a later distinct operator, `INTERSECT` keeps distinct rows present in both inputs, and `EXCEPT` keeps distinct left rows absent from the right. Comparisons use complete rows with NULL-safe keys, so corresponding NULLs compare equal. Branches must return matching column counts, and the first branch names the output columns. Root `ORDER BY` and `LIMIT` / `OFFSET` apply after the complete chain. Each operation exposes its accumulated left input, next right input, retained rows, excluded rows and duplicates in the canvas, playback and inspector. Table View shows the final compound result and first-branch column names.
+- Not yet visualizable: **correlated** subqueries (including correlated `IN` / `EXISTS`), recursive CTEs (`WITH RECURSIVE`), nested compound forms not covered by the existing nested-block interpreter, derived tables in `FROM`, `RIGHT`/`FULL OUTER JOIN`, window functions, `CASE`, and other constructs the parser cannot model conservatively. `INTERSECT ALL`, `EXCEPT ALL`, `UNION DISTINCT` and `INTERSECT DISTINCT` are rejected explicitly rather than approximated.
+- The current `node-sql-parser` grammar does not parse every compound form. A quote/comment/parenthesis-aware splitter preserves branch SQL and root clauses as a safe fallback for `INTERSECT`, `EXCEPT` and mixed chains; unsupported or malformed forms return explicit reasons.
 - Large inputs are capped for visualization (500 rows, 2,000 events). The real SQLite result remains complete and is never truncated.
 
 See [docs/FEATURES.md](docs/FEATURES.md) for the full capability and limitation matrix.
@@ -339,11 +339,12 @@ their implementation.
 - **Storage is browser-managed.** Clearing site data removes databases, history and saved queries.
   Private browsing modes may reject IndexedDB writes.
 - **Single user.** Concurrent editing from multiple tabs is not coordinated.
-- **`SELECT` visualization.** Supported `SELECT` statements, including `UNION` / `UNION ALL` compounds, can be visualized. DDL, DML, transactions and other statements execute in SQLite but cannot be visualized.
+- **`SELECT` visualization.** Supported `SELECT` statements, including `UNION`, `UNION ALL`, `INTERSECT` and `EXCEPT` compounds, can be visualized. DDL, DML, transactions and other statements execute in SQLite but cannot be visualized.
 - **Unsupported SELECT constructs.** Correlated subqueries (including correlated `IN` / `EXISTS`),
-  recursive CTEs (`WITH RECURSIVE`), compound selects using `INTERSECT` / `EXCEPT`, derived tables,
-  `RIGHT`/`FULL OUTER JOIN`, `CASE`, window functions and non-constant `LIMIT`/`OFFSET` are reported
-  instead of approximated.
+  recursive CTEs (`WITH RECURSIVE`), nested compound forms not covered by the existing nested-block
+  interpreter, derived tables, `RIGHT`/`FULL OUTER JOIN`, `CASE`, window functions and non-constant
+  `LIMIT`/`OFFSET` are reported instead of approximated. `INTERSECT ALL`, `EXCEPT ALL`, `UNION DISTINCT`
+  and `INTERSECT DISTINCT` are also rejected explicitly.
 - **Simulation caps.** Visualization is capped at 500 rows and 2,000 events; source previews show up
   to 12 rows. Real SQLite output is never truncated.
 - **Educational model, not a query planner.** The simulator models logical stages only; it does not
@@ -369,19 +370,19 @@ The roadmap is directional, not a release commitment.
 - [x] Non-correlated scalar subqueries simulated as nested pipelines
 - [x] Non-recursive CTEs (multiple, chained, explicit columns) with query-block playback and dependency tracing
 - [x] Uncorrelated `IN` / `NOT IN` and `EXISTS` / `NOT EXISTS` subqueries with SQLite three-valued logic
-- [x] `UNION` / `UNION ALL` compound selects with an independent pipeline per branch, a shared compound stage and SQLite parity
+- [x] `UNION` / `UNION ALL` compound selects with independent branch pipelines and SQLite parity
+- [x] `INTERSECT` / `EXCEPT` and mixed compound chains with left-to-right operation snapshots, canvas tracing, inspector inputs and excluded-row inspection
 - [x] SQLite result-parity validation and conservative unsupported-query reporting
 
 ### 🚧 Next up
 
-- [ ] `INTERSECT` / `EXCEPT` compound selects, subject to parser support
+- [ ] Guided SQL exercises built on the explanation and knowledge-check panels
 
 ### 🧭 Planned
 
 - [ ] Recursive CTEs (`WITH RECURSIVE`)
 - [ ] General correlated subquery evaluation, scope-aware and SQLite-validated
 - [ ] Derived tables in `FROM` / `JOIN`
-- [ ] Guided SQL exercises built on the explanation and knowledge-check panels
 - [ ] Shareable visualization traces
 - [ ] Export a visualization as an image or recording
 - [ ] A hosted public demo build

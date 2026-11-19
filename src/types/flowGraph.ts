@@ -65,6 +65,8 @@ export interface FlowGraphNode {
    * Playback compares this, never the bare stage name.
    */
   stageKey?: string | null
+  /** Compound operation represented by this node, when applicable. */
+  compoundOperationId?: string
   label: string
   /** Secondary line, e.g. a condition or column summary. */
   detail?: string

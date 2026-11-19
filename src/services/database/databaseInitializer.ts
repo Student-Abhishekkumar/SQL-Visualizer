@@ -51,8 +51,8 @@ export async function resetDatabase(config?: SqlJsConfig): Promise<DatabaseSchem
 /** Persist the active database after a mutating statement. */
 export async function persistDatabase(
   db: NonNullable<ReturnType<typeof getLiveDatabase>>,
-): Promise<void> {
-  await persistActiveDatabase(db)
+): Promise<boolean> {
+  return persistActiveDatabase(db)
 }
 
 /** Close the live connection (used by tests and hot reloads). */

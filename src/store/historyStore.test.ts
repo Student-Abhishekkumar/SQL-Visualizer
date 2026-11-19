@@ -1,5 +1,5 @@
 import 'fake-indexeddb/auto'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useHistoryStore } from './historyStore'
 import {
   clearHistory,
@@ -7,7 +7,7 @@ import {
   loadHistory,
   loadSavedQueries,
 } from '../services/persistence/persistenceService'
-import type { QueryExecutionResult } from '../types/query'
+import type { HistoryEntry, QueryExecutionResult } from '../types/query'
 
 /**
  * History/saved-query behavior with a real (fake-indexeddb) IndexedDB,
@@ -28,6 +28,37 @@ function makeResult(overrides: Partial<QueryExecutionResult> = {}): QueryExecuti
   }
 }
 
+function makeHistoryEntry(index: number): HistoryEntry {
+  return {
+    id: `history-${index}`,
+    sql: `SELECT ${index}`,
+    timestamp: index,
+    success: true,
+    executionTime: index / 10,
+    rowCount: index,
+    statementType: 'SELECT',
+    databaseId: index % 2 === 0 ? 'database-even' : 'database-odd',
+  }
+}
+
+/** Seed legacy overflow directly, bypassing the new capped write API. */
+async function seedHistory(entries: readonly HistoryEntry[]): Promise<void> {
+  const request = indexedDB.open('sql-visualizer')
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error)
+  })
+  const transaction = db.transaction('history', 'readwrite')
+  const store = transaction.objectStore('history')
+  for (const entry of entries) store.put(entry)
+  await new Promise<void>((resolve, reject) => {
+    transaction.oncomplete = () => resolve()
+    transaction.onerror = () => reject(transaction.error)
+    transaction.onabort = () => reject(transaction.error)
+  })
+  db.close()
+}
+
 beforeEach(async () => {
   // Reset the module state and underlying storage between tests.
   useHistoryStore.setState({
@@ -37,6 +68,10 @@ beforeEach(async () => {
   })
   await clearHistory()
   await clearSavedQueries()
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
 })
 
 describe('historyStore', () => {
@@ -71,6 +106,85 @@ describe('historyStore', () => {
     // And the store hydrates from storage.
     await useHistoryStore.getState().loadFromStorage()
     expect(useHistoryStore.getState().history[0]?.sql).toBe('SELECT 42')
+  })
+
+  it('persists only the newest 200 entries and preserves their metadata', async () => {
+    const writes: Promise<void>[] = []
+    for (let index = 1; index <= 205; index += 1) {
+      writes.push(useHistoryStore.getState().recordExecution(makeResult({
+        query: `SELECT ${index}`,
+        databaseId: index % 2 === 0 ? 'database-even' : 'database-odd',
+        executionTime: index / 10,
+        rowCount: index,
+      })))
+    }
+    await Promise.all(writes)
+
+    const history = useHistoryStore.getState().history
+    expect(history).toHaveLength(200)
+    expect(history[0]?.sql).toBe('SELECT 205')
+    expect(history[199]?.sql).toBe('SELECT 6')
+
+    const persisted = await loadHistory()
+    expect(persisted).toHaveLength(200)
+    expect(persisted.map((entry) => entry.sql)).toEqual(history.map((entry) => entry.sql))
+    for (const entry of persisted) {
+      const index = Number(entry.sql.replace('SELECT ', ''))
+      expect(entry.databaseId).toBe(index % 2 === 0 ? 'database-even' : 'database-odd')
+      expect(entry.executionTime).toBe(index / 10)
+      expect(entry.rowCount).toBe(index)
+    }
+  })
+
+  it('trims legacy overflow during hydration without rewriting valid data on reload', async () => {
+    await seedHistory(Array.from({ length: 205 }, (_, index) => makeHistoryEntry(index + 1)))
+    const deleteSpy = vi.spyOn(IDBObjectStore.prototype, 'delete')
+
+    await useHistoryStore.getState().loadFromStorage()
+    expect(deleteSpy).toHaveBeenCalledTimes(5)
+    expect(useHistoryStore.getState().history.map((entry) => entry.timestamp)).toEqual(
+      Array.from({ length: 200 }, (_, index) => 205 - index),
+    )
+    expect(useHistoryStore.getState().history[0]?.databaseId).toBe('database-odd')
+
+    useHistoryStore.setState({ history: [], loaded: false })
+    deleteSpy.mockClear()
+    await useHistoryStore.getState().loadFromStorage()
+    expect(deleteSpy).not.toHaveBeenCalled()
+    expect(useHistoryStore.getState().history).toHaveLength(200)
+    expect(useHistoryStore.getState().history[0]?.sql).toBe('SELECT 205')
+    expect(useHistoryStore.getState().history[199]?.sql).toBe('SELECT 6')
+    expect(await loadHistory()).toHaveLength(200)
+  })
+
+  it('merges entries recorded during and immediately after hydration', async () => {
+    await seedHistory([makeHistoryEntry(1)])
+    const hydration = useHistoryStore.getState().loadFromStorage()
+    const during = useHistoryStore.getState().recordExecution(makeResult({
+      query: 'SELECT during hydration',
+      databaseId: 'database-live',
+    }))
+    await Promise.all([hydration, during])
+
+    expect(useHistoryStore.getState().history.map((entry) => entry.sql)).toEqual([
+      'SELECT during hydration',
+      'SELECT 1',
+    ])
+    await useHistoryStore.getState().recordExecution(makeResult({ query: 'SELECT after hydration' }))
+    expect(useHistoryStore.getState().history.map((entry) => entry.sql)).toEqual([
+      'SELECT after hydration',
+      'SELECT during hydration',
+      'SELECT 1',
+    ])
+
+    useHistoryStore.setState({ history: [], loaded: false })
+    await useHistoryStore.getState().loadFromStorage()
+    expect(useHistoryStore.getState().history.map((entry) => entry.sql)).toEqual([
+      'SELECT after hydration',
+      'SELECT during hydration',
+      'SELECT 1',
+    ])
+    expect(useHistoryStore.getState().history[1]?.databaseId).toBe('database-live')
   })
 
   it('deletes single entries and clears everything', async () => {

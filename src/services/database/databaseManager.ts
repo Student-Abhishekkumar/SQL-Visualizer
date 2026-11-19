@@ -19,7 +19,7 @@ import {
   getSchemaStats,
   quoteIdentifier,
 } from './schemaService'
-import { SQLiteDatabase } from './sqliteService'
+import { SQLiteDatabase, loadSqlJs } from './sqliteService'
 import {
   EXAMPLE_DATABASE_DESCRIPTION,
   EXAMPLE_DATABASE_NAME,
@@ -103,6 +103,23 @@ export interface DatabaseActionResult {
 export interface DeleteDatabaseResult {
   activeDatabaseId: string | null
   schema: DatabaseSchema | null
+}
+
+export type DatabaseRestoreFailure =
+  | 'missing-snapshot'
+  | 'snapshot-read-failed'
+  | 'corrupt-snapshot'
+  | 'restore-failed'
+
+/** A recovery failure that never replaces the stored snapshot or live connection. */
+export class DatabaseRestoreError extends Error {
+  readonly failure: DatabaseRestoreFailure
+
+  constructor(failure: DatabaseRestoreFailure, message: string, cause?: unknown) {
+    super(message, { cause })
+    this.name = 'DatabaseRestoreError'
+    this.failure = failure
+  }
 }
 
 // ------------------------------ Read access -------------------------------
@@ -224,33 +241,55 @@ export async function openDatabase(
     return getDatabaseSchema(liveDatabase, info.name)
   }
 
-  const snapshot = await loadDatabaseSnapshot(id)
-  let next: SQLiteDatabase | null = null
-
-  if (snapshot && snapshot.byteLength > 0) {
-    try {
-      const restored = await SQLiteDatabase.create(config, snapshot)
-      // Ensure the bytes are a real, readable SQLite database.
-      restored.queryAll('SELECT name FROM sqlite_master LIMIT 1')
-      next = restored
-    } catch {
-      next?.close()
-      next = null
-    }
-  }
-
-  if (next === null) {
-    // Missing or corrupt snapshot: rebuild from the database's template.
-    next = await SQLiteDatabase.create(config)
-    const setup = templateSetupSql(
-      info.template === 'imported' ? 'blank' : info.template,
-      info.setupSql,
+  let snapshot: Uint8Array | null
+  try {
+    snapshot = await loadDatabaseSnapshot(id)
+  } catch (error) {
+    throw new DatabaseRestoreError(
+      'snapshot-read-failed',
+      `Could not read the stored snapshot for “${info.name}”. The current database and stored data were not changed. Check browser storage and retry.`,
+      error,
     )
-    if (setup.trim() !== '') next.runRaw(setup)
-    await saveDatabaseSnapshot(next.exportSnapshot(), id)
   }
 
-  const schema = getDatabaseSchema(next, info.name)
+  if (snapshot === null || snapshot.byteLength === 0) {
+    throw new DatabaseRestoreError(
+      'missing-snapshot',
+      `The stored snapshot for “${info.name}” is missing. No replacement database was created and no data was overwritten. Restore a valid backup or explicitly reset the database.`,
+    )
+  }
+
+  // Keep WASM initialization failures distinct from invalid snapshot bytes.
+  await loadSqlJs(config)
+  let next: SQLiteDatabase | null = null
+  try {
+    next = await SQLiteDatabase.create(config, snapshot)
+    const integrity = next.queryOne('PRAGMA integrity_check')
+    const verdict = String(integrity?.row[0] ?? '')
+    if (verdict.toLowerCase() !== 'ok') {
+      throw new Error(`SQLite integrity check failed: ${verdict || 'unknown error'}.`)
+    }
+    next.queryAll('SELECT name FROM sqlite_master LIMIT 1')
+  } catch (error) {
+    next?.close()
+    throw new DatabaseRestoreError(
+      'corrupt-snapshot',
+      `The stored snapshot for “${info.name}” is corrupt or unreadable. It was not replaced and the current database was not changed. Restore a valid backup, then retry.`,
+      error,
+    )
+  }
+
+  let schema: DatabaseSchema
+  try {
+    schema = getDatabaseSchema(next, info.name)
+  } catch (error) {
+    next.close()
+    throw new DatabaseRestoreError(
+      'restore-failed',
+      `The snapshot for “${info.name}” opened, but its schema could not be restored. Stored data was not changed; retry or restore a valid backup.`,
+      error,
+    )
+  }
 
   liveDatabase?.close()
   liveDatabase = next
@@ -546,17 +585,18 @@ export async function resetDatabase(
  */
 export async function persistActiveDatabase(
   db: SQLiteDatabase | null = liveDatabase,
-): Promise<void> {
-  if (db === null || liveDatabase === null || db !== liveDatabase) return
+): Promise<boolean> {
+  if (db === null || liveDatabase === null || db !== liveDatabase) return true
   const id = activeDatabaseId
-  if (id === null) return
+  if (id === null) return true
   const info = databases.find((database) => database.id === id)
-  if (!info) return
+  if (!info) return true
 
   const schema = getDatabaseSchema(db, info.name)
   const bytes = db.exportSnapshot()
-  await saveDatabaseSnapshot(bytes, id)
-  await syncRecordStats(info, schema, { touch: true, bytes })
+  const snapshotSaved = await saveDatabaseSnapshot(bytes, id)
+  if (!snapshotSaved) return false
+  return syncRecordStats(info, schema, { touch: true, bytes })
 }
 
 /** Read the raw SQLite snapshot of a database (active or stored). */
@@ -726,7 +766,7 @@ async function syncRecordStats(
   info: DatabaseInfo,
   schema: DatabaseSchema,
   options: { touch: boolean; bytes?: Uint8Array },
-): Promise<void> {
+): Promise<boolean> {
   const sizeBytes = options.bytes?.byteLength ?? info.sizeBytes
   const updated: DatabaseInfo = {
     ...info,
@@ -735,7 +775,7 @@ async function syncRecordStats(
     updatedAt: options.touch ? Date.now() : info.updatedAt,
   }
   replaceRecord(updated)
-  await saveDatabaseRecord(updated)
+  return saveDatabaseRecord(updated)
 }
 
 function requireDatabase(id: string): DatabaseInfo {

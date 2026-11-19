@@ -16,7 +16,8 @@ interface TransformationPanelProps {
   inspecting: boolean
 }
 
-function StageDescription({ stage }: { stage: VisualizedStage }) {
+function StageDescription({ snapshot }: { snapshot: StageSnapshot }) {
+  const stage = snapshot.stage
   switch (stage) {
     case 'WHERE':
       return 'Red rows failed the condition and are filtered out; remaining rows continue.'
@@ -27,7 +28,7 @@ function StageDescription({ stage }: { stage: VisualizedStage }) {
     case 'DISTINCT':
       return 'Duplicate projected rows are struck through and removed.'
     case 'COMPOUND':
-      return 'The SELECT branches are combined here; UNION strikes through duplicates it removes, UNION ALL keeps every row.'
+      return snapshot.explanation
     case 'ORDER_BY':
       return 'Rows animate into their sorted positions.'
     case 'LIMIT':
@@ -67,7 +68,7 @@ export function TransformationPanel({ snapshot, activeStage, inspecting }: Trans
   const isGroupStage = snapshot.groups.length > 0
   const showRemoved =
     snapshot.removedRows.length > 0 &&
-    (snapshot.stage === 'WHERE' || snapshot.stage === 'HAVING' || snapshot.stage === 'DISTINCT' || snapshot.stage === 'LIMIT')
+    (snapshot.stage === 'WHERE' || snapshot.stage === 'HAVING' || snapshot.stage === 'DISTINCT' || snapshot.stage === 'COMPOUND' || snapshot.stage === 'LIMIT')
 
   return (
     <section
@@ -87,7 +88,7 @@ export function TransformationPanel({ snapshot, activeStage, inspecting }: Trans
             )}
           </div>
           <p className="mt-0.5 text-[11px] text-text-muted">
-            <StageDescription stage={snapshot.stage} />
+            <StageDescription snapshot={snapshot} />
           </p>
         </div>
         <div className="flex items-center gap-2 text-[11px] tabular-nums text-text-muted">

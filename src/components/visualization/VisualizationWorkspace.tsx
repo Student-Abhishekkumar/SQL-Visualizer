@@ -296,6 +296,11 @@ export function VisualizationWorkspace({
     if (trace === null) return new Set<string>()
     const keys = new Set<string>()
     for (const stage of trace.stages) keys.add(stageKeyFor(rootId, stage, rootId ?? undefined))
+    for (const operation of trace.compound?.operations ?? []) {
+      keys.add(
+        stageKeyFor(rootId, 'COMPOUND', rootId ?? undefined, operation.snapshot.compoundOperationId),
+      )
+    }
     for (const block of trace.nestedQueries ?? []) {
       for (const snapshot of block.stageSnapshots) {
         keys.add(stageKeyFor(block.id, snapshot.stage, rootId ?? undefined))
@@ -427,8 +432,9 @@ export function VisualizationWorkspace({
             </ul>
           ) : (
             <p className="max-w-md text-xs leading-relaxed text-text-muted">
-              Run a single SELECT query, then press Visualize to see how SQL
-              processes it stage by stage.
+              Run a supported SELECT query — including CTEs, IN / EXISTS
+              subqueries, and UNION / UNION ALL — then press Visualize to see
+              how SQL processes it stage by stage.
             </p>
           )}
           {actualRowCount !== null && (

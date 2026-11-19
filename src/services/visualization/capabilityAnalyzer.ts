@@ -127,7 +127,7 @@ export function analyzeCapability(
   const detected: DetectedConstruct[] = []
   const warnings: DetectedConstruct[] = []
 
-  // --- compound SELECT (UNION / UNION ALL) --------------------------------
+  // --- compound SELECT (set operations) -----------------------------------
   // The synthetic compound root has no FROM of its own; every fact worth
   // reporting comes from its independent SELECT branches.
   if (structure.compound !== null) {

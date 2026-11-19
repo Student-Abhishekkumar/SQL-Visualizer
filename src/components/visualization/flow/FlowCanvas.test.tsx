@@ -912,6 +912,31 @@ describe('FlowCanvas', () => {
     expect(surface.style.transform).toBe('translate(0px) scale(1)')
   })
 
+  it('fits a negative-position node without changing its coordinates', () => {
+    const width = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800)
+    const height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600)
+    try {
+      const singleGraph: FlowGraph = {
+        ...graph,
+        nodes: [{ ...graph.nodes[0]!, x: -200, y: -100, width: 200, height: 100 }],
+        edges: [],
+      }
+      const state = deriveFlowState(singleGraph, new Set(['FROM']), 'FROM', false)
+      renderGraph(singleGraph, state)
+      const canvas = screen.getByRole('application')
+
+      fireEvent.click(screen.getByRole('button', { name: 'Fit to screen' }))
+      const surface = canvas.firstElementChild as HTMLElement
+      expect(surface.style.transform).toBe('translate(620px, 410px) scale(2.2)')
+      const node = screen.getByRole('button', { name: /Source table employees/ })
+      expect(node.style.left).toBe('-200px')
+      expect(node.style.top).toBe('-100px')
+    } finally {
+      width.mockRestore()
+      height.mockRestore()
+    }
+  })
+
   it('keeps the graph point under the pointer fixed after panning', () => {
     renderCanvas()
     const canvas = screen.getByRole('application')
@@ -982,6 +1007,52 @@ describe('FlowCanvas', () => {
 
     expect(Number.parseFloat(where.style.left)).toBeCloseTo(beforeLeft + 100, 5)
     expect(Number.parseFloat(where.style.top)).toBeCloseTo(beforeTop + 100, 5)
+  })
+
+  it('allows left-of-origin drags at non-default zoom without clipping wire geometry', () => {
+    const { onSelectNode } = renderCanvas()
+    const canvas = screen.getByRole('application')
+    const source = screen.getByRole('button', { name: /Source table employees/ })
+    const sourceNode = graph.nodes.find((node) => node.table?.name === 'employees')!
+    const outgoing = graph.edges.find((edge) => edge.from === sourceNode.id)!
+    fireEvent.wheel(canvas, { deltaY: -100, clientX: 120, clientY: 90 })
+    expect(screen.getByText('120%')).toBeTruthy()
+
+    fireEvent.pointerDown(source, { button: 0, pointerId: 901, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(canvas, { pointerId: 901, clientX: -470, clientY: 10 })
+    fireEvent.pointerUp(canvas, { pointerId: 901 })
+
+    // 480 screen px at 120% zoom is 400 graph px to the left of the origin.
+    expect(Number.parseFloat(source.style.left)).toBeCloseTo(-400, 5)
+    expect(document.getElementById(`edge-path-${outgoing.id}`)!.getAttribute('d')).toMatch(/^M -/)
+    const svg = canvas.querySelector('svg')!
+    expect(svg.classList.contains('overflow-visible')).toBe(true)
+    expect(svg.classList.contains('pointer-events-none')).toBe(true)
+    expect(onSelectNode).not.toHaveBeenCalled()
+
+    // Dragging still does not select; a subsequent deliberate click does.
+    fireEvent.pointerDown(source, { button: 0, pointerId: 902, clientX: 10, clientY: 10 })
+    fireEvent.pointerUp(canvas, { pointerId: 902 })
+    fireEvent.click(source)
+    expect(onSelectNode).toHaveBeenCalledTimes(1)
+  })
+
+  it('pans normally after moving a node left of the origin', () => {
+    renderCanvas()
+    const canvas = screen.getByRole('application')
+    const surface = canvas.firstElementChild as HTMLElement
+    const source = screen.getByRole('button', { name: /Source table employees/ })
+
+    fireEvent.pointerDown(source, { button: 0, pointerId: 903, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(canvas, { pointerId: 903, clientX: -190, clientY: 10 })
+    fireEvent.pointerUp(canvas, { pointerId: 903 })
+    expect(Number.parseFloat(source.style.left)).toBeCloseTo(-200, 5)
+
+    fireEvent.pointerDown(canvas, { button: 0, pointerId: 904, clientX: 100, clientY: 100 })
+    fireEvent.pointerMove(canvas, { pointerId: 904, clientX: 160, clientY: 130 })
+    fireEvent.pointerUp(canvas, { pointerId: 904 })
+    expect(surface.style.transform).toBe('translate(60px, 30px) scale(1)')
+    expect(Number.parseFloat(source.style.left)).toBeCloseTo(-200, 5)
   })
 
   it('drags a node and re-routes its real connections without panning the camera', () => {

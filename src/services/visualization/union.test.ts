@@ -96,15 +96,11 @@ describe('UNION / UNION ALL interpretation', () => {
     }
   })
 
-  it('reports compound capability and stages without claiming INTERSECT support', () => {
+  it('reports compound capability and stages', () => {
     const capability = analyzeCapability(interpret('SELECT id FROM a UNION ALL SELECT id FROM b'))
     expect(capability.supported).toBe(true)
     expect(capability.supportedStages).toEqual(['COMPOUND'])
     expect(capability.detected.some((entry) => entry.kind === 'compound')).toBe(true)
-
-    const unsupported = interpret('SELECT id FROM a INTERSECT SELECT id FROM b')
-    expect(unsupported.structure).toBeNull()
-    expect(unsupported.unsupportedReasons.length).toBeGreaterThan(0)
   })
 })
 

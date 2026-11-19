@@ -10,8 +10,8 @@
  *
  * The solver is deliberately small and dependency-free. It works on
  * rectangles (real widths/heights, including an expanded preview's
- * height), keeps nodes inside a positive coordinate space, and is fully
- * deterministic for identical input.
+ * height), supports positions on either side of the graph origin, and is
+ * fully deterministic for identical input.
  */
 
 export interface FlowLayoutBox {
@@ -35,13 +35,11 @@ export interface FlowLayoutOptions {
   pinnedId: string
   gapX?: number
   gapY?: number
-  margin?: number
   maxPasses?: number
 }
 
 export const FLOW_LAYOUT_GAP_X = 24
 export const FLOW_LAYOUT_GAP_Y = 12
-export const FLOW_LAYOUT_MARGIN = 16
 
 /** Canvas breathing room after the outermost node. */
 const BOUNDS_PADDING = 48
@@ -73,15 +71,11 @@ interface AxisCandidate {
   horizontal: boolean
 }
 
-function clamp(value: number, minimum: number): number {
-  return Math.max(minimum, value)
-}
-
 /**
  * Compute the smallest move for `mover` that clears `other`. Preferred
- * directions point away from the other node; if that would leave the
- * canvas or still overlap, the opposite direction is considered. Moving
- * along the node's own column is always preferred over sideways moves.
+ * directions point away from the other node; the opposite direction is
+ * considered when it clears the overlap for a lower cost. Moving along
+ * the node's own column is always preferred over sideways moves.
  */
 function separateBoxes(
   mover: FlowLayoutBox,
@@ -90,7 +84,6 @@ function separateBoxes(
   otherPos: { x: number; y: number },
   gapX: number,
   gapY: number,
-  margin: number,
 ): { x: number; y: number } {
   const sameColumn = Math.abs(mover.column - other.column) < 0.5
   const moverCenterX = moverPos.x + mover.width / 2
@@ -118,16 +111,16 @@ function separateBoxes(
 
   let best: { x: number; y: number; cost: number; clears: boolean } | null = null
   for (const candidate of candidates) {
-    const x = clamp(candidate.axis === 'x' ? moverPos.x + candidate.delta : moverPos.x, margin)
-    const y = clamp(candidate.axis === 'y' ? moverPos.y + candidate.delta : moverPos.y, margin)
+    const x = candidate.axis === 'x' ? moverPos.x + candidate.delta : moverPos.x
+    const y = candidate.axis === 'y' ? moverPos.y + candidate.delta : moverPos.y
     const clears = !flowBoxesOverlap(
       { x, y, width: mover.width, height: mover.height },
       { ...otherPos, width: other.width, height: other.height },
       gapX,
       gapY,
     )
-    // Distance actually travelled after clamping. Sideways moves get a
-    // small penalty so the vertical pipeline stays the default.
+    // Distance actually travelled. Sideways moves get a small penalty so
+    // the vertical pipeline stays the default.
     const distance = Math.hypot(x - moverPos.x, y - moverPos.y)
     const cost = distance * (candidate.horizontal ? 1.15 : 1) * (candidate.preferred ? 1 : 1.2)
     if (best === null || (clears && !best.clears) || (clears === best.clears && cost < best.cost)) {
@@ -169,7 +162,6 @@ export function resolveFlowLayout(
 ): Map<string, { x: number; y: number }> {
   const gapX = options.gapX ?? FLOW_LAYOUT_GAP_X
   const gapY = options.gapY ?? FLOW_LAYOUT_GAP_Y
-  const margin = options.margin ?? FLOW_LAYOUT_MARGIN
   const maxPasses = options.maxPasses ?? 24
 
   const positions = new Map<string, { x: number; y: number }>(
@@ -211,7 +203,7 @@ export function resolveFlowLayout(
         if (moverPos === undefined || otherPos === undefined) continue
         positions.set(
           mover.id,
-          separateBoxes(mover, moverPos, other, otherPos, gapX, gapY, margin),
+          separateBoxes(mover, moverPos, other, otherPos, gapX, gapY),
         )
         dirty.add(mover.id)
         dirty.add(other.id)
@@ -222,6 +214,62 @@ export function resolveFlowLayout(
   }
 
   return positions
+}
+
+export interface FlowFitBounds {
+  left: number
+  top: number
+  right: number
+  bottom: number
+  width: number
+  height: number
+}
+
+/** True bounds of every visible node rectangle, on either side of the origin. */
+export function measureFlowFitBounds(
+  boxes: readonly FlowLayoutExtentBox[],
+): FlowFitBounds | null {
+  if (boxes.length === 0) return null
+  let left = Number.POSITIVE_INFINITY
+  let top = Number.POSITIVE_INFINITY
+  let right = Number.NEGATIVE_INFINITY
+  let bottom = Number.NEGATIVE_INFINITY
+  for (const box of boxes) {
+    left = Math.min(left, box.x)
+    top = Math.min(top, box.y)
+    right = Math.max(right, box.x + box.width)
+    bottom = Math.max(bottom, box.y + box.height)
+  }
+  return { left, top, right, bottom, width: right - left, height: bottom - top }
+}
+
+export interface FlowFitViewport {
+  width: number
+  height: number
+  padding: number
+  minZoom: number
+  maxZoom: number
+}
+
+/** Fit and centre complete node bounds without modifying any node position. */
+export function fitFlowLayout(
+  boxes: readonly FlowLayoutExtentBox[],
+  viewport: FlowFitViewport,
+): { zoom: number; panX: number; panY: number } | null {
+  const bounds = measureFlowFitBounds(boxes)
+  if (bounds === null) return null
+  const availableWidth = Math.max(1, viewport.width - viewport.padding * 2)
+  const availableHeight = Math.max(1, viewport.height - viewport.padding * 2)
+  const scale = Math.min(
+    availableWidth / Math.max(bounds.width, 1),
+    availableHeight / Math.max(bounds.height, 1),
+  )
+  const zoom = Math.min(viewport.maxZoom, Math.max(viewport.minZoom, scale))
+  return {
+    zoom,
+    panX: (viewport.width - bounds.width * zoom) / 2 - bounds.left * zoom,
+    panY: (viewport.height - bounds.height * zoom) / 2 - bounds.top * zoom,
+  }
 }
 
 export interface FlowLayoutExtentBox {

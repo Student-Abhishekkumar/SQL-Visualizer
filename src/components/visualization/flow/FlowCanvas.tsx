@@ -15,7 +15,7 @@ import {
   routeEdgeCurve,
 } from '../../../services/visualization/flowGeometry'
 import {
-  FLOW_LAYOUT_MARGIN,
+  fitFlowLayout,
   measureFlowLayout,
   resolveFlowLayout,
 } from '../../../services/visualization/flowLayout'
@@ -285,22 +285,23 @@ export function FlowCanvas({
   // The SVG surface follows the real node extents, so a node can always
   // be dragged or settled outside the builder's original bounds without
   // being clipped. The builder bounds stay as a minimum.
-  const canvasBounds = useMemo(
+  const nodeBoxes = useMemo(
     () =>
-      measureFlowLayout(
-        graph.nodes.map((node) => {
-          const placement = placements.get(node.id)
-          return {
-            x: placement?.x ?? node.x,
-            y: placement?.y ?? node.y,
-            width: node.width,
-            height: placement?.height ?? node.height,
-            side: node.kind === 'branch' || node.kind === 'group',
-          }
-        }),
-        graph.bounds,
-      ),
-    [graph.bounds, graph.nodes, placements],
+      graph.nodes.map((node) => {
+        const placement = placements.get(node.id)
+        return {
+          x: placement?.x ?? node.x,
+          y: placement?.y ?? node.y,
+          width: node.width,
+          height: placement?.height ?? node.height,
+          side: node.kind === 'branch' || node.kind === 'group',
+        }
+      }),
+    [graph.nodes, placements],
+  )
+  const canvasBounds = useMemo(
+    () => measureFlowLayout(nodeBoxes, graph.bounds),
+    [graph.bounds, nodeBoxes],
   )
 
   /** Position the camera: full fit, or width-fit anchored at the top. */
@@ -311,24 +312,31 @@ export function FlowCanvas({
       const { clientWidth, clientHeight } = container
       if (clientWidth === 0 || clientHeight === 0) return
       const padding = 30
-      const fitScale = Math.min(
-        (clientWidth - padding * 2) / canvasBounds.width,
-        (clientHeight - padding * 2) / canvasBounds.height,
-      )
+      if (mode === 'fit') {
+        const camera = fitFlowLayout(nodeBoxes, {
+          width: clientWidth,
+          height: clientHeight,
+          padding,
+          minZoom: MIN_ZOOM,
+          maxZoom: MAX_ZOOM,
+        })
+        if (camera === null) return
+        zoomRef.current = camera.zoom
+        setZoom(camera.zoom)
+        setPan({ x: camera.panX, y: camera.panY })
+        return
+      }
       const widthScale = (clientWidth - padding * 2) / Math.max(canvasBounds.flowWidth, 1)
-      const nextZoom = clampZoom(mode === 'fit' ? fitScale : Math.min(widthScale, 1))
-      const contentWidth = mode === 'fit' ? canvasBounds.width : canvasBounds.flowWidth
+      const nextZoom = clampZoom(Math.min(widthScale, 1))
+      const contentWidth = canvasBounds.flowWidth
       zoomRef.current = nextZoom
       setZoom(nextZoom)
       setPan({
         x: Math.max((clientWidth - contentWidth * nextZoom) / 2, 8),
-        y:
-          mode === 'fit'
-            ? Math.max((clientHeight - canvasBounds.height * nextZoom) / 2, 8)
-            : 12,
+        y: 12,
       })
     },
-    [canvasBounds, clampZoom],
+    [canvasBounds, clampZoom, nodeBoxes],
   )
 
   const fitToScreen = useCallback(() => applyCamera('fit'), [applyCamera])
@@ -570,8 +578,8 @@ export function FlowCanvas({
         const scale = zoomRef.current
         moveNode(
           drag.nodeId,
-          Math.max(FLOW_LAYOUT_MARGIN, drag.positionX + dx / scale),
-          Math.max(FLOW_LAYOUT_MARGIN, drag.positionY + dy / scale),
+          drag.positionX + dx / scale,
+          drag.positionY + dy / scale,
         )
         return
       }
@@ -961,7 +969,7 @@ export function FlowCanvas({
           }}
         >
           <svg
-            className="pointer-events-none absolute inset-0 z-0"
+            className="pointer-events-none absolute inset-0 z-0 overflow-visible"
             width={canvasBounds.width}
             height={canvasBounds.height}
             aria-hidden

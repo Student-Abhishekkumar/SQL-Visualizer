@@ -4,7 +4,6 @@ export type Theme = 'dark' | 'light'
 export type WorkspaceView = 'query' | 'canvas'
 
 const THEME_STORAGE_KEY = 'sql-visualizer-theme'
-const VIEW_STORAGE_KEY = 'sql-visualizer-view'
 
 function readStoredTheme(): Theme {
   if (typeof localStorage === 'undefined') return 'dark'
@@ -12,15 +11,6 @@ function readStoredTheme(): Theme {
     return localStorage.getItem(THEME_STORAGE_KEY) === 'light' ? 'light' : 'dark'
   } catch {
     return 'dark'
-  }
-}
-
-function readStoredView(): WorkspaceView {
-  if (typeof localStorage === 'undefined') return 'query'
-  try {
-    return localStorage.getItem(VIEW_STORAGE_KEY) === 'canvas' ? 'canvas' : 'query'
-  } catch {
-    return 'query'
   }
 }
 
@@ -34,7 +24,8 @@ function persist(key: string, value: string): void {
 
 /**
  * Application UI state: theme, workspace view, modal/drawer visibility.
- * Theme and the Query/Canvas choice are persisted to localStorage.
+ * Theme is persisted to localStorage. Workspace view is session-only and
+ * always starts on Query; an old persisted Canvas choice is ignored.
  */
 interface UIState {
   theme: Theme
@@ -71,16 +62,14 @@ export const useUIStore = create<UIState>()((set, get) => ({
     persist(THEME_STORAGE_KEY, next)
   },
 
-  workspaceView: readStoredView(),
+  workspaceView: 'query',
   setWorkspaceView: (view) => {
     if (get().workspaceView === view) return
     set({ workspaceView: view })
-    persist(VIEW_STORAGE_KEY, view)
   },
   toggleWorkspaceView: () => {
     const next = get().workspaceView === 'query' ? 'canvas' : 'query'
     set({ workspaceView: next })
-    persist(VIEW_STORAGE_KEY, next)
   },
 
   isSettingsOpen: false,

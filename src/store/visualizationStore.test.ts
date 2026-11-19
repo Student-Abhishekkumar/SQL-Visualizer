@@ -227,6 +227,18 @@ describe('playback state', () => {
 
     useVisualizationStore.getState().previous()
     expect(useVisualizationStore.getState().eventIndex).toBe(0)
+    expect(useVisualizationStore.getState().finished).toBe(false)
+
+    useVisualizationStore.getState().jumpToEnd()
+    expect(useVisualizationStore.getState().finished).toBe(true)
+    useVisualizationStore.getState().previous()
+    expect(useVisualizationStore.getState().eventIndex).toBe(5)
+    expect(useVisualizationStore.getState().finished).toBe(false)
+    expect(useVisualizationStore.getState().viewState.finished).toBe(false)
+    useVisualizationStore.getState().next()
+    expect(useVisualizationStore.getState().eventIndex).toBe(6)
+    expect(useVisualizationStore.getState().finished).toBe(true)
+    expect(useVisualizationStore.getState().viewState.finished).toBe(true)
   })
 
   it('seeks forward and backward to identical view states', () => {
@@ -246,6 +258,11 @@ describe('playback state', () => {
     useVisualizationStore.getState().seek(1)
     expect(useVisualizationStore.getState().viewState.snapshot).toBeNull()
     expect(useVisualizationStore.getState().playing).toBe(false)
+    expect(useVisualizationStore.getState().finished).toBe(false)
+    useVisualizationStore.getState().seek(6)
+    expect(useVisualizationStore.getState().finished).toBe(true)
+    useVisualizationStore.getState().seek(3)
+    expect(useVisualizationStore.getState().finished).toBe(false)
   })
 
   it('seeks to a stage completion by stage name', () => {
@@ -273,6 +290,52 @@ describe('playback state', () => {
     useVisualizationStore.getState().play()
     expect(useVisualizationStore.getState().eventIndex).toBe(0)
     expect(useVisualizationStore.getState().playing).toBe(true)
+  })
+
+  it('keeps an empty timeline unfinished and never schedules a playback loop', () => {
+    const store = useVisualizationStore.getState()
+    store.loadTrace({ ...makeTrace(), events: [], totalSteps: 0, stageSnapshots: [] })
+
+    for (const move of ['next', 'previous', 'jumpToEnd'] as const) {
+      useVisualizationStore.getState()[move]()
+      expect(useVisualizationStore.getState().eventIndex).toBe(0)
+      expect(useVisualizationStore.getState().finished).toBe(false)
+      expect(useVisualizationStore.getState().viewState.finished).toBe(false)
+    }
+    useVisualizationStore.getState().seek(99)
+    useVisualizationStore.getState().play()
+    expect(useVisualizationStore.getState().playing).toBe(false)
+    expect(useVisualizationStore.getState().finished).toBe(false)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('keeps a single-event timeline complete at its only valid cursor', () => {
+    const trace = makeTrace()
+    const store = useVisualizationStore.getState()
+    store.loadTrace({ ...trace, events: [trace.events[0]!], totalSteps: 1 })
+    expect(useVisualizationStore.getState().eventIndex).toBe(0)
+    expect(useVisualizationStore.getState().finished).toBe(true)
+    expect(useVisualizationStore.getState().viewState.finished).toBe(true)
+
+    useVisualizationStore.getState().previous()
+    expect(useVisualizationStore.getState().finished).toBe(true)
+    useVisualizationStore.getState().next()
+    expect(useVisualizationStore.getState().finished).toBe(true)
+    useVisualizationStore.getState().seek(0)
+    expect(useVisualizationStore.getState().finished).toBe(true)
+    useVisualizationStore.getState().restart()
+    expect(useVisualizationStore.getState().eventIndex).toBe(0)
+    expect(useVisualizationStore.getState().finished).toBe(true)
+  })
+
+  it('reuses one timer when play is requested repeatedly', () => {
+    const store = useVisualizationStore.getState()
+    store.loadTrace(makeTrace())
+    useVisualizationStore.getState().play()
+    useVisualizationStore.getState().play()
+    expect(vi.getTimerCount()).toBe(1)
+    useVisualizationStore.getState().pause()
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('loading a new trace invalidates the old playback (no stale data)', () => {

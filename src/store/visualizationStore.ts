@@ -107,6 +107,11 @@ interface VisualizationState {
   tick: () => void
 }
 
+/** Completion is cursor-derived; an empty timeline is never finished. */
+function playbackFinished(eventIndex: number, eventCount: number): boolean {
+  return eventCount > 0 && eventIndex === eventCount - 1
+}
+
 /** Fold events[0..eventIndex] into the view state. */
 export function foldEvents(
   events: VisualizationEvent[],
@@ -131,6 +136,7 @@ export function foldEvents(
         candidate.snapshot.blockId ?? candidate.blockId,
         candidate.snapshot.stage,
         rootBlockId,
+        candidate.snapshot.compoundOperationId,
       )
       if (!seenStages.has(key)) {
         seenStages.add(key)
@@ -145,9 +151,11 @@ export function foldEvents(
       ? event.stage
       : null
   const activeStageKey =
-    activeStage !== null ? stageKeyFor(event?.blockId, activeStage, rootBlockId) : null
+    activeStage !== null
+      ? stageKeyFor(event?.blockId, activeStage, rootBlockId, event?.compoundOperationId)
+      : null
 
-  const finished = clamped >= events.length - 1
+  const finished = playbackFinished(clamped, events.length)
 
   return {
     eventIndex: clamped,
@@ -217,7 +225,7 @@ function scheduleNextTick(
   if (!state.playing || state.trace === null) return
   const last = timelineOf(state).length - 1
   if (state.eventIndex >= last) {
-    set({ playing: false, finished: true })
+    set({ playing: false, finished: playbackFinished(state.eventIndex, last + 1) })
     return
   }
   timerId = setTimeout(() => {
@@ -296,7 +304,7 @@ export const useVisualizationStore = create<VisualizationState>()((set, get) => 
         0,
         rootBlockIdOf(outcome.simulation.trace),
       ),
-      finished: false,
+      finished: playbackFinished(0, outcome.simulation.trace.events.length),
       sessionId,
       status: 'ready',
       unavailableReasons: [],
@@ -315,7 +323,7 @@ export const useVisualizationStore = create<VisualizationState>()((set, get) => 
       eventIndex: 0,
       playing: false,
       viewState: foldEvents(trace.events, 0, rootBlockIdOf(trace)),
-      finished: false,
+      finished: playbackFinished(0, trace.events.length),
       sessionId,
       databaseId: getActiveDatabaseId(),
     })
@@ -343,7 +351,7 @@ export const useVisualizationStore = create<VisualizationState>()((set, get) => 
       activeBlockId: resolved,
       eventIndex: 0,
       playing: false,
-      finished: false,
+      finished: playbackFinished(0, timelineOf(next).length),
       sessionId,
       viewState: viewAt(next, 0),
     })
@@ -387,6 +395,11 @@ export const useVisualizationStore = create<VisualizationState>()((set, get) => 
     const state = get()
     if (state.trace === null) return
     const last = timelineOf(state).length - 1
+    if (last < 0) {
+      clearTimer()
+      set({ eventIndex: 0, playing: false, finished: false, viewState: emptyViewState() })
+      return
+    }
     if (state.eventIndex >= last) {
       // Replay from the beginning when playing after finishing.
       set({ eventIndex: 0, playing: true, finished: false, viewState: viewAt(state, 0) })
@@ -409,7 +422,7 @@ export const useVisualizationStore = create<VisualizationState>()((set, get) => 
     set({
       eventIndex: 0,
       playing: false,
-      finished: false,
+      finished: playbackFinished(0, timelineOf(state).length),
       viewState: viewAt(state, 0),
       sessionId,
     })
@@ -419,12 +432,12 @@ export const useVisualizationStore = create<VisualizationState>()((set, get) => 
     const state = get()
     if (state.trace === null) return
     const last = timelineOf(state).length - 1
-    const nextIndex = Math.min(state.eventIndex + 1, last)
+    const nextIndex = Math.max(0, Math.min(state.eventIndex + 1, last))
     clearTimer()
     set({
       eventIndex: nextIndex,
       playing: false,
-      finished: nextIndex >= last,
+      finished: playbackFinished(nextIndex, last + 1),
       viewState: viewAt(state, nextIndex),
     })
   },
@@ -433,10 +446,12 @@ export const useVisualizationStore = create<VisualizationState>()((set, get) => 
     const state = get()
     if (state.trace === null) return
     const previousIndex = Math.max(state.eventIndex - 1, 0)
+    const last = timelineOf(state).length - 1
     clearTimer()
     set({
       eventIndex: previousIndex,
       playing: false,
+      finished: playbackFinished(previousIndex, last + 1),
       viewState: viewAt(state, previousIndex),
     })
   },
@@ -450,7 +465,7 @@ export const useVisualizationStore = create<VisualizationState>()((set, get) => 
     set({
       eventIndex: clamped,
       playing: false,
-      finished: clamped >= last,
+      finished: playbackFinished(clamped, last + 1),
       viewState: viewAt(state, clamped),
     })
   },
@@ -469,12 +484,13 @@ export const useVisualizationStore = create<VisualizationState>()((set, get) => 
     const state = get()
     if (state.trace === null) return
     const last = timelineOf(state).length - 1
+    const eventIndex = Math.max(0, last)
     clearTimer()
     set({
-      eventIndex: last,
+      eventIndex,
       playing: false,
-      finished: true,
-      viewState: viewAt(state, last),
+      finished: playbackFinished(eventIndex, last + 1),
+      viewState: viewAt(state, eventIndex),
     })
   },
 
@@ -491,13 +507,13 @@ export const useVisualizationStore = create<VisualizationState>()((set, get) => 
     const last = timelineOf(state).length - 1
     if (state.eventIndex >= last) {
       clearTimer()
-      set({ playing: false, finished: true })
+      set({ playing: false, finished: playbackFinished(state.eventIndex, last + 1) })
       return
     }
     const nextIndex = state.eventIndex + 1
     set({
       eventIndex: nextIndex,
-      finished: nextIndex >= last,
+      finished: playbackFinished(nextIndex, last + 1),
       viewState: viewAt(state, nextIndex),
     })
     scheduleNextTick(get, set, state.sessionId)

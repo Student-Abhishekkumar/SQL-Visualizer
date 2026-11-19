@@ -8,6 +8,7 @@ import {
 } from './databaseInitializer'
 import {
   clearAllDatabaseData,
+  deleteDatabaseSnapshot,
   loadDatabaseSnapshot,
   saveDatabaseSnapshot,
 } from '../persistence/persistenceService'
@@ -58,19 +59,44 @@ describe('initializeDatabase', () => {
     expect(second.db.queryAll('SELECT COUNT(*) FROM employees').values[0]?.[0]).toBe(9)
   })
 
-  it('rebuilds from the template when the stored snapshot is corrupt', async () => {
+  it('preserves a corrupt snapshot for inspection and retries without replacing user data', async () => {
     const first = await initializeDatabase()
+    first.db.executeBatch(
+      "INSERT INTO employees (id, name, department_id, salary, age, city) VALUES (9, 'Vikram', 1, 55000, 24, 'Jaipur')",
+    )
+    await persistDatabase(first.db)
     const id = getActiveDatabaseId()
     expect(id).not.toBeNull()
-    await saveDatabaseSnapshot(new Uint8Array([1, 2, 3]), id as string)
+    const validSnapshot = await loadDatabaseSnapshot(id as string)
+    expect(validSnapshot).not.toBeNull()
+    const corruptSnapshot = new Uint8Array([1, 2, 3])
+    await saveDatabaseSnapshot(corruptSnapshot, id as string)
     closeDatabase()
 
-    const second = await initializeDatabase()
-    expect(second.restored).toBe(true)
-    expect(second.db.queryAll('SELECT COUNT(*) FROM employees').values[0]?.[0]).toBe(8)
-    const snapshot = await loadDatabaseSnapshot(id as string)
-    expect(snapshot?.length).toBeGreaterThan(0)
-    void first
+    await expect(initializeDatabase()).rejects.toThrow(/corrupt|unreadable/i)
+    expect(await loadDatabaseSnapshot(id as string)).toEqual(corruptSnapshot)
+
+    await saveDatabaseSnapshot(validSnapshot as Uint8Array, id as string)
+    const recovered = await initializeDatabase()
+    expect(recovered.restored).toBe(true)
+    expect(recovered.db.queryAll('SELECT COUNT(*) FROM employees').values[0]?.[0]).toBe(9)
+  })
+
+  it('distinguishes a missing snapshot and recovers only after a backup is restored', async () => {
+    await initializeDatabase()
+    const id = getActiveDatabaseId()
+    expect(id).not.toBeNull()
+    const validSnapshot = await loadDatabaseSnapshot(id as string)
+    expect(validSnapshot).not.toBeNull()
+    await deleteDatabaseSnapshot(id as string)
+    closeDatabase()
+
+    await expect(initializeDatabase()).rejects.toThrow(/snapshot.*missing/i)
+    expect(await loadDatabaseSnapshot(id as string)).toBeNull()
+
+    await saveDatabaseSnapshot(validSnapshot as Uint8Array, id as string)
+    const recovered = await initializeDatabase()
+    expect(recovered.db.queryAll('SELECT COUNT(*) FROM employees').values[0]?.[0]).toBe(8)
   })
 })
 

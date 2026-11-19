@@ -277,8 +277,39 @@ function inspectNodeCore(node: FlowGraphNode, trace: VisualizationTrace): NodeIn
               : 'CTE result read by this stage.',
         })
       }
-      // A compound operation consumes every SELECT branch's real output.
-      if (node.stage === 'COMPOUND') {
+      // A compound operation consumes its actual accumulated left input
+      // and the next right branch, never a reconstructed final result.
+      const compoundOperation = node.stage === 'COMPOUND'
+        ? trace.compound?.operations?.find((operation) => operation.id === node.compoundOperationId)
+        : undefined
+      if (compoundOperation !== undefined) {
+        const branches = trace.compound?.branches ?? []
+        const firstBlock = trace.nestedQueries?.find((block) => block.id === branches[0]?.blockId)
+        const rightBlock = trace.nestedQueries?.find((block) => block.id === compoundOperation.rightBlockId)
+        const legacyUnionLabels =
+          (compoundOperation.operator === 'UNION' || compoundOperation.operator === 'UNION ALL') &&
+          compoundOperation.rightBranchIndex === 1
+        inputs.push(
+          {
+            key: `compound-left-${compoundOperation.id}`,
+            label: legacyUnionLabels ? (firstBlock?.label ?? 'Branch 1') : 'Accumulated left input',
+            columns: compoundOperation.snapshot.columns,
+            rows: compoundOperation.leftRows,
+            note: `Real rows accumulated before ${compoundOperation.operator}.`,
+          },
+          {
+            key: `compound-right-${compoundOperation.id}`,
+            label: legacyUnionLabels
+              ? (rightBlock?.label ?? `Branch ${compoundOperation.rightBranchIndex + 1}`)
+              : `Next right input · ${rightBlock?.label ?? `Branch ${compoundOperation.rightBranchIndex + 1}`}`,
+            columns: rightBlock?.finalColumns ?? compoundOperation.snapshot.columns,
+            rows: compoundOperation.rightRows,
+            note: `Real output of SELECT branch ${compoundOperation.rightBranchIndex + 1}.`,
+          },
+        )
+      } else if (node.stage === 'COMPOUND') {
+        // Older traces without operation metadata retain the original
+        // branch-input fallback.
         const rootId = rootBlockIdOf(trace)
         for (const block of trace.nestedQueries ?? []) {
           if (block.kind !== 'compound' || (block.parentId ?? rootId) !== rootId) continue
@@ -347,7 +378,9 @@ function inspectNodeCore(node: FlowGraphNode, trace: VisualizationTrace): NodeIn
           : snapshot?.stage === 'DISTINCT'
             ? 'These projected rows duplicated an earlier row and were removed.'
             : snapshot?.stage === 'COMPOUND'
-              ? 'UNION removed these rows because the accumulated compound result already contained an equal row (NULLs compare equal).'
+              ? snapshot.label.includes('INTERSECT') || snapshot.label.includes('EXCEPT')
+                ? snapshot.explanation
+                : 'UNION removed these rows because the accumulated compound result already contained an equal row (NULLs compare equal).'
               : node.hint ?? 'These rows did not pass the condition and did not continue.'
       return {
         header: {

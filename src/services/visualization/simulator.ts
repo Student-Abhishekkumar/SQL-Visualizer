@@ -19,6 +19,7 @@
  */
 
 import { interpretQuery, structureText, type Expression, type QueryStructure, type SelectItem, type SubqueryExpr } from './astInterpreter'
+import { rowKey } from './rowIdentity'
 import { detectCorrelation } from './correlation'
 import {
   compareNonNull,
@@ -33,6 +34,7 @@ import type {
   GroupSnapshot,
   NestedQueryDependency,
   NestedQueryTrace,
+  CompoundOperationTrace,
   StageSnapshot,
   TraceSourceTable,
   VisualizedRow,
@@ -112,6 +114,8 @@ interface SimState {
 interface BuildEvent {
   type: VisualizationEvent['type']
   stage: VisualizationEvent['stage']
+  /** Non-final compound operation key used to order repeated stages. */
+  compoundOperationId?: string
   description: string
   payload?: VisualizationEvent['payload']
   snapshot?: VisualizationEvent['snapshot']
@@ -143,10 +147,6 @@ function evaluationMessage(error: unknown, where: string): string {
     return `The ${where} could not be evaluated: ${error.message}`
   }
   return `The ${where} could not be evaluated: ${String(error)}`
-}
-
-function stableValueKey(values: unknown[]): string {
-  return `[${values.map((value) => `${typeof value}:${String(value)}`).join('|')}]`
 }
 
 function displayLabelForItem(item: SelectItem): string {
@@ -473,7 +473,7 @@ function groupStage(
         throw new SimulationAbort([evaluationMessage(error, 'GROUP BY expression')])
       }
     }
-    const key = stableValueKey(keyValues)
+    const key = rowKey(keyValues)
     let bucket = buckets.get(key)
     if (bucket === undefined) {
       bucket = { keyValues, rows: [] }
@@ -625,7 +625,7 @@ function distinctStage(
   const unique: ProjectedRow[] = []
   const duplicates: ProjectedRow[] = []
   for (const row of rows) {
-    const key = stableValueKey(row.values)
+    const key = rowKey(row.values)
     if (seen.has(key)) {
       duplicates.push(row)
       pushFine({
@@ -1129,15 +1129,118 @@ function evaluateCtes(
 }
 
 // ---------------------------------------------------------------------------
-// Compound SELECT (UNION / UNION ALL)
+// Compound SELECT (set operations)
 // ---------------------------------------------------------------------------
 
-/** SQLite NULL-safe value identity used to eliminate UNION duplicates. */
+/** SQLite NULL-safe whole-row identity used by compound set operations. */
 function compoundValueKey(values: unknown[]): string {
-  // NULLs compare equal for UNION deduplication, integers and reals of the
-  // same numeric value are equal, and different storage classes stay
+  // NULLs compare equal for set-operation deduplication, integers and reals
+  // of the same numeric value are equal, and different storage classes stay
   // distinct. This mirrors the simulator's row identity elsewhere.
-  return stableValueKey(values)
+  return rowKey(values)
+}
+interface DistinctCompoundFold {
+  rows: VisualizedRow[]
+  removedRows: VisualizedRow[]
+  duplicates: VisualizedRow[]
+  excludedCount: number
+}
+
+/** Fold INTERSECT or EXCEPT over two real branch relations. */
+function foldDistinctCompoundRows(
+  left: VisualizedRow[],
+  right: VisualizedRow[],
+  operator: 'INTERSECT' | 'EXCEPT',
+  pushFine: (event: BuildEvent) => boolean,
+): DistinctCompoundFold {
+  const rows: VisualizedRow[] = []
+  const removedRows: VisualizedRow[] = []
+  const duplicates: VisualizedRow[] = []
+  let excludedCount = 0
+
+  const removeDuplicate = (row: VisualizedRow, input: string): void => {
+    removedRows.push(row)
+    duplicates.push(row)
+    pushFine({
+      type: 'DUPLICATE_DETECTED',
+      stage: 'COMPOUND',
+      description: `Row ${row.id} duplicates an earlier row in the ${input} and is removed by ${operator}.`,
+      payload: { rowId: row.id },
+    })
+  }
+
+  // Both sides are distinct relations for INTERSECT and EXCEPT. Record
+  // right-side duplicates too instead of hiding them inside a lookup Set.
+  const rightKeys = new Set<string>()
+  for (const row of right) {
+    const key = compoundValueKey(row.values)
+    if (rightKeys.has(key)) {
+      removeDuplicate(row, 'next branch')
+      continue
+    }
+    rightKeys.add(key)
+  }
+
+  const leftKeys = new Set<string>()
+  for (const row of left) {
+    const key = compoundValueKey(row.values)
+    if (leftKeys.has(key)) {
+      removeDuplicate(row, 'accumulated left input')
+      continue
+    }
+    leftKeys.add(key)
+
+    const presentOnRight = rightKeys.has(key)
+    const retained = operator === 'INTERSECT' ? presentOnRight : !presentOnRight
+    if (retained) {
+      rows.push(row)
+      pushFine({
+        type: 'ROW_ACCEPTED',
+        stage: 'COMPOUND',
+        description:
+          operator === 'INTERSECT'
+            ? `Row ${row.id} has an equal row in the next branch and is retained by INTERSECT.`
+            : `Row ${row.id} is absent from the next branch and is retained by EXCEPT.`,
+        payload: { rowId: row.id },
+      })
+      continue
+    }
+
+    removedRows.push(row)
+    excludedCount += 1
+    pushFine({
+      type: 'ROW_FILTERED',
+      stage: 'COMPOUND',
+      description:
+        operator === 'INTERSECT'
+          ? `Row ${row.id} has no equal row in the next branch and is excluded by INTERSECT.`
+          : `Row ${row.id} has an equal row in the next branch and is excluded by EXCEPT.`,
+      payload: { rowId: row.id },
+    })
+  }
+
+  return { rows, removedRows, duplicates, excludedCount }
+}
+
+/** Beginner-friendly explanation of one actual compound operation. */
+function compoundOperationExplanation(
+  operator: 'UNION' | 'UNION ALL' | 'INTERSECT' | 'EXCEPT',
+  leftCount: number,
+  rightCount: number,
+  duplicateCount: number,
+  excludedCount: number,
+): string {
+  const inputs = `Combined ${leftCount} accumulated left row${leftCount === 1 ? '' : 's'} with ${rightCount} row${rightCount === 1 ? '' : 's'} from the next branch.`
+  if (operator === 'UNION ALL') {
+    return `${inputs} UNION ALL kept every row, including duplicates.`
+  }
+  if (operator === 'UNION') {
+    return `${inputs} UNION removed ${duplicateCount} duplicate row${duplicateCount === 1 ? '' : 's'} across the accumulated result; NULLs compare equal to NULLs.`
+  }
+  if (operator === 'INTERSECT') {
+    return `${inputs} INTERSECT kept only distinct rows present in both inputs; it excluded ${excludedCount} non-matching left row${excludedCount === 1 ? '' : 's'} and removed ${duplicateCount} duplicate row${duplicateCount === 1 ? '' : 's'}. Corresponding NULL values compare equal.`
+  }
+  return `${inputs} EXCEPT kept only distinct left rows absent from the next input; it excluded ${excludedCount} matching left row${excludedCount === 1 ? '' : 's'} and removed ${duplicateCount} duplicate row${duplicateCount === 1 ? '' : 's'}. Corresponding NULL values compare equal.`
 }
 
 /**
@@ -1148,8 +1251,9 @@ function compoundValueKey(values: unknown[]): string {
  * SQLite semantics implemented here:
  * - compound operators are left-associative, so `A UNION B UNION ALL C`
  *   is `(A UNION B) UNION ALL C`;
- * - UNION removes duplicate rows across the whole accumulated result
- *   (NULL counts as equal to NULL), UNION ALL keeps every row;
+ * - UNION removes duplicate rows across the whole accumulated result,
+ *   UNION ALL keeps every row, and INTERSECT / EXCEPT produce distinct
+ *   rows using NULL-safe whole-row comparison;
  * - trailing ORDER BY / LIMIT belong to the compound result, not to the
  *   last branch.
  */
@@ -1180,9 +1284,10 @@ function simulateCompoundQuery(
     }
   const fineEvents: BuildEvent[] = []
   let fineGrainedBudget = maxEvents
+  let currentCompoundOperationId: string | undefined
   const pushFine = (event: BuildEvent): boolean => {
     if (fineGrainedBudget <= 0) return false
-    fineEvents.push(event)
+    fineEvents.push({ ...event, compoundOperationId: currentCompoundOperationId })
     fineGrainedBudget--
     return true
   }
@@ -1200,7 +1305,6 @@ function simulateCompoundQuery(
     const branchRows: VisualizedRow[][] = []
     const branchIncompleteReasons: string[] = []
     let columns: string[] | null = null
-    let totalBranchRows = 0
     let anyBranchTruncated = false
 
     compound.branches.forEach((branch, index) => {
@@ -1233,7 +1337,6 @@ function simulateCompoundQuery(
         values: [...row.values],
       }))
       branchRows.push(rows)
-      totalBranchRows += rows.length
       anyBranchTruncated = anyBranchTruncated || trace.truncated === true
       if (trace.incomplete === true) {
         branchIncompleteReasons.push(
@@ -1283,40 +1386,106 @@ function simulateCompoundQuery(
 
     // --- fold the branches left-to-right ---------------------------------
     let rows: VisualizedRow[] = [...(branchRows[0] ?? [])]
-    const duplicates: VisualizedRow[] = []
+    const operationTraces: CompoundOperationTrace[] = []
+    const operationIncompleteReasons: string[] = []
+    let anyOperationTruncated = false
+    const operationCount = branchRows.length - 1
     for (let index = 1; index < branchRows.length; index++) {
-      const operator = compound.branches[index]?.operator ?? 'UNION'
+      const branch = compound.branches[index]
+      if (branch === undefined) continue
+      const operator = branch.operator ?? 'UNION'
+      const operationId = index === operationCount ? undefined : `COMPOUND-${index}`
+      currentCompoundOperationId = operationId
+      const leftInput = rows
       const incoming = branchRows[index] ?? []
+      let operationRemoved: VisualizedRow[] = []
+      let operationDuplicates: VisualizedRow[] = []
+      let excludedCount = 0
+
       if (operator === 'UNION ALL') {
         rows = [...rows, ...incoming]
-        continue
-      }
-      // UNION deduplicates the whole accumulated result, not just the
-      // incoming branch: `A UNION ALL B UNION C` removes duplicates that
-      // A/B themselves introduced.
-      const seen = new Set<string>()
-      const deduped: VisualizedRow[] = []
-      for (const row of [...rows, ...incoming]) {
-        const key = compoundValueKey(row.values)
-        if (seen.has(key)) {
-          duplicates.push(row)
-          pushFine({
-            type: 'DUPLICATE_DETECTED',
-            stage: 'COMPOUND',
-            description: `Row ${row.id} duplicates a row already in the compound result and is removed by ${operator}.`,
-            payload: { rowId: row.id },
-          })
-          continue
+      } else if (operator === 'INTERSECT' || operator === 'EXCEPT') {
+        const folded = foldDistinctCompoundRows(rows, incoming, operator, pushFine)
+        rows = folded.rows
+        operationRemoved = folded.removedRows
+        operationDuplicates = folded.duplicates
+        excludedCount = folded.excludedCount
+      } else {
+        // UNION deduplicates the whole accumulated result, not just the
+        // incoming branch: `A UNION ALL B UNION C` removes duplicates that
+        // A/B themselves introduced.
+        const seen = new Set<string>()
+        const deduped: VisualizedRow[] = []
+        for (const row of [...rows, ...incoming]) {
+          const key = compoundValueKey(row.values)
+          if (seen.has(key)) {
+            operationRemoved.push(row)
+            operationDuplicates.push(row)
+            pushFine({
+              type: 'DUPLICATE_DETECTED',
+              stage: 'COMPOUND',
+              description: `Row ${row.id} duplicates a row already in the compound result and is removed by ${operator}.`,
+              payload: { rowId: row.id },
+            })
+            continue
+          }
+          seen.add(key)
+          deduped.push(row)
         }
-        seen.add(key)
-        deduped.push(row)
+        rows = deduped
       }
-      rows = deduped
+
+      const operationTruncated = rows.length > maxRows
+      if (operationTruncated) {
+        anyOperationTruncated = true
+        operationIncompleteReasons.push(
+          `${operator} step ${index} was capped at ${maxRows} of ${rows.length} rows for visualization; SQLite combines every row.`,
+        )
+      }
+      const snapshot = snapshotOf(
+        'COMPOUND',
+        operationCount === 1
+          ? `${operator} · ${compound.branches.length} branches`
+          : `${operator} · step ${index} of ${operationCount}`,
+        columns,
+        operationTruncated ? rows.slice(0, maxRows) : rows,
+        operationRemoved,
+        compoundOperationExplanation(
+          operator,
+          leftInput.length,
+          incoming.length,
+          operationDuplicates.length,
+          excludedCount,
+        ),
+        operationTruncated,
+      )
+      snapshot.inputRowCount = leftInput.length + incoming.length
+      for (const row of operationDuplicates) snapshot.roles[row.id] = 'duplicated'
+      if (operationId !== undefined) snapshot.compoundOperationId = operationId
+      if (operationTruncated) {
+        snapshot.incomplete = true
+        snapshot.incompleteReasons = [
+          `${operator} step ${index} output was capped for visualization.`,
+        ]
+      }
+      operationTraces.push({
+        id: operationId ?? 'COMPOUND',
+        operator,
+        rightBranchIndex: index,
+        rightBlockId: branch.query.id,
+        leftRows: leftInput.map((row) => ({ id: row.id, values: [...row.values] })),
+        rightRows: incoming.map((row) => ({ id: row.id, values: [...row.values] })),
+        snapshot,
+      })
     }
+    currentCompoundOperationId = undefined
 
     // --- display cap ------------------------------------------------------
     let truncated = false
-    const incompleteReasons = uniqueReasons(branchIncompleteReasons)
+    const incompleteReasons = uniqueReasons([
+      ...branchIncompleteReasons,
+      ...operationIncompleteReasons,
+    ])
     if (rows.length > maxRows) {
       incompleteReasons.push(
         `The compound result was capped at ${maxRows} of ${rows.length} rows for visualization; SQLite combines every row.`,
@@ -1329,37 +1498,10 @@ function simulateCompoundQuery(
       .slice(1)
       .map((branch) => branch.operator ?? 'UNION')
     const operatorSummary = [...new Set(operators)].join(' / ')
-    const compoundLabel = `${operatorSummary} · ${compound.branches.length} branches`
-    const hasUnion = operators.includes('UNION')
-    const hasUnionAll = operators.includes('UNION ALL')
-    const explanationParts = [
-      `Combined ${compound.branches.length} SELECT branches (${totalBranchRows} row${totalBranchRows === 1 ? '' : 's'}) into one compound result.`,
-    ]
-    if (hasUnion) {
-      explanationParts.push(
-        duplicates.length === 0
-          ? 'UNION found no duplicate rows across the accumulated result.'
-          : `UNION removed ${duplicates.length} duplicate row${duplicates.length === 1 ? '' : 's'} across the accumulated result; NULLs compare equal to NULLs.`,
-      )
+    const compoundSnapshot = operationTraces[operationTraces.length - 1]?.snapshot
+    if (compoundSnapshot === undefined) {
+      throw new SimulationAbort(['A compound SELECT has no operations to visualize.'])
     }
-    if (hasUnionAll) {
-      explanationParts.push('UNION ALL kept every row from those branches, including duplicates.')
-    }
-    if (truncated) {
-      explanationParts.push(`Only the first ${maxRows} rows are displayed.`)
-    }
-
-    const compoundSnapshot = snapshotOf(
-      'COMPOUND',
-      compoundLabel,
-      columns,
-      rows,
-      duplicates,
-      explanationParts.join(' '),
-      truncated,
-    )
-    compoundSnapshot.inputRowCount = totalBranchRows
-    for (const row of duplicates) compoundSnapshot.roles[row.id] = 'duplicated'
 
     // --- compound ORDER BY ------------------------------------------------
     let finalRows: VisualizedRow[] = rows
@@ -1465,15 +1607,21 @@ function simulateCompoundQuery(
     const stageSnapshots: StageSnapshot[] = [compoundSnapshot]
     if (orderSnapshot !== null) stageSnapshots.push(orderSnapshot)
     if (limitSnapshot !== null) stageSnapshots.push(limitSnapshot)
-    for (const snapshot of stageSnapshots) {
+    const timelineSnapshots = operationTraces.map((operation) => operation.snapshot)
+    if (orderSnapshot !== null) timelineSnapshots.push(orderSnapshot)
+    if (limitSnapshot !== null) timelineSnapshots.push(limitSnapshot)
+    for (const snapshot of timelineSnapshots) {
       if (snapshot.blockId === undefined) snapshot.blockId = structure.id
     }
 
     const incomplete =
-      incompleteReasons.length > 0 || anyBranchTruncated || branchIncompleteReasons.length > 0
+      incompleteReasons.length > 0 ||
+      anyBranchTruncated ||
+      anyOperationTruncated ||
+      branchIncompleteReasons.length > 0
     if (incomplete) {
       const reasons = uniqueReasons(incompleteReasons)
-      for (const snapshot of stageSnapshots) {
+      for (const snapshot of timelineSnapshots) {
         snapshot.incomplete = true
         snapshot.incompleteReasons = [...reasons]
       }
@@ -1486,13 +1634,19 @@ function simulateCompoundQuery(
         description: `Visualizing the logical execution of: ${sql.trim()}`,
       },
     ]
-    for (const snapshot of stageSnapshots) {
+    for (const snapshot of timelineSnapshots) {
       for (const event of fineEvents) {
-        if (event.stage === snapshot.stage) events.push(event)
+        if (
+          event.stage === snapshot.stage &&
+          event.compoundOperationId === snapshot.compoundOperationId
+        ) {
+          events.push(event)
+        }
       }
       events.push({
         type: 'STAGE_COMPLETED',
         stage: snapshot.stage,
+        compoundOperationId: snapshot.compoundOperationId,
         description: `${snapshot.stage} completed: ${snapshot.outputRowCount} row${snapshot.outputRowCount === 1 ? '' : 's'} out.`,
         snapshot,
       })
@@ -1509,6 +1663,7 @@ function simulateCompoundQuery(
       description: event.description,
       stage: event.stage,
       blockId: structure.id,
+      compoundOperationId: event.compoundOperationId,
       payload: event.payload,
       snapshot: event.snapshot,
     }))
@@ -1546,13 +1701,14 @@ function simulateCompoundQuery(
           blockId: branch.query.id,
           operator: branch.operator,
         })),
+        operations: operationTraces,
       },
       rootBlockId: structure.id,
       totalSteps: serialized.length,
       finalRows,
       finalColumns: [...columns],
       hasDeterministicOrder,
-      truncated: truncated || anyBranchTruncated,
+      truncated: truncated || anyBranchTruncated || anyOperationTruncated,
       incomplete,
       incompleteReasons: uniqueReasons(incompleteReasons),
     }

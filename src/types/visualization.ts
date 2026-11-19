@@ -159,6 +159,8 @@ export interface StageSnapshot {
    * block (older traces and fixtures predate block identity).
    */
   blockId?: QueryBlockId
+  /** Deterministic key for a non-final operation in a compound chain. */
+  compoundOperationId?: string
   /** Short label for the pipeline, e.g. "WHERE salary > 50000". */
   label: string
   /** Column labels of `rows`. */
@@ -227,6 +229,8 @@ export interface VisualizationEvent {
    * other's stages during playback.
    */
   blockId?: QueryBlockId
+  /** Deterministic key for a non-final operation in a compound chain. */
+  compoundOperationId?: string
   payload?: {
     rowId?: string
     /** For ROW_EVALUATED: the condition text and its 3VL verdict. */
@@ -287,14 +291,30 @@ export interface TraceSourceTable {
 /** How a nested query block participates in the outer query. */
 export type NestedQueryKind = 'scalar' | 'in' | 'exists' | 'cte' | 'compound'
 
-/** Set operator of a compound (UNION) query. */
-export type SetOperator = 'UNION' | 'UNION ALL'
+/** Set operator of a compound (set-operation) query. */
+export type SetOperator = 'UNION' | 'UNION ALL' | 'INTERSECT' | 'EXCEPT'
 
 /** One SELECT branch of a compound query, identified by its block. */
 export interface CompoundBranchRef {
   blockId: QueryBlockId
   /** Operator combining this branch with the accumulated result. */
   operator: SetOperator | null
+}
+
+/** One left-to-right operation in a compound chain, with its real inputs. */
+export interface CompoundOperationTrace {
+  /** COMPOUND-1, COMPOUND-2, …; the final operation stays COMPOUND. */
+  id: string
+  operator: SetOperator
+  /** Zero-based index of the branch supplying the next right input. */
+  rightBranchIndex: number
+  rightBlockId: QueryBlockId
+  /** Accumulated rows immediately before this operator ran. */
+  leftRows: VisualizedRow[]
+  /** Real rows supplied by the next SELECT branch. */
+  rightRows: VisualizedRow[]
+  /** Actual output and removed rows produced by this operator. */
+  snapshot: StageSnapshot
 }
 
 /**
@@ -304,6 +324,8 @@ export interface CompoundBranchRef {
  */
 export interface CompoundTraceInfo {
   branches: CompoundBranchRef[]
+  /** Actual operation sequence; optional for older trace fixtures. */
+  operations?: CompoundOperationTrace[]
 }
 
 /**
@@ -406,7 +428,7 @@ export interface VisualizationTrace {
   sourceTables: TraceSourceTable[]
   /** Nested query blocks (scalar subqueries today) with real snapshots. */
   nestedQueries?: NestedQueryTrace[]
-  /** Compound-query branch metadata (only for UNION / UNION ALL traces). */
+  /** Compound-query branch metadata (only for set-operation traces). */
   compound?: CompoundTraceInfo
   totalSteps: number
   /** Final projected rows of the logical simulation (post LIMIT). */

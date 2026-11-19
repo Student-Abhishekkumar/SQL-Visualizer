@@ -57,7 +57,7 @@ export const DOC_SOURCES: DocSource[] = [
     stages: ['LIMIT'],
   },
   {
-    label: 'SQLite: compound SELECT (UNION / UNION ALL)',
+    label: 'SQLite: compound SELECT (set operations)',
     url: 'https://www.sqlite.org/lang_select.html#compound',
     stages: ['COMPOUND'],
   },
@@ -145,11 +145,11 @@ const CONCEPTS: Record<VisualizedStage, Record<LearningLevel, string>> = {
   },
   COMPOUND: {
     beginner:
-      'UNION stacks the rows of two or more SELECT statements. UNION removes rows that appear more than once; UNION ALL keeps every row, including duplicates.',
+      'UNION combines rows and removes duplicates, UNION ALL keeps every row, INTERSECT keeps rows present in both inputs, and EXCEPT keeps left rows that are absent from the right input.',
     intermediate:
-      'Each SELECT branch is evaluated independently, then the branches are combined left to right. Every branch must return the same number of columns, and the first branch determines the output column names. NULLs compare equal when UNION removes duplicates.',
+      'Each SELECT branch is evaluated independently, then operators run left to right. INTERSECT and EXCEPT compare complete rows with NULL-safe distinct semantics; the first branch determines output column names.',
     advanced:
-      'Compound operators are left-associative: A UNION B UNION ALL C means (A UNION B) UNION ALL C. UNION deduplicates the whole accumulated result, not just the incoming branch. The simulator folds branches in that order and marks which rows UNION removed.',
+      'Compound operators are left-associative: A UNION B INTERSECT C means (A UNION B) INTERSECT C. The simulator records each operation’s accumulated left input, next right input, retained rows, excluded rows and duplicates without claiming SQLite’s physical execution plan.',
   },
   LIMIT: {
     beginner:
@@ -207,9 +207,7 @@ function describeSnapshot(stage: VisualizedStage, snapshot: StageSnapshot): stri
         ? 'No duplicate rows existed — the result is unchanged.'
         : `Removed ${removed} duplicate row${removed === 1 ? '' : 's'}; ${output} unique row${output === 1 ? '' : 's'} remain.`
     case 'COMPOUND':
-      return removed === 0
-        ? `Combined the branch results into ${output} row${output === 1 ? '' : 's'} without removing duplicates.`
-        : `Combined the branch results into ${output} row${output === 1 ? '' : 's'}; UNION removed ${removed} duplicate row${removed === 1 ? '' : 's'}.`
+      return snapshot.explanation
     case 'ORDER_BY':
       return `All ${output} row${output === 1 ? '' : 's'} were rearranged into sorted order.`
     case 'LIMIT':

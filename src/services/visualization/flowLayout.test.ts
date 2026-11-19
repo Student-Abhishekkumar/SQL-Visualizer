@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import {
   FLOW_LAYOUT_GAP_X,
   FLOW_LAYOUT_GAP_Y,
+  fitFlowLayout,
   flowBoxesOverlap,
+  measureFlowFitBounds,
   measureFlowLayout,
   resolveFlowLayout,
   type FlowLayoutBox,
@@ -155,6 +157,22 @@ describe('resolveFlowLayout', () => {
     expectNoOverlaps(boxes, resolved)
   })
 
+  it('allows collision resolution to move a neighbour left of the origin', () => {
+    const boxes = [
+      box('pinned', 0, 0),
+      box('neighbour', -40, 0),
+      box('far', 400, 400),
+    ]
+    const resolved = resolveFlowLayout(boxes, { pinnedId: 'pinned' })
+    expect(position(resolved, 'pinned')).toEqual({ x: 0, y: 0 })
+    expect(position(resolved, 'neighbour')).toEqual({
+      x: -100 - FLOW_LAYOUT_GAP_X,
+      y: 0,
+    })
+    expect(position(resolved, 'far')).toEqual({ x: 400, y: 400 })
+    expectNoOverlaps(boxes, resolved)
+  })
+
   it('is deterministic for identical input', () => {
     const boxes = [
       box('pinned', 0, 0),
@@ -184,6 +202,75 @@ describe('resolveFlowLayout', () => {
     const resolved = resolveFlowLayout(boxes, { pinnedId: 'op-WHERE' })
     expect(position(resolved, 'op-WHERE')).toEqual({ x: 344, y: 330 })
     expectNoOverlaps(boxes, resolved)
+  })
+})
+
+describe('fitFlowLayout', () => {
+  const viewport = { width: 800, height: 600, padding: 30, minZoom: 0.22, maxZoom: 2.2 }
+
+  it('includes negative X coordinates and complete node widths', () => {
+    expect(measureFlowFitBounds([
+      { x: -350, y: 40, width: 120, height: 60 },
+      { x: 50, y: 100, width: 100, height: 80 },
+    ])).toEqual({ left: -350, top: 40, right: 150, bottom: 180, width: 500, height: 140 })
+  })
+
+  it('includes negative Y coordinates and complete node heights', () => {
+    expect(measureFlowFitBounds([
+      { x: 40, y: -350, width: 120, height: 180 },
+      { x: 100, y: 50, width: 100, height: 80 },
+    ])).toEqual({ left: 40, top: -350, right: 200, bottom: 130, width: 160, height: 480 })
+  })
+
+  it('fits nodes in all four quadrants with viewport padding', () => {
+    const nodes = [
+      { x: -400, y: -300, width: 100, height: 100 },
+      { x: 300, y: -200, width: 100, height: 100 },
+      { x: -250, y: 250, width: 100, height: 100 },
+      { x: 400, y: 350, width: 150, height: 100 },
+    ]
+    const camera = fitFlowLayout(nodes, { ...viewport, width: 1000, height: 800 })
+    expect(camera).not.toBeNull()
+    if (camera === null) return
+
+    const bounds = measureFlowFitBounds(nodes)
+    expect(bounds).not.toBeNull()
+    if (bounds === null) return
+    expect(camera.panY + bounds.top * camera.zoom).toBeCloseTo(30)
+    expect(camera.panY + bounds.bottom * camera.zoom).toBeCloseTo(770)
+    expect(camera.panX + bounds.left * camera.zoom).toBeGreaterThanOrEqual(30)
+    expect(camera.panX + bounds.right * camera.zoom).toBeLessThanOrEqual(970)
+  })
+
+  it('uses large node extents rather than only their origins or centers', () => {
+    const bounds = measureFlowFitBounds([
+      { x: -80, y: -50, width: 600, height: 500 },
+      { x: 20, y: 20, width: 40, height: 40 },
+    ])
+    expect(bounds).toMatchObject({ left: -80, top: -50, right: 520, bottom: 450 })
+    expect(bounds?.width).toBe(600)
+    expect(bounds?.height).toBe(500)
+  })
+
+  it('handles an empty graph without creating a camera', () => {
+    expect(measureFlowFitBounds([])).toBeNull()
+    expect(fitFlowLayout([], viewport)).toBeNull()
+  })
+
+  it('centres a single negative-position node and respects maximum zoom', () => {
+    const camera = fitFlowLayout([{ x: -200, y: -100, width: 200, height: 100 }], viewport)
+    expect(camera).toEqual({ zoom: 2.2, panX: 620, panY: 410 })
+  })
+
+  it('respects minimum zoom and never rearranges nodes while fitting', () => {
+    const nodes = [
+      { x: -5000, y: -4000, width: 100, height: 100 },
+      { x: 5000, y: 4000, width: 100, height: 100 },
+    ]
+    const before = structuredClone(nodes)
+    const camera = fitFlowLayout(nodes, viewport)
+    expect(camera?.zoom).toBe(0.22)
+    expect(nodes).toEqual(before)
   })
 })
 

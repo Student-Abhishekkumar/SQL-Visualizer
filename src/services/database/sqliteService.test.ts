@@ -157,6 +157,52 @@ describe('executeBatch — multiple statements', () => {
       expect((error as SqlExecutionError).message).toMatch(/missing_table|no such table/i)
     }
   })
+
+  it('rolls back earlier mutations when a later statement fails', async () => {
+    try {
+      db.executeBatch(`
+        INSERT INTO departments (id, department_name, location) VALUES (4, 'Finance', 'Pune');
+        INSERT INTO departments (id, department_name, location) VALUES (1, 'Duplicate', 'Nowhere');
+      `)
+      expect.unreachable('expected an error')
+    } catch (error) {
+      expect(error).toBeInstanceOf(SqlExecutionError)
+      expect((error as SqlExecutionError).statementIndex).toBe(1)
+      expect((error as SqlExecutionError).rolledBack).toBe(true)
+      expect((error as SqlExecutionError).rollbackError).toBeUndefined()
+    }
+
+    expect(db.queryAll('SELECT COUNT(*) FROM departments').values[0]?.[0]).toBe(3)
+    const restored = await SQLiteDatabase.create(undefined, db.exportSnapshot())
+    expect(restored.queryAll('SELECT COUNT(*) FROM departments').values[0]?.[0]).toBe(3)
+    restored.close()
+  })
+
+  it.each(['BEGIN', 'COMMIT', 'ROLLBACK', 'SAVEPOINT work', 'RELEASE work', 'END'])(
+    'rejects %s before executing any statement in the batch',
+    (transactionControl) => {
+      try {
+        db.executeBatch(`
+          INSERT INTO departments (id, department_name, location) VALUES (4, 'Finance', 'Pune');
+          ${transactionControl};
+        `)
+        expect.unreachable('expected an error')
+      } catch (error) {
+        expect(error).toBeInstanceOf(SqlExecutionError)
+        expect((error as SqlExecutionError).statementIndex).toBe(1)
+        expect((error as SqlExecutionError).rolledBack).toBe(false)
+        expect((error as SqlExecutionError).message).toMatch(/transaction-control/i)
+      }
+      expect(db.queryAll('SELECT COUNT(*) FROM departments').values[0]?.[0]).toBe(3)
+    },
+  )
+
+  it('rejects standalone transaction control instead of leaving a live transaction', () => {
+    expect(() => db.executeBatch('BEGIN')).toThrow(/transaction-control.*remove/i)
+    expect(() => db.executeBatch('INSERT INTO departments (id, department_name, location) VALUES (4, \'Finance\', \'Pune\')'))
+      .not.toThrow()
+    expect(db.queryAll('SELECT COUNT(*) FROM departments').values[0]?.[0]).toBe(4)
+  })
 })
 
 describe('error handling', () => {

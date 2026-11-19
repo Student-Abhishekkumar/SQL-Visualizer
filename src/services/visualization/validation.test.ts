@@ -98,7 +98,7 @@ describe('simulateAndValidate — scalar subqueries against real SQLite', () => 
     }
   })
 
-  it('reports a correlated scalar subquery as unsupported while SQLite still executes it', () => {
+  it('rejects a correlated scalar subquery without executing it', () => {
     const query =
       'SELECT name FROM employees e WHERE salary > (SELECT AVG(salary) FROM employees x WHERE x.department_id = e.department_id) ORDER BY name'
     const outcome = simulateAndValidate(query, [query], db)
@@ -106,8 +106,8 @@ describe('simulateAndValidate — scalar subqueries against real SQLite', () => 
     if (!outcome.simulation.ok) {
       expect(outcome.simulation.reasons.some((reason) => /correlated/i.test(reason))).toBe(true)
     }
-    expect(outcome.execution).not.toBeNull()
-    expect(outcome.execution?.values.length).toBeGreaterThan(0)
+    expect(outcome.execution).toBeNull()
+    expect(outcome.validation).toBeNull()
   })
 
   it('reports a multi-column scalar subquery instead of faking a value', () => {
@@ -205,11 +205,10 @@ describe('simulateAndValidate — additional supported combinations', () => {
     expect(outcome.validation?.validated).toBe(true)
   })
 
-  it('does not validate queries the simulator cannot interpret', () => {
+  it('does not execute queries the simulator cannot interpret', () => {
     const outcome = simulateAndValidate('SELECT ABS(salary) FROM employees', ['SELECT ABS(salary) FROM employees'], db)
     expect(outcome.simulation.ok).toBe(false)
-    // Real SQLite execution still happened and is preserved untouched.
-    expect(outcome.execution?.values.length).toBeGreaterThan(0)
+    expect(outcome.execution).toBeNull()
     expect(outcome.validation).toBeNull()
   })
 })

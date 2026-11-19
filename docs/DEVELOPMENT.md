@@ -37,7 +37,7 @@ No environment variables are required. SQLite WASM assets and Monaco are bundled
 
 ## Testing
 
-The suite currently covers 40 files and 623 tests.
+The suite currently covers 47 files and 748 tests.
 
 - Vitest is configured in `vite.config.ts`.
 - Domain, service and store tests run in the default Node environment.
@@ -59,14 +59,14 @@ npm test
 - **Parser and interpreter changes:** supported constructs, aliases, unsupported reasons.
 - **Capability analysis:** detected stages, warnings and conservative failure.
 - **Simulator:** row roles, ordering, grouping, joins, limits, scalar / `IN` / `EXISTS` subqueries,
-  CTEs, `UNION` / `UNION ALL` folding and duplicate removal, stable ids, truncation and incomplete
-  propagation.
+  CTEs, `UNION` / `UNION ALL` / `INTERSECT` / `EXCEPT` folding, NULL-safe duplicate handling, stable ids,
+  truncation and incomplete propagation.
 - **Query blocks:** deterministic block ids, parent/child scope, dependency edges (including CTE reads
   inside nested subqueries), correlation rejection and per-block validation.
-- **Validation:** ordered and unordered comparison, column mismatches, floating-point tolerance.
-- **Graph layout:** node/edge determinism, branch visibility, subquery sources, compound-branch wiring
-  and connectivity.
-- **Playback:** event folding, seeking, speed and database-switch invalidation.
+- **Validation:** ordered and unordered comparison, column mismatches, floating-point tolerance, all four set operators, and incomplete compound-result suppression.
+- **Graph layout:** node/edge determinism, branch visibility, subquery sources, compound operation
+  sequencing, left-to-right branch wiring and connectivity.
+- **Playback:** event folding, per-operation snapshots, seeking, speed and database-switch invalidation.
 - **Window geometry:** move, clamp, resize, maximize and header-height collapsed boxes.
 - **Components:** user-visible behavior rather than implementation details — including actual
   inspector dimensions, collapse/expand cycles and pointer interactions.
@@ -89,9 +89,9 @@ These rules keep the educational visualization honest:
    height for layout, dragging and clamping; the saved expanded geometry is kept separately.
 10. **Nested blocks are real inputs.** Evaluate each scalar / `IN` / `EXISTS` / CTE / compound-branch
     block once from live data, reuse its cached value, and propagate truncation and incompleteness
-    through real dependency edges. Compound branches fold left-to-right and every branch feeds the
-    shared `COMPOUND` node. Never fabricate intermediate rows, and never claim parity for an
-    incomplete trace.
+    through real dependency edges. Compound operations fold left-to-right and expose their actual
+    accumulated left input, next right input, retained rows, excluded rows and duplicates. Never
+    fabricate intermediate rows, and never claim parity for an incomplete trace.
 
 If a change would violate one of these rules, discuss the design before implementing it.
 
@@ -159,8 +159,10 @@ Before a release or a README asset refresh:
 - [ ] Visualize a simple filter, a join, and a grouped query with `HAVING` and `ORDER BY`.
 - [ ] Visualize a non-correlated scalar subquery and confirm its nested source appears.
 - [ ] Visualize an uncorrelated `IN` / `EXISTS` subquery and a non-recursive CTE; confirm each is its own query block, plays independently and connects to the consuming stage in the canvas.
-- [ ] Visualize a `UNION` / `UNION ALL` query; confirm each branch plays independently, both branches feed the shared `COMPOUND` node, and `UNION` duplicates branch off.
-- [ ] Try an unsupported query (for example a correlated subquery, `WITH RECURSIVE`, `INTERSECT` or `EXCEPT`) and confirm the reasons appear.
+- [ ] Visualize a `UNION` / `UNION ALL` query; confirm each branch plays independently, both branches feed the first compound operation, and `UNION` duplicates branch off.
+- [ ] Visualize an `INTERSECT` and an `EXCEPT` query; confirm distinct operation nodes, real left/right inspector inputs, excluded rows and duplicate rows.
+- [ ] Visualize a mixed compound chain and confirm operations and playback run left-to-right, with the final compound result in Table View.
+- [ ] Try an unsupported query (for example a correlated subquery, `WITH RECURSIVE`, `INTERSECT ALL`, `EXCEPT ALL` or a nested compound form) and confirm the reasons appear.
 - [ ] Confirm the validation badge matches SQLite for each supported query.
 - [ ] Step backward and forward through playback; seek to a stage from the clause strip.
 - [ ] Switch Flow/Table and Query/Canvas; confirm state is preserved.
@@ -170,7 +172,8 @@ Before a release or a README asset refresh:
 - [ ] Toggle the documentation sidebar, answer a knowledge check, close and reopen it, and confirm
   scroll position, learning level and answer are preserved.
 - [ ] Rename, duplicate, export, import and reset a database.
-- [ ] Reload the page and confirm databases, history and saved queries persist.
+- [ ] Reload the page and confirm Query is the startup tab, databases, history and saved queries persist, and an old Canvas selection does not override Query.
+- [ ] Drag a node left of the graph origin and confirm it remains positioned there, wires follow it, and canvas panning still works.
 - [ ] Toggle light/dark theme and check both themes on the canvas and panels.
 - [ ] Check a narrow viewport: the inspector and documentation sidebar become overlays.
 

@@ -29,6 +29,7 @@ import type {
 import type {
   GroupSnapshot,
   NestedQueryTrace,
+  CompoundOperationTrace,
   StageSnapshot,
   VisualizationTrace,
   VisualizedStage,
@@ -88,7 +89,7 @@ const STAGE_HINTS: Partial<Record<VisualizedStage, string>> = {
   HAVING: 'Groups are filtered by an aggregate condition.',
   SELECT: 'Only these columns are kept (or calculated).',
   DISTINCT: 'Duplicate result rows are removed.',
-  COMPOUND: 'Branch results are combined with UNION or UNION ALL.',
+  COMPOUND: 'Branch results are combined left to right with UNION, UNION ALL, INTERSECT or EXCEPT.',
   ORDER_BY: 'Rows are arranged in this order.',
   LIMIT: 'Only the requested number of rows is kept.',
 }
@@ -168,6 +169,36 @@ interface StageRow {
   opY: number
   dataY: number
   height: number
+}
+
+interface PipelineStep {
+  key: string
+  stage: VisualizedStage
+  snapshot: StageSnapshot
+  operation?: CompoundOperationTrace
+}
+
+/** Expand a compound chain into its real left-to-right operation steps. */
+function pipelineStepsOf(trace: VisualizationTrace): PipelineStep[] {
+  const steps: PipelineStep[] = []
+  const operations = trace.compound?.operations ?? []
+  for (const stage of trace.stages) {
+    if (stage === 'FROM') continue
+    if (stage === 'COMPOUND' && operations.length > 0) {
+      for (const operation of operations) {
+        steps.push({
+          key: operation.id,
+          stage,
+          snapshot: operation.snapshot,
+          operation,
+        })
+      }
+      continue
+    }
+    const snapshot = trace.stageSnapshots.find((candidate) => candidate.stage === stage)
+    if (snapshot !== undefined) steps.push({ key: stage, stage, snapshot })
+  }
+  return steps
 }
 
 function branchLabel(stage: VisualizedStage, count: number): string {
@@ -386,17 +417,13 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
   const spineX = SPINE_X + rootShift
   const sideX = SIDE_X + rootShift
 
-  const snapshotByStage = new Map<VisualizedStage, StageSnapshot>()
-  for (const snapshot of trace.stageSnapshots) snapshotByStage.set(snapshot.stage, snapshot)
-
-  const pipelineStages = trace.stages.filter((stage) => stage !== 'FROM')
+  const pipelineSteps = pipelineStepsOf(trace)
 
   // --- phase 1: pipeline row layout ---------------------------------------
-  const rows = new Map<VisualizedStage, StageRow>()
+  const rows = new Map<string, StageRow>()
   let rowTop = TOP
-  for (const stage of pipelineStages) {
-    const snapshot = snapshotByStage.get(stage)
-    if (snapshot === undefined) continue
+  for (const step of pipelineSteps) {
+    const { stage, snapshot } = step
     const hasOp = OPERATION_STAGES.has(stage)
     const opY = rowTop
     const dataY = hasOp ? rowTop + OP_H + OP_DATA_GAP : rowTop
@@ -415,7 +442,7 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
           : 0
     const spineExtent = (hasOp ? OP_H + OP_DATA_GAP : 0) + DATA_H
     const height = Math.max(spineExtent, sideExtent)
-    rows.set(stage, { opY, dataY, height })
+    rows.set(step.key, { opY, dataY, height })
     rowTop += height + ROW_GAP
   }
 
@@ -424,7 +451,7 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
   // source is stacked beside it. Otherwise the FROM table sits beside
   // the first operation of the pipeline.
   const joinRow = rows.get('JOIN')
-  const firstRow = pipelineStages[0] !== undefined ? rows.get(pipelineStages[0]) : undefined
+  const firstRow = pipelineSteps[0] !== undefined ? rows.get(pipelineSteps[0].key) : undefined
   const consumerY = joinRow?.opY ?? firstRow?.opY ?? TOP
   const primarySources = trace.sourceTables.filter(
     (table) => table.role !== 'subquery' && table.role !== 'cte',
@@ -632,10 +659,14 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
     })
   }
 
-  for (const stage of pipelineStages) {
-    const snapshot = snapshotByStage.get(stage)
-    const row = rows.get(stage)
-    if (snapshot === undefined || row === undefined) continue
+  for (const step of pipelineSteps) {
+    const { stage, snapshot, operation } = step
+    const row = rows.get(step.key)
+    if (row === undefined) continue
+    const nodeStageKey = stageKeyFor(rootId, stage, rootId, snapshot.compoundOperationId)
+    const operationNodeId = operation !== undefined ? `op-${operation.id}` : `op-${stage}`
+    const dataNodeId = operation !== undefined ? `data-${operation.id}` : `data-${stage}`
+    const branchNodeId = operation !== undefined ? `branch-${operation.id}` : `branch-${stage}`
 
     if (OPERATION_STAGES.has(stage)) {
       const hasBranch = BRANCH_STAGES.has(stage) && snapshot.removedRows.length > 0
@@ -681,9 +712,43 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
             ),
           )
         }
+      } else if (stage === 'COMPOUND' && operation !== undefined) {
+        // The first operation consumes branches 1 and 2. Every later
+        // operation consumes the previous operation on the left and its
+        // own next branch on the right, matching the actual fold.
+        const branchIndexes =
+          operation.rightBranchIndex === 1 ? [0, operation.rightBranchIndex] : [operation.rightBranchIndex]
+        if (operation.rightBranchIndex > 1) {
+          inputs.push(
+            makeSocket(
+              { id: 'in-accumulated', direction: 'input', kind: 'data', side: 'top', label: 'left' },
+              NODE_W,
+              OP_H,
+            ),
+          )
+        }
+        branchIndexes.forEach((branchIndex, socketIndex) => {
+          const branch = compoundBranches[branchIndex]
+          if (branch === undefined) return
+          const id = `in-branch-${branchIndex}`
+          inputs.push(
+            makeSocket(
+              {
+                id,
+                direction: 'input',
+                kind: 'data',
+                side: 'left',
+                label: `branch ${branchIndex + 1}`,
+              },
+              NODE_W,
+              OP_H,
+              { y: (OP_H * (socketIndex + 1)) / (branchIndexes.length + 1) },
+            ),
+          )
+          compoundInputByBranch.set(`${operation.id}:${branch.blockId}`, id)
+        })
       } else if (stage === 'COMPOUND' && compoundBranches.length > 0) {
-        // A compound operation has one real input per SELECT branch. Each
-        // branch subgraph ends in a data node that feeds its own port.
+        // Legacy single-compound traces keep their original two-input shape.
         compoundBranches.forEach((branch, index) => {
           const id = `in-branch-${index}`
           inputs.push(
@@ -753,7 +818,10 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
               direction: 'output',
               kind: 'branch',
               side: 'right',
-              label: branchSocketLabel(stage),
+              label:
+                operation !== undefined && operation.operator !== 'UNION' && operation.operator !== 'UNION ALL'
+                  ? 'removed'
+                  : branchSocketLabel(stage),
             },
             NODE_W,
             OP_H,
@@ -781,14 +849,15 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
       })
 
       const opNode: FlowGraphNode = {
-        id: `op-${stage}`,
+        id: operationNodeId,
         kind: 'operation',
         stage,
         blockId: rootId,
-        stageKey: stageKeyFor(rootId, stage, rootId),
-        label: stage.replace('_', ' '),
+        stageKey: nodeStageKey,
+        compoundOperationId: operation?.id,
+        label: operation?.operator ?? stage.replace('_', ' '),
         detail: snapshot.label,
-        hint: STAGE_HINTS[stage],
+        hint: operation?.snapshot.explanation ?? STAGE_HINTS[stage],
         x: spineX,
         y: row.opY,
         width: NODE_W,
@@ -811,6 +880,8 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
           inputBySourceId.get(previousBottom.id) ?? inputs[0]?.id ?? 'in',
           'main',
           stage,
+          undefined,
+          operation !== undefined ? nodeStageKey : undefined,
         )
       }
 
@@ -841,13 +912,22 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
           source.table?.role === 'cte' ? 'cte' : 'value',
         )
       }
-      // Branch results feed the shared COMPOUND operation, each through its
-      // own port. The edge becomes active when that branch finishes, and
-      // upstream tracing therefore follows the exact branch subgraph.
+      // Each branch feeds the operation that actually consumes it. Later
+      // operations receive their accumulated left input through the main
+      // spine instead of reconnecting every earlier branch simultaneously.
       if (stage === 'COMPOUND') {
-        for (const branch of compoundBranches) {
+        const branchesForOperation =
+          operation === undefined
+            ? compoundBranches
+            : operation.rightBranchIndex === 1
+              ? compoundBranches.slice(0, 2)
+              : compoundBranches.filter((branch) => branch.blockId === operation.rightBlockId)
+        for (const branch of branchesForOperation) {
           const from = nested.lastByBlock.get(branch.blockId)
-          const socket = compoundInputByBranch.get(branch.blockId)
+          const socketKey = operation !== undefined
+            ? `${operation.id}:${branch.blockId}`
+            : branch.blockId
+          const socket = compoundInputByBranch.get(socketKey)
           if (from === undefined || socket === undefined) continue
           const branchBlock = nestedBlocks.find((block) => block.id === branch.blockId)
           const lastStage =
@@ -869,12 +949,16 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
       // Rejected/skipped rows branch to the right.
       if (hasBranch) {
         const branchNode: FlowGraphNode = {
-          id: `branch-${stage}`,
+          id: branchNodeId,
           kind: 'branch',
           stage,
           blockId: rootId,
-          stageKey: stageKeyFor(rootId, stage, rootId),
-          label: branchLabel(stage, snapshot.removedRows.length),
+          stageKey: nodeStageKey,
+          compoundOperationId: operation?.id,
+          label:
+            operation !== undefined && operation.operator !== 'UNION' && operation.operator !== 'UNION ALL'
+              ? `Removed / excluded (${snapshot.removedRows.length})`
+              : branchLabel(stage, snapshot.removedRows.length),
           detail: snapshot.label,
           hint: branchHint(stage),
           x: sideX,
@@ -892,7 +976,7 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
           snapshot,
           removedRows: snapshot.removedRows,
           revealsAt: stage,
-          revealsAtKey: stageKeyFor(rootId, stage, rootId),
+          revealsAtKey: nodeStageKey,
           isRejected: true,
         }
         nodes.push(branchNode)
@@ -904,6 +988,7 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
           'rejected',
           stage,
           branchEdgeLabel(stage),
+          operation !== undefined ? nodeStageKey : undefined,
         )
       }
 
@@ -978,11 +1063,12 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
     }
 
     const dataNode: FlowGraphNode = {
-      id: `data-${stage}`,
+      id: dataNodeId,
       kind: 'data',
       stage,
       blockId: rootId,
-      stageKey: stageKeyFor(rootId, stage, rootId),
+      stageKey: nodeStageKey,
+      compoundOperationId: operation?.id,
       label: `${DATA_LABELS[stage] ?? `${stage} result`} · ${snapshot.outputRowCount}`,
       detail: `${snapshot.inputRowCount} in → ${snapshot.outputRowCount} out`,
       x: spineX,
@@ -1006,13 +1092,22 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
       snapshot,
       rows: snapshot.rows,
       revealsAt: stage,
-      revealsAtKey: stageKeyFor(rootId, stage, rootId),
+      revealsAtKey: nodeStageKey,
       incomplete: snapshot.incomplete === true,
       incompleteReasons: [...(snapshot.incompleteReasons ?? [])],
     }
     nodes.push(dataNode)
     if (previousBottom !== null) {
-      addConnection(previousBottom, 'out', dataNode, 'in', 'main', stage)
+      addConnection(
+        previousBottom,
+        'out',
+        dataNode,
+        'in',
+        'main',
+        stage,
+        undefined,
+        operation !== undefined ? nodeStageKey : undefined,
+      )
     }
     previousBottom = dataNode
   }

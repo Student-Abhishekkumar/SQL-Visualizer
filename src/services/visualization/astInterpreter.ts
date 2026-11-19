@@ -15,7 +15,34 @@
 
 import { detectStatementType, parseSql } from '../sql/sqlParser'
 import type { StatementType } from '../../types/query'
-import type { VisualizedStage } from '../../types/visualization'
+import type { SetOperator, VisualizedStage } from '../../types/visualization'
+import {
+  splitCompoundQuery,
+  type CompoundSplitOutcome,
+} from './compoundSplitter'
+
+export type { SetOperator }
+
+/**
+ * Parser `set_op` token → shared operator. node-sql-parser's SQLite
+ * grammar only emits the UNION forms, but INTERSECT and EXCEPT are mapped
+ * here too so both the parser path and the splitter fallback describe a
+ * compound query the same way.
+ */
+const SET_OPERATORS: Readonly<Record<string, SetOperator>> = {
+  union: 'UNION',
+  'union all': 'UNION ALL',
+  intersect: 'INTERSECT',
+  except: 'EXCEPT',
+}
+
+/** Shared operator → parser token used when rebuilding a fallback AST chain. */
+const PARSER_SET_OPERATORS: Readonly<Record<SetOperator, string>> = {
+  UNION: 'union',
+  'UNION ALL': 'union all',
+  INTERSECT: 'intersect',
+  EXCEPT: 'except',
+}
 
 export type ComparisonOperator =
   | '=' | '!=' | '<>' | '>' | '<' | '>=' | '<='
@@ -244,17 +271,19 @@ export interface QueryStructure {
   subqueries: SubqueryExpr[]
   /**
    * Compound (set-operation) branches in evaluation order. Set on the
-   * synthetic root block of a UNION / UNION ALL statement and null for
-   * every ordinary SELECT block.
+   * synthetic root block of a compound statement (UNION, UNION ALL,
+   * INTERSECT or EXCEPT) and null for every ordinary SELECT block.
    */
   compound: CompoundSelect | null
   statementType: StatementType
 }
 
-/** Set operator of a compound query (INTERSECT / EXCEPT are unsupported). */
-export type SetOperator = 'UNION' | 'UNION ALL'
-
-/** One SELECT branch of a compound query and its combining operator. */
+/**
+ * One SELECT branch of a compound query and its combining operator.
+ * `operator` is null for the first branch; every later branch records the
+ * operator that joins it to the accumulated result, in left-to-right
+ * (SQLite) evaluation order.
+ */
 export interface CompoundBranch {
   query: QueryStructure
   /** Operator combining this branch with the previous one (null for first). */
@@ -893,13 +922,20 @@ function interpretSelectAst(
     const operators: SetOperator[] = []
     for (let index = 0; index < compoundAsts.length - 1; index++) {
       const rawOperator = String(compoundAsts[index]?.set_op ?? '').toLowerCase()
-      if (rawOperator !== 'union' && rawOperator !== 'union all') {
+      if (rawOperator === 'union distinct') {
         unsupportedReasons.push(
-          'Only UNION and UNION ALL compound selects are visualizable; INTERSECT and EXCEPT are not supported.',
+          'UNION DISTINCT is not supported by SQLite; UNION already removes duplicates.',
         )
         return null
       }
-      operators.push(rawOperator === 'union all' ? 'UNION ALL' : 'UNION')
+      const operator = SET_OPERATORS[rawOperator]
+      if (operator === undefined) {
+        unsupportedReasons.push(
+          `Only UNION, UNION ALL, INTERSECT and EXCEPT compound selects are visualizable; "${rawOperator.toUpperCase()}" is not supported.`,
+        )
+        return null
+      }
+      operators.push(operator)
     }
 
     const terminal: Raw = compoundAsts[compoundAsts.length - 1]
@@ -1125,26 +1161,116 @@ function interpretSelectAst(
   return structure
 }
 
+/** Unwrap the one-statement array returned for a trailing semicolon. */
+function asSingleSelectAst(ast: Raw): Raw | null {
+  const candidate = Array.isArray(ast) ? (ast.length === 1 ? ast[0] : null) : ast
+  return candidate?.type === 'select' ? candidate : null
+}
+
+/**
+ * Interpret a compound form that node-sql-parser cannot parse itself.
+ * Branch SQL is parsed independently, then linked into the same AST shape
+ * produced for UNION so the existing compound interpreter owns CTEs, IDs,
+ * nested blocks and terminal-clause hoisting.
+ */
+function interpretCompoundFallback(
+  outcome: CompoundSplitOutcome,
+  context: InterpretContext,
+): QueryStructure | null {
+  if (!outcome.ok) {
+    context.reasons.push(outcome.reason)
+    return null
+  }
+  if (outcome.segments.length < 2) {
+    context.reasons.push('A compound query needs at least two SELECT branches.')
+    return null
+  }
+
+  const branchAsts: Raw[] = []
+  for (const [index, segment] of outcome.segments.entries()) {
+    const branchAst = asSingleSelectAst(parseSql(segment.sql))
+    if (branchAst === null) {
+      context.reasons.push(
+        `Compound branch ${index + 1} could not be parsed as a single SELECT statement.`,
+      )
+      return null
+    }
+    if (index > 0 && branchAst.with != null) {
+      context.reasons.push('WITH must precede the first branch of a compound query.')
+      return null
+    }
+    branchAsts.push(branchAst)
+  }
+
+  // Parse the root clauses without changing the branch SQL. The terminal
+  // AST owns these fields just as it does in node-sql-parser's UNION AST.
+  const tail = [outcome.tail.orderBy, outcome.tail.limit]
+    .filter((clause): clause is string => clause !== null)
+    .join(' ')
+  if (tail !== '') {
+    const tailAst = asSingleSelectAst(parseSql(`SELECT 1 ${tail}`))
+    if (tailAst === null) {
+      context.reasons.push('The compound ORDER BY / LIMIT clauses could not be parsed.')
+      return null
+    }
+    const terminal = branchAsts[branchAsts.length - 1] as Raw
+    terminal.orderby = tailAst.orderby
+    terminal.limit = tailAst.limit
+  }
+
+  for (let index = 0; index < branchAsts.length - 1; index++) {
+    const operator = outcome.segments[index + 1]?.operator
+    if (operator == null) {
+      context.reasons.push(`Compound operator before branch ${index + 2} is missing.`)
+      return null
+    }
+    const parserOperator = PARSER_SET_OPERATORS[operator]
+    if (parserOperator === undefined) {
+      context.reasons.push(`Compound operator "${operator}" is not supported.`)
+      return null
+    }
+    const current = branchAsts[index] as Raw
+    current.set_op = parserOperator
+    current._next = branchAsts[index + 1]
+  }
+
+  return interpretSelectAst(branchAsts[0] as Raw, context)
+}
+
+
 /**
  * Interpret one SQL statement. Returns the structure plus the list of
  * unsupported constructs found. Never throws.
  */
 export function interpretStatement(sql: string): InterpretationResult {
+  const ast = asSingleSelectAst(parseSql(sql))
+  if (ast !== null) {
+    const context = createInterpretContext()
+    const structure = interpretSelectAst(ast, context)
+    if (structure === null && context.reasons.length === 0) {
+      context.reasons.push('The query could not be interpreted.')
+    }
+    return { structure, unsupportedReasons: context.reasons }
+  }
+
+  // INTERSECT, EXCEPT and mixed chains are not accepted by the SQLite
+  // grammar of node-sql-parser. Use the scanner only for those compound
+  // forms; ordinary SELECT behavior and the existing UNION path stay intact.
+  const compound = splitCompoundQuery(sql)
+  if (compound !== null) {
+    const context = createInterpretContext()
+    const structure = interpretCompoundFallback(compound, context)
+    if (structure === null && context.reasons.length === 0) {
+      context.reasons.push('The compound query could not be interpreted.')
+    }
+    return { structure, unsupportedReasons: context.reasons }
+  }
+
   const statementType = detectStatementType(sql)
   if (statementType !== 'SELECT') {
     return { structure: null, unsupportedReasons: ['Only SELECT queries can be visualized.'] }
   }
-  const ast = parseSql(sql)
-  if (!ast || ast.type !== 'select') {
-    return { structure: null, unsupportedReasons: ['The statement could not be parsed as a SELECT.'] }
-  }
-
-  const context = createInterpretContext()
-  const structure = interpretSelectAst(ast, context)
-  if (structure === null && context.reasons.length === 0) {
-    context.reasons.push('The query could not be interpreted.')
-  }
-  return { structure, unsupportedReasons: context.reasons }
+  return { structure: null, unsupportedReasons: ['The statement could not be parsed as a SELECT.'] }
 }
 
 /**

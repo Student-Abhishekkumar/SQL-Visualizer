@@ -2,6 +2,20 @@ import type { DatabaseSchema } from '../../types/database'
 import { quoteIdentifier, quoteLiteral } from './schemaService'
 import type { SQLiteDatabase } from './sqliteService'
 
+/** Explicit export failure; callers must not download a partial SQL dump. */
+export class SqlDumpError extends Error {
+  readonly tableName: string
+
+  constructor(tableName: string, cause: unknown) {
+    super(
+      `Could not read table "${tableName}" while exporting. The SQL dump was not generated.`,
+      { cause },
+    )
+    this.name = 'SqlDumpError'
+    this.tableName = tableName
+  }
+}
+
 /**
  * Human-readable SQL dump generation.
  *
@@ -40,8 +54,8 @@ export function buildSqlDump(
     let rows: { columns: string[]; values: unknown[][] }
     try {
       rows = db.queryAll(`SELECT * FROM ${safeName}`)
-    } catch {
-      continue
+    } catch (error) {
+      throw new SqlDumpError(table.name, error)
     }
     if (rows.values.length === 0) continue
 

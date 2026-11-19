@@ -137,7 +137,7 @@ describe('unsupported query handling', () => {
   it('shows guidance when nothing was visualized yet', () => {
     render(<VisualizationWorkspace queryName="" onClose={() => {}} />)
     expect(screen.getAllByText('No visualization yet').length).toBeGreaterThan(0)
-    expect(screen.getByText(/Run a single SELECT query/)).toBeInTheDocument()
+    expect(screen.getByText(/Run a supported SELECT query/)).toBeInTheDocument()
   })
 
   it('shows the database-not-ready reason when the DB is unavailable', () => {

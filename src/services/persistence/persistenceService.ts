@@ -45,8 +45,11 @@ let dbPromise: Promise<IDBPDatabase> | null = null
 
 function getDb(): Promise<IDBPDatabase> | null {
   if (typeof indexedDB === 'undefined') return null
-  if (!dbPromise) {
-    dbPromise = openDB(DB_NAME, DB_VERSION, {
+  if (dbPromise !== null) return dbPromise
+
+  let attempt: Promise<IDBPDatabase>
+  try {
+    attempt = openDB(DB_NAME, DB_VERSION, {
       upgrade(database) {
         if (!database.objectStoreNames.contains(STORE_DATABASE)) {
           database.createObjectStore(STORE_DATABASE)
@@ -71,11 +74,26 @@ function getDb(): Promise<IDBPDatabase> | null {
     }).then(async (database) => {
       // Migration runs after the version-change transaction commits so we
       // can use idb's promise API for cursor-independent, idempotent work.
-      await migrateLegacyWorkspace(database)
-      return database
+      try {
+        await migrateLegacyWorkspace(database)
+        return database
+      } catch (error) {
+        database.close()
+        throw error
+      }
     })
+  } catch (error) {
+    dbPromise = null
+    throw error
   }
-  return dbPromise
+
+  dbPromise = attempt
+  // A rejected attempt must not poison later retries. The identity check
+  // prevents an old rejection from clearing a newer initialization attempt.
+  void attempt.catch(() => {
+    if (dbPromise === attempt) dbPromise = null
+  })
+  return attempt
 }
 
 /**
@@ -134,8 +152,10 @@ async function migrateLegacyWorkspace(db: IDBPDatabase): Promise<void> {
       value: true,
     })
     await transaction.done
-  } catch {
-    /* migration failure must not make the app unusable */
+  } catch (error) {
+    throw new Error('IndexedDB workspace migration failed; saved data was not replaced.', {
+      cause: error,
+    })
   }
 }
 
@@ -162,8 +182,8 @@ export async function loadDatabaseRecords(): Promise<DatabaseInfo[]> {
   try {
     const records = (await db.getAll(STORE_DATABASES)) as DatabaseInfo[]
     return records.sort((a, b) => b.updatedAt - a.updatedAt)
-  } catch {
-    return []
+  } catch (error) {
+    throw new Error('Could not read saved database metadata from IndexedDB.', { cause: error })
   }
 }
 
@@ -197,8 +217,10 @@ export async function loadDatabaseSnapshot(id: string): Promise<Uint8Array | nul
   try {
     const value = (await db.get(STORE_SNAPSHOTS, id)) as Uint8Array | undefined
     return value ?? null
-  } catch {
-    return null
+  } catch (error) {
+    throw new Error(`Could not read the stored snapshot for database "${id}" from IndexedDB.`, {
+      cause: error,
+    })
   }
 }
 
@@ -237,8 +259,8 @@ export async function loadActiveDatabaseId(): Promise<string | null> {
       | { key: string; value: string | null }
       | undefined
     return typeof record?.value === 'string' ? record.value : null
-  } catch {
-    return null
+  } catch (error) {
+    throw new Error('Could not read the active database selection from IndexedDB.', { cause: error })
   }
 }
 
@@ -255,12 +277,40 @@ export async function saveActiveDatabaseId(id: string | null): Promise<boolean> 
 
 // ------------------------------- History ----------------------------------
 
+export const HISTORY_LIMIT = 200
+
+function compareHistoryEntries(a: HistoryEntry, b: HistoryEntry, preferredId?: string): number {
+  const chronological = b.timestamp - a.timestamp
+  if (chronological !== 0) return chronological
+  // A newly inserted entry wins timestamp ties. Other ties retain IndexedDB's
+  // stable key order because older records have no finer-grained ordering.
+  if (a.id === preferredId) return -1
+  if (b.id === preferredId) return 1
+  return 0
+}
+
+/** Read newest-first history and delete only actual overflow in one transaction. */
+async function readAndTrimHistory(
+  db: IDBPDatabase,
+  inserted?: HistoryEntry,
+): Promise<HistoryEntry[]> {
+  const transaction = db.transaction(STORE_HISTORY, 'readwrite')
+  const store = transaction.objectStore(STORE_HISTORY)
+  if (inserted !== undefined) await store.put(inserted)
+  const entries = (await store.getAll()) as HistoryEntry[]
+  entries.sort((a, b) => compareHistoryEntries(a, b, inserted?.id))
+  const retained = entries.slice(0, HISTORY_LIMIT)
+  const overflow = entries.slice(HISTORY_LIMIT)
+  await Promise.all(overflow.map((entry) => store.delete(entry.id)))
+  await transaction.done
+  return retained
+}
+
 export async function loadHistory(): Promise<HistoryEntry[]> {
   const db = await getDb()
   if (!db) return []
   try {
-    const entries = (await db.getAll(STORE_HISTORY)) as HistoryEntry[]
-    return entries.sort((a, b) => b.timestamp - a.timestamp)
+    return await readAndTrimHistory(db)
   } catch {
     return []
   }
@@ -270,7 +320,7 @@ export async function addHistoryEntry(entry: HistoryEntry): Promise<void> {
   const db = await getDb()
   if (!db) return
   try {
-    await db.put(STORE_HISTORY, entry)
+    await readAndTrimHistory(db, entry)
   } catch {
     /* non-fatal */
   }

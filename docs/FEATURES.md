@@ -11,7 +11,7 @@ partially, and what it does not do yet. The [README](../README.md) is the short 
 |:---|:---:|:---|
 | SQL execution | ✅ | Real SQLite WASM execution, Monaco editor, multi-statement scripts, results, messages and query metadata. |
 | Database management | ✅ | Independent databases, templates, custom SQL, import/export, schema explorer and IndexedDB persistence. |
-| SQL visualization | ◐ | Full logical pipeline for supported `SELECT` statements, including `UNION` / `UNION ALL` compounds; unsupported constructs are reported. |
+| SQL visualization | ◐ | Full logical pipeline for supported `SELECT` statements, including `UNION`, `UNION ALL`, `INTERSECT` and `EXCEPT` compounds; unsupported constructs are reported. |
 | Canvas interactions | ✅ | Pan, zoom, node dragging, hover tracing, click-to-pin and branch-aware emphasis. |
 | Node Inspector | ✅ | Floating, draggable, resizable, collapsible and minimizable window with real node data and playback sync. |
 | Learning and explanations | ◐ | Stage explanations, references and knowledge checks; guided exercises are planned. |
@@ -28,8 +28,8 @@ partially, and what it does not do yet. The [README](../README.md) is the short 
 | Format SQL | ✅ | Formats the current statement with the built-in formatter. |
 | Clear editor | ✅ | Clears the buffer without touching the database. |
 | Example queries | ✅ | Toolbar menu with ready-made queries for the University example. |
-| Visualize | ✅ | Builds a flow trace for a supported `SELECT` or `UNION` / `UNION ALL` compound select. |
-| Query / Canvas toggle | ✅ | Both views stay mounted; `Ctrl/Cmd + Shift + M` switches without losing state. |
+| Visualize | ✅ | Builds a flow trace for a supported `SELECT` or `UNION` / `UNION ALL` / `INTERSECT` / `EXCEPT` compound select. |
+| Query / Canvas toggle | ✅ | Query is the startup default, including after reload. Both views stay mounted; `Ctrl/Cmd + Shift + M` switches without losing state. |
 | Results grid | ✅ | Real SQLite rows with sticky headers and row numbers. |
 | Display types | ✅ | Columns are labelled `TEXT`, `NUM` or `BLOB` from the first non-null value. |
 | Messages | ✅ | Success and error messages, including the failing statement index. |
@@ -65,7 +65,7 @@ partially, and what it does not do yet. The [README](../README.md) is the short 
 
 | Capability | Status | Details |
 |:---|:---:|:---|
-| `SELECT` visualization | ◐ | Supported `SELECT` statements and `UNION` / `UNION ALL` compounds can be visualized; other statements execute normally but cannot. |
+| `SELECT` visualization | ◐ | Supported `SELECT` statements and `UNION` / `UNION ALL` / `INTERSECT` / `EXCEPT` compounds can be visualized; other statements execute normally but cannot. |
 | Logical pipeline | ✅ | `FROM`, `JOIN`, `WHERE`, `GROUP BY`, `HAVING`, `SELECT`, `DISTINCT`, `COMPOUND`, `ORDER BY`, `LIMIT` / `OFFSET`. |
 | Scalar subqueries | ✅ | Non-correlated scalar subqueries in `WHERE`, `SELECT` and `JOIN … ON` are simulated as their own real pipeline; output feeds the consuming stage and is inspectable. |
 | Non-recursive CTEs | ✅ | Multiple `WITH` definitions, chained dependencies and explicit column lists. Each CTE is simulated as its own query block with snapshots, events and dependency edges. |
@@ -104,12 +104,7 @@ partially, and what it does not do yet. The [README](../README.md) is the short 
   explicit column lists. Supported scalar, `IN` and `EXISTS` subqueries may appear inside a CTE body.
 - Uncorrelated `IN` / `NOT IN` and `EXISTS` / `NOT EXISTS` subqueries. `IN` / `NOT IN` requires a
   single-column subquery and follows SQLite three-valued logic; `EXISTS` ignores the column count.
-- `UNION` and `UNION ALL` compound selects with two or more `SELECT` branches. Each branch is
-  simulated independently and must return the same number of columns (the first branch names the
-  output). Branches fold left-to-right, so `A UNION B UNION ALL C` means `(A UNION B) UNION ALL C`.
-  `UNION` removes duplicate rows from the accumulated result (treating `NULL` as equal), while
-  `UNION ALL` keeps every row. A trailing compound `ORDER BY` / `LIMIT` applies after folding, and
-  root `WITH` CTEs are evaluated once and are visible to every branch.
+- `UNION`, `UNION ALL`, `INTERSECT` and `EXCEPT` compound selects with two or more `SELECT` branches. Each branch is simulated independently and must return the same number of columns (the first branch names the output). Operators fold strictly left-to-right, so `A UNION B INTERSECT C` means `(A UNION B) INTERSECT C`, not `A UNION (B INTERSECT C)`. `UNION` removes duplicates across the accumulated result, `UNION ALL` preserves them until a later distinct operator, `INTERSECT` keeps distinct rows present in both inputs, and `EXCEPT` keeps distinct left rows absent from the right. Complete rows are compared with NULL-safe keys, so corresponding NULLs compare equal. Root `ORDER BY` and `LIMIT` / `OFFSET` apply after the complete chain, and root `WITH` CTEs are evaluated once and are visible to every branch. Each operation records its accumulated left input, next right input, retained rows, excluded rows and duplicates for canvas, playback and inspection. Table View shows the final compound result and first-branch column names.
 
 ### Limited or conditional behavior
 
@@ -133,10 +128,7 @@ partially, and what it does not do yet. The [README](../README.md) is the short 
   otherwise the comparison is order-insensitive.
 - **Group nodes:** the canvas renders up to 8 group nodes, with an explicit overflow node when a
   stage produces more. The underlying trace still contains every group.
-- **Compound selects:** `UNION` / `UNION ALL` are fully visualized. `INTERSECT` and `EXCEPT` are not
-  parsed by the current `node-sql-parser` version, so they are reported as unsupported rather than
-  partially analyzed. Compound branches must return matching column counts, and any capped or
-  incomplete branch marks the compound result incomplete instead of claiming SQLite parity.
+- **Compound selects:** all four operators are visualized as a left-to-right sequence of actual operation nodes. `INTERSECT` and `EXCEPT` use the splitter fallback when the parser cannot handle a compound form. Branches must return matching column counts, and any capped or incomplete branch or operation marks the compound result incomplete instead of claiming SQLite parity. `INTERSECT ALL`, `EXCEPT ALL`, `UNION DISTINCT` and `INTERSECT DISTINCT` are rejected explicitly.
 
 ### Not visualizable yet
 
@@ -145,7 +137,7 @@ These still run in SQLite and return normal results:
 - `INSERT`, `UPDATE`, `DELETE`, DDL, `PRAGMA` and transaction statements.
 - Queries without a `FROM` clause (for example `SELECT 1`).
 - Recursive CTEs (`WITH RECURSIVE`).
-- Compound selects using `INTERSECT` or `EXCEPT`.
+- Nested compound forms not covered by the existing nested-block interpreter. In particular, `INTERSECT` and `EXCEPT` inside subqueries or CTE bodies are not visualized by the compound fallback.
 - Correlated subqueries, including correlated `IN` / `NOT IN` and `EXISTS` / `NOT EXISTS`.
 - Derived tables in `FROM` / `JOIN` (`FROM (SELECT …)`), including comma-separated cross joins
   (`FROM a, b`).
@@ -166,8 +158,8 @@ the visualization is unavailable.
 | Node dragging | ✅ | Drag nodes to reposition them; nearby nodes settle without changing the query or selection. |
 | Hover tracing | ✅ | Hovering a node temporarily emphasizes its branch-aware upstream path. |
 | Click tracing | ✅ | Clicking pins the upstream trace and opens the inspector. |
-| Branch visibility | ✅ | Rejected rows fan out from filters, `HAVING` and `LIMIT`, duplicates fan out from `DISTINCT` and `UNION`, and group nodes fan out from grouping. |
-| Compound wiring | ✅ | Each `UNION` / `UNION ALL` branch subgraph feeds its own socket on the shared `COMPOUND` node, so upstream tracing follows every contributing branch. |
+| Branch visibility | ✅ | Rejected rows fan out from filters, `HAVING` and `LIMIT`, duplicates fan out from `DISTINCT`, `UNION`, `INTERSECT` and `EXCEPT`, and group nodes fan out from grouping. |
+| Compound wiring | ✅ | Each compound operation has deterministic nodes and branch connections. The first operation consumes the first two branches; later operations consume the previous operation and their next branch, so upstream tracing follows the actual left-to-right sequence. |
 | Playback synchronization | ✅ | Node status, revealed wires and branch emphasis follow the current playback event. |
 | Selection independence | ✅ | Pan, zoom and node dragging do not change the selected node or playback position. |
 
@@ -178,7 +170,7 @@ the visualization is unavailable.
 | Floating popup | ✅ | Opens over the canvas when a node is clicked; reuses the same window when another node is selected. |
 | Real node data | ✅ | Uses the immutable trace and live snapshot data through `inspectNode`. |
 | Tabs | ✅ | Overview, Input, Output and Details. |
-| Node-specific information | ✅ | Operation, clause, input/output counts, group keys, join details, accepted/rejected statistics, nested-subquery inputs and every compound-branch input. |
+| Node-specific information | ✅ | Operation, clause, input/output counts, group keys, join details, accepted/rejected statistics, nested-subquery inputs, and each compound operation's accumulated left input, next right input, retained rows, excluded rows and duplicates. |
 | Row previews | ✅ | Source, intermediate, branch, group and final-result rows where available; paginated for large snapshots. |
 | Dragging | ✅ | The persistent header drags the window in expanded and collapsed modes. Header buttons never start a drag. |
 | Resizing | ✅ | Eight resize handles in expanded mode; the opposite edge stays anchored and minimum sizes are enforced. |
@@ -212,14 +204,14 @@ the visualization is unavailable.
 | Result parity | ✅ | Compares the simulator's final columns, row count and values with SQLite's real result. |
 | Ordered comparison | ✅ | Used when `ORDER BY` proves a fully determined order. |
 | Unordered comparison | ✅ | Multiset equality when SQLite does not guarantee row order. |
-| Nested block parity | ✅ | Scalar, `IN` / `EXISTS`, CTE and compound-branch blocks are validated independently against SQLite, and the compound result is validated as a whole. |
+| Nested block parity | ✅ | Scalar, `IN` / `EXISTS`, CTE and compound-branch blocks are validated independently against SQLite, and the final compound result is validated as a whole. Intermediate operation snapshots are inspection data, not separate parity claims. |
 | Numeric tolerance | ✅ | Small relative tolerance for floating-point results. |
 | Column checks | ✅ | Lenient label comparison (case and whitespace insensitive) and explicit mismatch details. |
 | Validation display | ✅ | The workspace shows validated ordered/unordered status or the mismatch; SQLite output is never altered. |
 | Unsupported reasons | ✅ | Unsupported constructs produce explicit, human-readable reasons. |
 | Parser failures | ✅ | A statement that cannot be parsed is reported as unavailable for visualization, never approximated. |
 | Execution errors | ✅ | SQLite errors appear in the Messages tab with the failing statement. |
-| Caps | ✅ | Truncation of the visual trace is disclosed; real results remain complete. |
+| Caps | ✅ | Truncation of the visual trace is disclosed; real results remain complete. Incomplete or capped branches and operations are never presented as fully validated. |
 
 The visualization workspace distinguishes `idle`, `ready`, `unsupported` and `unavailable` states.
 DDL and DML still execute normally; they simply cannot be visualized.
@@ -229,7 +221,7 @@ DDL and DML still execute normally; they simply cannot be visualized.
 | Capability | Status | Details |
 |:---|:---:|:---|
 | Dark and light themes | ✅ | Theme is persisted in `localStorage`. |
-| Workspace preference | ✅ | Query/Canvas choice is persisted in `localStorage`. |
+| Workspace preference | ✅ | Query is the startup default, including after reload. The Query/Canvas choice is session-only and is not restored from an old persisted Canvas selection. |
 | Reset active database | ✅ | Available from Settings and the editor toolbar. |
 | Clear history | ✅ | Confirmation-protected action in Settings. |
 | Engine information | ✅ | Displays the SQLite library version reported by the running engine. |

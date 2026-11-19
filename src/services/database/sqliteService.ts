@@ -18,12 +18,32 @@ import { hasExecutableContent, splitStatements } from '../../utils/queryHelpers'
 export class SqlExecutionError extends Error {
   /** 0-based index of the offending statement in the submitted batch. */
   readonly statementIndex: number
+  /** True when the application-managed transaction was rolled back. */
+  readonly rolledBack: boolean
+  /** Present when rollback itself failed and needs operator attention. */
+  readonly rollbackError?: string
 
-  constructor(message: string, statementIndex: number) {
+  constructor(
+    message: string,
+    statementIndex: number,
+    rolledBack = false,
+    rollbackError?: string,
+  ) {
     super(message)
     this.name = 'SqlExecutionError'
     this.statementIndex = statementIndex
+    this.rolledBack = rolledBack
+    this.rollbackError = rollbackError
   }
+}
+
+/** Reject user transaction control before an application transaction starts. */
+function isTransactionControlStatement(sql: string): boolean {
+  const stripped = sql
+    .replace(/--[^\n]*/g, ' ')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .trim()
+  return /^(?:BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|END)(?:\s|$)/i.test(stripped)
 }
 
 let sqlJsSingleton: Promise<SqlJsStatic> | null = null
@@ -34,10 +54,23 @@ let sqlJsSingleton: Promise<SqlJsStatic> | null = null
  * pointing at the bundled sql-wasm.wasm asset.
  */
 export function loadSqlJs(config?: Parameters<typeof initSqlJs>[0]): Promise<SqlJsStatic> {
-  if (!sqlJsSingleton) {
-    sqlJsSingleton = initSqlJs(config)
+  if (sqlJsSingleton !== null) return sqlJsSingleton
+
+  let attempt: Promise<SqlJsStatic>
+  try {
+    attempt = initSqlJs(config)
+  } catch (error) {
+    sqlJsSingleton = null
+    throw error
   }
-  return sqlJsSingleton
+
+  sqlJsSingleton = attempt
+  // Cache only the in-flight/successful attempt. A rejection clears itself,
+  // but must never clear a newer attempt installed after an explicit reset.
+  void attempt.catch(() => {
+    if (sqlJsSingleton === attempt) sqlJsSingleton = null
+  })
+  return attempt
 }
 
 /** Test/worker hosts may need to reset the memoized runtime. */
@@ -66,17 +99,38 @@ export class SQLiteDatabase {
 
   /**
    * Execute a batch of statements separated by semicolons.
-   * Statements run sequentially and stop at the first error; results
-   * for statements that already succeeded are still returned.
+   * Multi-statement batches are atomic: an application transaction commits
+   * only after every statement succeeds and rolls back on any failure.
+   * Transaction-control statements are rejected before execution so user
+   * SQL cannot bypass that guarantee or create nested transactions.
    */
   executeBatch(sql: string): StatementResult[] {
     const statements = splitStatements(sql)
     const results: StatementResult[] = []
+    if (statements.length === 0) return results
 
     for (let index = 0; index < statements.length; index++) {
-      const statement = statements[index] as string
-      const startedAt = performance.now()
-      try {
+      if (isTransactionControlStatement(statements[index] as string)) {
+        throw new SqlExecutionError(
+          'Transaction-control statements are not supported in application-managed batches. Remove BEGIN, COMMIT, ROLLBACK, SAVEPOINT, RELEASE, and END statements.',
+          index,
+          false,
+        )
+      }
+    }
+
+    const transactional = statements.length > 1
+    let transactionStarted = false
+    let index = 0
+    try {
+      if (transactional) {
+        this.db.run('BEGIN TRANSACTION')
+        transactionStarted = true
+      }
+
+      for (index = 0; index < statements.length; index++) {
+        const statement = statements[index] as string
+        const startedAt = performance.now()
         // prepare/step instead of exec() so zero-row queries still
         // expose their column names (exec() omits empty result sets).
         const stmt = this.db.prepare(statement)
@@ -113,13 +167,30 @@ export class SQLiteDatabase {
           hasResultSet: columns.length > 0,
           executionTime,
         })
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        throw new SqlExecutionError(message, index)
       }
-    }
 
-    return results
+      if (transactional) {
+        this.db.run('COMMIT')
+        transactionStarted = false
+      }
+      return results
+    } catch (error) {
+      let rolledBack = false
+      let rollbackError: string | undefined
+      if (transactionStarted) {
+        try {
+          this.db.run('ROLLBACK')
+          rolledBack = true
+        } catch (rollbackFailure) {
+          rollbackError = rollbackFailure instanceof Error
+            ? rollbackFailure.message
+            : String(rollbackFailure)
+        }
+      }
+      const message = error instanceof Error ? error.message : String(error)
+      const failureIndex = Math.min(index, statements.length - 1)
+      throw new SqlExecutionError(message, failureIndex, rolledBack, rollbackError)
+    }
   }
 
   // ------------------------------------------------------------------

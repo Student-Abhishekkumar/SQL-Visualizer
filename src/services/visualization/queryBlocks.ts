@@ -49,22 +49,28 @@ export function stageKeyFor(
   blockId: QueryBlockId | null | undefined,
   stage: VisualizedStage,
   rootBlockId: QueryBlockId = ROOT_BLOCK_ID,
+  compoundOperationId?: string,
 ): string {
-  if (isRootBlock(blockId, rootBlockId)) return stage
-  return `${blockId}:${stage}`
+  const key = compoundOperationId ?? stage
+  if (isRootBlock(blockId, rootBlockId)) return key
+  return `${blockId}:${key}`
 }
 
 /** Split a block-scoped key back into its block id (null for root). */
+function stageNameForKey(key: string): VisualizedStage {
+  return /^COMPOUND-\d+$/.test(key) ? 'COMPOUND' : (key as VisualizedStage)
+}
+
 export function splitStageKey(
   key: string,
   rootBlockId: QueryBlockId = ROOT_BLOCK_ID,
 ): { blockId: QueryBlockId | null; stage: VisualizedStage } {
   const separator = key.indexOf(':')
-  if (separator < 0) return { blockId: null, stage: key as VisualizedStage }
+  if (separator < 0) return { blockId: null, stage: stageNameForKey(key) }
   const blockId = key.slice(0, separator)
   return {
     blockId: blockId === rootBlockId ? null : blockId,
-    stage: key.slice(separator + 1) as VisualizedStage,
+    stage: stageNameForKey(key.slice(separator + 1)),
   }
 }
 
@@ -73,7 +79,7 @@ export function snapshotStageKey(
   snapshot: StageSnapshot,
   rootBlockId: QueryBlockId = ROOT_BLOCK_ID,
 ): string {
-  return stageKeyFor(snapshot.blockId, snapshot.stage, rootBlockId)
+  return stageKeyFor(snapshot.blockId, snapshot.stage, rootBlockId, snapshot.compoundOperationId)
 }
 
 /** Block-scoped key of an event's stage (null when the event has none). */
@@ -82,7 +88,7 @@ export function eventStageKey(
   rootBlockId: QueryBlockId = ROOT_BLOCK_ID,
 ): string | null {
   if (event.stage === null) return null
-  return stageKeyFor(event.blockId, event.stage, rootBlockId)
+  return stageKeyFor(event.blockId, event.stage, rootBlockId, event.compoundOperationId)
 }
 
 /** Every nested query block of a trace, in interpretation order. */

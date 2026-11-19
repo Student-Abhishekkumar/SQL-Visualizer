@@ -93,7 +93,9 @@ workspace.
 execution state:
 
 1. **Parse** the SQL with `node-sql-parser` and confirm it is a supported `SELECT`, including a
-   `UNION` / `UNION ALL` compound select.
+   `UNION` / `UNION ALL` / `INTERSECT` / `EXCEPT` compound select. When the parser cannot handle a
+   compound form, the quote/comment/parenthesis-aware compound splitter preserves branch SQL and root
+   clauses for the interpretation fallback.
 2. **Interpret** the AST into a typed query structure. Unsupported constructs are collected as
    explicit reasons, not silently ignored.
 3. **Analyze capability** to derive the stages that will run, the constructs in use, warnings and
@@ -128,7 +130,7 @@ execution state:
 | `HAVING` | Evaluate the group predicate; rejected groups branch off. |
 | `SELECT` | Project selected columns and evaluate expressions. |
 | `DISTINCT` | Remove duplicate projected rows. |
-| `COMPOUND` | Fold the independent `UNION` / `UNION ALL` branch results into one compound relation. |
+| `COMPOUND` | Fold independent `SELECT` branches left-to-right with `UNION`, `UNION ALL`, `INTERSECT` or `EXCEPT`, recording each operation's actual inputs, output and removed rows. |
 | `ORDER BY` | Sort rows using the requested keys. |
 | `LIMIT` / `OFFSET` | Keep or skip rows at the end of the pipeline. |
 
@@ -139,11 +141,12 @@ so every panel can explain not just what survived, but what was removed and why.
 
 A statement is a tree of query blocks, not a single pipeline. The root `SELECT` plus every nested
 block — scalar, `IN` / `NOT IN`, `EXISTS` / `NOT EXISTS`, each CTE body, and each `UNION` /
-`UNION ALL` branch — gets a deterministic id (`q1`, `q2`, …) from `astInterpreter`, together with
-`blockKind`, `parentId`, `depth` and the outer `consumingStage`. Stage keys are block-scoped
-(`stageKeyFor`), so nested stages never collide with root stages. `queryBlocks.ts` exposes the block
-list, per-block snapshots and per-block event timelines to the pipeline selector, canvas and
-playback.
+`UNION ALL` / `INTERSECT` / `EXCEPT` branch — gets a deterministic id (`q1`, `q2`, …) from
+`astInterpreter`, together with `blockKind`, `parentId`, `depth` and the outer `consumingStage`. Stage keys are block-scoped
+(`stageKeyFor`), so nested stages never collide with root stages. Non-final compound operations also
+receive deterministic operation keys (`COMPOUND-1`, `COMPOUND-2`, …), while the final operation keeps
+`COMPOUND` for compatibility. `queryBlocks.ts` exposes the block list, per-block snapshots and
+per-block event timelines to the pipeline selector, canvas and playback.
 
 Each nested block is evaluated once, from live data, before the stage or compound result that consumes
 it, through the same logical simulator:
@@ -156,26 +159,33 @@ it, through the same logical simulator:
 - **CTEs** are independent inputs. The body is simulated as a real relation; explicit column lists
   are honoured, earlier CTEs are in scope, and forward/self references are rejected.
 - **Compound branches** are full, independent query blocks. The synthetic compound root owns the
-  trailing `ORDER BY` / `LIMIT` and any root `WITH`, evaluates the CTEs once, then simulates each
-  branch through `simulateQuery`. Branches are folded left-to-right, matching SQLite's left
-  associativity: `A UNION B UNION ALL C` means `(A UNION B) UNION ALL C`. `UNION` deduplicates the
-  whole accumulated result using a NULL-safe value identity (NULL equals NULL, integer and real
-  numeric equals stay equal), while `UNION ALL` preserves every row. The compound stage records the
-  rows UNION removed as a `duplicated` branch.
+  trailing `ORDER BY` / `LIMIT` / `OFFSET` and any root `WITH`, evaluates the CTEs once, then simulates
+  each branch through `simulateQuery`. Operators fold strictly left-to-right: `A UNION B INTERSECT C`
+  means `(A UNION B) INTERSECT C`, not `A UNION (B INTERSECT C)`. `UNION` removes duplicates across the
+  accumulated result, `UNION ALL` preserves them until a later distinct operator, `INTERSECT` keeps
+  distinct rows present in both inputs, and `EXCEPT` keeps distinct left rows absent from the right.
+  Complete rows use NULL-safe keys, so corresponding NULLs compare equal. Branches must return matching
+  column counts, and the first branch names the output columns. Each operation records its accumulated
+  left input, next right input, retained rows, excluded rows and duplicates in
+  `VisualizationTrace.compound.operations`; the final operation also supplies the root `COMPOUND`
+  snapshot used by Table View and validation.
 
 Each block's immutable snapshots and events live in `VisualizationTrace.nestedQueries`, and its real
 output rows become a `subquery` source table whose `consumerStage` names the outer stage that uses
 the value. `cteDependenciesOf` records real dependency edges — including CTE reads performed inside a
 nested scalar/`IN`/`EXISTS` block, via `viaBlockId` — and `graphBuilder` wires those edges between
 the dependency block's output and the consuming operation, so hover and click tracing follow them.
-Compound branches are recorded in `VisualizationTrace.compound` and each one's subgraph feeds its own
-socket on the `COMPOUND` node through a `compound` edge, so selecting the compound result traces back
-into every branch. Nested values are cached per simulation and are never re-executed when inspecting
-a node.
+Compound branches are recorded in `VisualizationTrace.compound.branches`, and each operation in
+`VisualizationTrace.compound.operations`. The first operation consumes the first two branch subgraphs;
+later operations consume the previous operation and their next branch. Each operation has deterministic
+nodes and edges, so selecting or hovering it traces only its actual upstream operations and branches.
+The inspector reads the operation's real left/right inputs and output, including excluded and duplicate
+rows, rather than reconstructing them from the final result. Nested values are cached per simulation and
+are never re-executed when inspecting a node.
 
-Truncation and incompleteness propagate through these edges: a capped CTE, nested block or compound
-branch marks its dependents and the outer trace incomplete with a named reason, and validation
-refuses to certify an incomplete result. Correlation is detected against real column names
+Truncation and incompleteness propagate through these edges: a capped CTE, nested block, compound
+branch or intermediate operation marks its dependents and the outer trace incomplete with a named reason,
+and validation refuses to certify an incomplete result. Correlation is detected against real column names
 (`correlation.ts`) before a block runs; correlated scalar, `IN` and `EXISTS` blocks abort with an
 explicit reason instead of using invented per-row values. This remains an educational logical model,
 not SQLite's physical plan.
@@ -211,7 +221,8 @@ Validation compares the trace's final result with SQLite's real result:
 Nested blocks are validated independently too: `validateNestedBlocks` runs each block's own SQL
 against SQLite (re-declaring prerequisite CTE definitions for blocks that read a CTE) and reports a
 per-block outcome. Compound branches are plain `SELECT` blocks, so each one is validated this way
-while the folded compound result is validated as a whole. Truncated or incomplete blocks are marked
+while the folded compound result is validated as a whole. Intermediate operation snapshots are
+inspection data, not independent parity claims. Truncated or incomplete blocks and operations are marked
 skipped and never reported as validated, and an incomplete outer simulation cannot claim parity even
 when the capped result happens to match SQLite.
 
@@ -232,9 +243,11 @@ That single view state drives:
 - the floating node inspector and the documentation sidebar,
 - the playback controls and speed selection.
 
-Each query block also has its own event timeline. Selecting the compound result plays the shared
-`COMPOUND`, compound `ORDER BY` and compound `LIMIT` stages, while selecting a branch plays that
-branch's own pipeline from its source tables to its projected rows.
+Each query block also has its own event timeline. Compound operations appear in left-to-right order
+with their own snapshots and operation keys; the final operation retains the shared `COMPOUND` key,
+followed by compound `ORDER BY` and `LIMIT`. Selecting a branch plays that branch's own pipeline from
+its source tables to its projected rows. Table View follows the final compound result, while the
+inspector can show any completed operation's actual inputs and removed rows.
 
 Both Query and Canvas workspaces stay mounted. Switching views therefore preserves editor
 content, results, canvas pan/zoom, node selection and playback position.
@@ -253,8 +266,8 @@ keeps interaction independent from playback state. It owns transient camera and 
 
 - **Pan and zoom:** pointer drag and wheel gestures update a local camera; fit and reset derive a
   new camera from the graph bounds.
-- **Node dragging:** pointer capture moves a node within the canvas and settles nearby collisions;
-  a drag never selects the node or opens the inspector.
+- **Node dragging:** pointer capture moves a node within the canvas, including left-of-origin graph
+  coordinates, and settles nearby collisions; a drag never selects the node or opens the inspector.
 - **Hover and click tracing:** hover emphasizes the upstream path for that node; click pins the
   selection and opens the inspector. Both use the graph's real edges, including branch edges.
 
@@ -325,7 +338,7 @@ visualization stay synchronized.
 | `databaseStore` | Active database, database list, schema, last result, execution status |
 | `editorStore` | SQL text and current clause highlight |
 | `historyStore` | Query history and saved named queries |
-| `uiStore` | Theme, active workspace view, sidebar state, modals, learning level |
+| `uiStore` | Theme, active workspace view (Query by default and session-only), sidebar state, modals, learning level |
 | `visualizationStore` | Trace, playback position, speed, validation and status |
 
 Playback state also carries a session id so a new trace or database switch cannot leave stale
@@ -355,6 +368,17 @@ The visualization workspace distinguishes:
 
 DDL and DML still execute normally; they simply cannot be visualized. This separation keeps the SQL
 workspace useful even when the educational model does not apply.
+
+### Current compound-query limits
+
+- Recursive CTEs (`WITH RECURSIVE`) and correlated subqueries are rejected with explicit reasons.
+- Nested compound forms are not covered by the general compound fallback; in particular,
+  `INTERSECT` and `EXCEPT` inside subqueries or CTE bodies are not visualized.
+- `INTERSECT ALL`, `EXCEPT ALL`, `UNION DISTINCT` and `INTERSECT DISTINCT` are rejected rather than
+  approximated. Root clauses must follow the final set operator; branch-level `ORDER BY`, `LIMIT` and
+  `OFFSET` are rejected.
+- A capped or incomplete branch or operation is disclosed and never presented as fully validated,
+  even when the visible rows happen to match SQLite.
 
 ## Source map
 

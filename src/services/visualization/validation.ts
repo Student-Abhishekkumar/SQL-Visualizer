@@ -25,21 +25,12 @@ import type {
   VisualizedRow,
 } from '../../types/visualization'
 import { interpretQuery } from './astInterpreter'
+import { rowKey, rowsEqual, rowsMatchUnordered, valuesEqual } from './rowIdentity'
 import { simulateQuery, type SimulationOptions, type SimulationOutcome, type TableData } from './simulator'
-
-const RELATIVE_EPSILON = 1e-9
 
 /** SQL NULL-safe, type-aware value equality. */
 export function simulationValuesEqual(a: unknown, b: unknown): boolean {
-  const aNull = a === null || a === undefined
-  const bNull = b === null || b === undefined
-  if (aNull || bNull) return aNull && bNull
-  if (typeof a === 'number' && typeof b === 'number') {
-    if (Number.isNaN(a) && Number.isNaN(b)) return true
-    const scale = Math.max(1, Math.abs(a), Math.abs(b))
-    return Math.abs(a - b) <= RELATIVE_EPSILON * scale
-  }
-  return String(a) === String(b)
+  return valuesEqual(a, b)
 }
 
 function normalizeLabel(label: string): string {
@@ -52,21 +43,6 @@ export interface ComparableSimulationResult {
   finalRows: VisualizedRow[]
   /** True when ORDER BY fully determines the row order (no ties). */
   hasDeterministicOrder: boolean
-}
-
-/** Canonical, stable key for one row's values (multiset comparison). */
-function rowKey(values: unknown[]): string {
-  return `[${values
-    .map((value) => {
-      if (value === null || value === undefined) return 'null'
-      if (typeof value === 'number') {
-        // Quantize to 12 significant digits so equivalent floats from
-        // different summation orders hash to the same key.
-        return `n:${value === 0 ? 0 : Number(value.toPrecision(12))}`
-      }
-      return `${typeof value}:${String(value)}`
-    })
-    .join('|')}]`
 }
 
 /**
@@ -119,7 +95,7 @@ export function compareSimulationWithSqlite(
     for (let i = 0; i < simulatedRows.length; i++) {
       const simulated = simulatedRows[i] ?? []
       const real = actual.values[i] ?? []
-      if (!simulated.every((value, index) => simulationValuesEqual(value, real[index]))) {
+      if (!rowsEqual(simulated, real)) {
         return {
           validated: false,
           method,
@@ -130,37 +106,15 @@ export function compareSimulationWithSqlite(
       }
     }
   } else {
-    // Multiset comparison: SQLite's row order is not guaranteed here.
-    const countBy = (rows: unknown[][]) => {
-      const counts = new Map<string, number>()
-      for (const row of rows) {
-        const key = rowKey(row)
-        counts.set(key, (counts.get(key) ?? 0) + 1)
-      }
-      return counts
-    }
-    const simulatedCounts = countBy(simulatedRows)
-    const realCounts = countBy(actual.values)
-    for (const [key, count] of simulatedCounts) {
-      if ((realCounts.get(key) ?? 0) !== count) {
-        return {
-          validated: false,
-          method,
-          detail: `Row multiset differs: simulation has ${count} of [${key}] but SQLite's result does not match.`,
-          actualColumns: actual.columns,
-          actualRowCount: actual.values.length,
-        }
-      }
-    }
-    for (const [key, count] of realCounts) {
-      if ((simulatedCounts.get(key) ?? 0) !== count) {
-        return {
-          validated: false,
-          method,
-          detail: `Row multiset differs: SQLite has ${count} of [${key}] but the simulation does not.`,
-          actualColumns: actual.columns,
-          actualRowCount: actual.values.length,
-        }
+    // Multiset comparison uses the same type-aware comparator as ordered
+    // validation, including the documented floating-point tolerance.
+    if (!rowsMatchUnordered(simulatedRows, actual.values)) {
+      return {
+        validated: false,
+        method,
+        detail: 'Row multiset differs: simulation and SQLite produced different rows.',
+        actualColumns: actual.columns,
+        actualRowCount: actual.values.length,
       }
     }
   }
@@ -366,8 +320,8 @@ export interface SimulateAndValidateOutcome {
 
 /**
  * Full pipeline used by the app: simulate the query logically, execute
- * it for real in SQLite, and validate the simulation against reality.
- * A simulation failure never prevents execution and vice versa.
+ * it for real in SQLite only after that simulation succeeds, and validate
+ * the simulation against reality. Rejected input never reaches execution.
  */
 export function simulateAndValidate(
   sql: string,
@@ -386,15 +340,20 @@ export function simulateAndValidate(
   let execution: { columns: string[]; values: unknown[][] } | null = null
   let validation: ValidationResult | null = null
 
-  try {
-    const batch = db.executeBatch(statements.length === 1 ? statements[0] ?? sql : sql)
-    const primary = batch.find((result) => result.hasResultSet)
-    if (primary !== undefined) {
-      execution = { columns: primary.columns, values: primary.values.map((row) => [...row]) }
+  // Execution is allowed only after a complete, supported read-only
+  // simulation succeeds. Rejected input must never reach SQLite through
+  // this visualization path.
+  if (simulation.ok) {
+    try {
+      const batch = db.executeBatch(statements.length === 1 ? statements[0] ?? sql : sql)
+      const primary = batch.find((result) => result.hasResultSet)
+      if (primary !== undefined) {
+        execution = { columns: primary.columns, values: primary.values.map((row) => [...row]) }
+      }
+    } catch {
+      // Execution errors are surfaced by the normal execute path, not here.
+      execution = null
     }
-  } catch {
-    // Execution errors are surfaced by the normal execute path, not here.
-    execution = null
   }
 
   if (simulation.ok && execution !== null) {

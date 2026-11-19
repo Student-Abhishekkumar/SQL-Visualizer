@@ -1,5 +1,5 @@
 import 'fake-indexeddb/auto'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   createDatabase,
   deleteDatabase,
@@ -25,7 +25,9 @@ import { SQLiteDatabase } from './sqliteService'
 import { SCHEMA_SQL, SEED_SQL } from './seedData'
 import {
   clearAllDatabaseData,
+  loadDatabaseSnapshot,
   loadHistory,
+  saveDatabaseSnapshot,
 } from '../persistence/persistenceService'
 import { useDatabaseStore } from '../../store/databaseStore'
 import { useHistoryStore } from '../../store/historyStore'
@@ -79,6 +81,10 @@ beforeEach(async () => {
   useHistoryStore.setState({ history: [], savedQueries: [], loaded: true })
   useVisualizationStore.getState().resetForDatabaseSwitch()
   await clearAllDatabaseData({ includeHistory: true, includeSavedQueries: true })
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
 })
 
 describe('database creation', () => {
@@ -268,12 +274,140 @@ describe('persistence', () => {
     ).toBe('survives a reload')
   })
 
+  it('keeps the current live database and stored bytes when another snapshot cannot restore', async () => {
+    const source = await createDatabase({ name: 'Recovery Source', template: 'blank' })
+    await executeAndPersist("CREATE TABLE valuables (id INTEGER PRIMARY KEY); INSERT INTO valuables VALUES (1)")
+    const validSnapshot = await loadDatabaseSnapshot(source.info.id)
+    const other = await createDatabase({ name: 'Still Live', template: 'blank' })
+    await executeAndPersist("CREATE TABLE current_data (id INTEGER PRIMARY KEY); INSERT INTO current_data VALUES (42)")
+    const currentConnection = live()
+    const corruptSnapshot = new Uint8Array([9, 8, 7])
+    await saveDatabaseSnapshot(corruptSnapshot, source.info.id)
+
+    await expect(openDatabase(source.info.id)).rejects.toMatchObject({
+      name: 'DatabaseRestoreError',
+      failure: 'corrupt-snapshot',
+    })
+    expect(live()).toBe(currentConnection)
+    expect(getActiveDatabaseId()).toBe(other.info.id)
+    expect(live().queryAll('SELECT id FROM current_data').values).toEqual([[42]])
+    expect(await loadDatabaseSnapshot(source.info.id)).toEqual(corruptSnapshot)
+
+    await saveDatabaseSnapshot(validSnapshot as Uint8Array, source.info.id)
+    await openDatabase(source.info.id)
+    expect(live().queryAll('SELECT id FROM valuables').values).toEqual([[1]])
+  })
+
   it('restores the example database on a fresh workspace', async () => {
     const result = await initDatabaseManager()
     expect(result.restored).toBe(false)
     expect(result.schema?.tables.map((table) => table.name)).toContain('employees')
     expect(getDatabases()).toHaveLength(1)
     expect(getActiveDatabase()?.template).toBe('example')
+  })
+})
+
+describe('atomic execution and persistence', () => {
+  it('returns accurate statement results, refreshes schema, and persists only after commit', async () => {
+    const created = await createDatabase({ name: 'Atomic Success', template: 'blank' })
+    const result = await useDatabaseStore.getState().execute(`
+      CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT UNIQUE);
+      INSERT INTO items (id, label) VALUES (1, 'one'), (2, 'two');
+      SELECT id, label FROM items ORDER BY id;
+    `)
+
+    expect(result.success).toBe(true)
+    expect(result.committed).toBe(true)
+    expect(result.rolledBack).toBe(false)
+    expect(result.persistencePending).toBe(false)
+    expect(result.statements).toHaveLength(3)
+    expect(result.statements[0]?.rowsModified).toBe(0)
+    expect(result.statements[1]?.rowsModified).toBe(2)
+    expect(result.statements[2]?.values).toEqual([[1, 'one'], [2, 'two']])
+    expect(result.rows).toEqual([{ id: 1, label: 'one' }, { id: 2, label: 'two' }])
+    expect(useDatabaseStore.getState().schema?.tables.map((table) => table.name)).toContain('items')
+
+    const bytes = await loadDatabaseSnapshot(created.info.id)
+    expect(bytes).not.toBeNull()
+    const restored = await SQLiteDatabase.create(undefined, bytes as Uint8Array)
+    expect(restored.queryAll('SELECT COUNT(*) FROM items').values[0]?.[0]).toBe(2)
+    restored.close()
+  })
+
+  it('keeps failed batch mutations out of both the live database and IndexedDB', async () => {
+    const created = await createDatabase({ name: 'Atomic Failure', template: 'blank' })
+    const setup = await useDatabaseStore.getState().execute(`
+      CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT UNIQUE);
+      INSERT INTO items (id, label) VALUES (1, 'one');
+    `)
+    expect(setup.success).toBe(true)
+    const before = await loadDatabaseSnapshot(created.info.id)
+
+    const result = await useDatabaseStore.getState().execute(`
+      INSERT INTO items (id, label) VALUES (2, 'two');
+      INSERT INTO items (id, label) VALUES (3, 'one');
+      INSERT INTO items (id, label) VALUES (4, 'four');
+    `)
+
+    expect(result.success).toBe(false)
+    expect(result.committed).toBe(false)
+    expect(result.rolledBack).toBe(true)
+    expect(result.persistencePending).toBe(false)
+    expect(result.errorStatementIndex).toBe(1)
+    expect(result.error).toMatch(/rolled back/i)
+    expect(live().queryAll('SELECT id FROM items ORDER BY id').values).toEqual([[1]])
+    expect(useDatabaseStore.getState().lastResult).toEqual(result)
+
+    const after = await loadDatabaseSnapshot(created.info.id)
+    expect(after).toEqual(before)
+    const restored = await SQLiteDatabase.create(undefined, after as Uint8Array)
+    expect(restored.queryAll('SELECT id FROM items').values).toEqual([[1]])
+    restored.close()
+  })
+
+  it('reports post-commit IndexedDB failure without claiming rollback or durability', async () => {
+    const created = await createDatabase({ name: 'Persistence Failure', template: 'blank' })
+    const before = await loadDatabaseSnapshot(created.info.id)
+    const originalPut = IDBObjectStore.prototype.put
+    vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(
+      function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+        if (this.name === 'snapshots') {
+          throw new DOMException('Simulated snapshot write failure', 'QuotaExceededError')
+        }
+        return key === undefined
+          ? originalPut.call(this, value)
+          : originalPut.call(this, value, key)
+      },
+    )
+
+    const result = await useDatabaseStore.getState().execute(`
+      CREATE TABLE committed_items (id INTEGER PRIMARY KEY);
+      INSERT INTO committed_items (id) VALUES (1);
+    `)
+
+    expect(result.success).toBe(false)
+    expect(result.committed).toBe(true)
+    expect(result.rolledBack).toBe(false)
+    expect(result.persistencePending).toBe(true)
+    expect(result.persistenceError).toMatch(/snapshot/i)
+    expect(result.error).toMatch(/committed.*persistence failed/i)
+    expect(result.statements).toHaveLength(2)
+    expect(live().queryAll('SELECT id FROM committed_items').values).toEqual([[1]])
+    expect(useDatabaseStore.getState().schema?.tables.map((table) => table.name))
+      .toContain('committed_items')
+
+    const afterFailure = await loadDatabaseSnapshot(created.info.id)
+    expect(afterFailure).toEqual(before)
+    const restored = await SQLiteDatabase.create(undefined, afterFailure as Uint8Array)
+    expect(() => restored.queryAll('SELECT * FROM committed_items')).toThrow(/no such table/i)
+    restored.close()
+
+    vi.restoreAllMocks()
+    expect(await persistActiveDatabase()).toBe(true)
+    const afterRetry = await loadDatabaseSnapshot(created.info.id)
+    const durable = await SQLiteDatabase.create(undefined, afterRetry as Uint8Array)
+    expect(durable.queryAll('SELECT id FROM committed_items').values).toEqual([[1]])
+    durable.close()
   })
 })
 
