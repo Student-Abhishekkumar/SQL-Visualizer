@@ -6,12 +6,14 @@
 <p align="center">
   <b>See what your SQL actually does.</b><br />
   A browser-based SQL playground that runs real SQLite locally and replays supported
-  <code>SELECT</code> queries as an animated, inspectable data-flow graph.
+  <code>SELECT</code>, DML and DDL statements as animated, inspectable data-flow or schema graphs.
 </p>
 
 <p align="center">
   <img alt="Status: active development" src="https://img.shields.io/badge/status-active_development-F59E0B?style=flat-square" />
-  <img alt="748 tests passing" src="https://img.shields.io/badge/tests-748_passing-2EA043?style=flat-square" />
+  <img alt="1065 unit tests passing" src="https://img.shields.io/badge/unit_tests-1065_passing-2EA043?style=flat-square" />
+  <img alt="583 browser QA assertions passing" src="https://img.shields.io/badge/browser_QA-583_passing-2EA043?style=flat-square" />
+  <img alt="MIT licensed" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" />
 </p>
 
 <p align="center">
@@ -19,8 +21,11 @@
   <a href="#key-features">Features</a> ·
   <a href="#screenshots">Screenshots</a> ·
   <a href="#how-it-works">How it works</a> ·
+  <a href="#supported-sql-visualization">Supported SQL</a> ·
+  <a href="#canvas-features">Canvas</a> ·
+  <a href="#database-execution-and-safety">Safety</a> ·
   <a href="#installation-and-setup">Quick start</a> ·
-  <a href="#documentation">Documentation</a> ·
+  <a href="#browser-qa">Browser QA</a> ·
   <a href="#roadmap">Roadmap</a>
 </p>
 
@@ -43,7 +48,7 @@
 
 SQL Visualizer is a working SQL workspace with an educational execution model layered on top. You
 write SQL, run it against a real SQLite database compiled to WebAssembly, and then switch to a
-Blender-inspired canvas to watch a supported `SELECT` flow through logical stages.
+Blender-inspired canvas to watch supported SQL flow through logical stages. DML and DDL previews execute only on an isolated copy, leaving the active database unchanged.
 
 There is no backend, no account and no telemetry. Database files, history and saved queries stay in
 the browser's IndexedDB.
@@ -85,8 +90,9 @@ guessing.
 | Feature | What it does |
 |:---|:---|
 | **Animated logical pipeline** | Renders the supported query pipeline as connected nodes: sources, joins, filters, grouping, projection and the final result. The default animation covers the full pipeline; hover or selection narrows the highlighted upstream path. |
+| **Isolated DML and DDL previews** | Visualize supported INSERT/UPDATE/DELETE row changes and CREATE/ALTER/DROP table/index schema changes. Only a temporary clone executes mutations; real rows, `sqlite_master` and PRAGMA metadata feed the same canvas, inspector and playback. |
 | **Nested query blocks** | Scalar subqueries, uncorrelated `IN` / `EXISTS` subqueries and non-recursive CTEs run as their own real pipelines, with dependency edges into the stage that consumes them and block-specific playback. Every `UNION` / `UNION ALL` / `INTERSECT` / `EXCEPT` branch is likewise an independent block feeding the actual left-to-right compound operation sequence. |
-| **Stage snapshots and playback** | Snapshots carry real rows through every stage. Play, pause, step, seek, restart or jump to the end, at 0.5×, 1×, 1.5× or 2× speed. |
+| **Stage snapshots and playback** | Snapshots carry real rows or real schema metadata through every stage. Play, pause, step, seek, restart or jump to the end, at 0.5×, 1×, 1.5× or 2× speed. |
 | **Flow and Table views** | Switch between the node canvas and a row-level table for the current stage, including accepted, filtered, duplicated, grouped or skipped rows. |
 | **Branch-aware tracing** | Hover a node to temporarily animate its upstream path; click to pin the selection and open the inspector. Rejected rows branch visibly at filters and `HAVING`. |
 | **Floating Node Inspector** | Click a node to open a draggable, resizable window with Overview, Input, Output and Details tabs, real row previews and node-specific information. Collapse it to a header-only strip or minimize it to a dock chip, then restore the same window. |
@@ -127,6 +133,18 @@ guessing.
       <sub><b>Schema viewer</b> — columns, keys and the original DDL for every table.</sub>
     </td>
   </tr>
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <img src="docs/assets/node-inspector.png" alt="Floating Node Inspector showing Overview, Input, Output and Details tabs for a canvas node" width="100%" />
+      <br />
+      <sub><b>Node Inspector</b> — real input and output rows for the selected stage.</sub>
+    </td>
+    <td width="50%" align="center" valign="top">
+      <img src="docs/assets/stage-explanation.png" alt="Documentation sidebar explaining the active SQL stage with counts and SQLite references" width="100%" />
+      <br />
+      <sub><b>Stage explanations</b> — beginner, intermediate and advanced notes that follow playback.</sub>
+    </td>
+  </tr>
 </table>
 
 ## Technology
@@ -162,10 +180,11 @@ flowchart TD
     PLAY --> DOCS[Explanations + knowledge checks]
 ```
 
-SQLite is always the source of truth. The simulator applies logical stages to real table data,
+SQLite is always the source of truth. The SELECT simulator applies logical stages to real table data,
 records immutable snapshots, and validates its final result against SQLite — ordered when
-`ORDER BY` fully determines the order, unordered otherwise. If a construct cannot be modeled
-faithfully, visualization stops with explicit reasons.
+`ORDER BY` fully determines the order, unordered otherwise. DML previews compare real clone rows;
+DDL previews use actual post-statement `sqlite_master` and PRAGMA metadata with row-preservation checks.
+If a construct cannot be modeled faithfully, visualization stops with explicit reasons.
 
 ## SQL visualization pipeline
 
@@ -182,11 +201,13 @@ faithfully, visualization stops with explicit reasons.
 | `ORDER BY` | Rows sorted by the requested keys. |
 | `LIMIT` / `OFFSET` | Rows kept or skipped at the end of the pipeline. |
 | Nested query block | A non-correlated scalar subquery, `IN` / `NOT IN` subquery, `EXISTS` / `NOT EXISTS` subquery, non-recursive CTE, or one `SELECT` branch of a compound query, simulated as its own real pipeline and wired into the stage that consumes it. Compound operations expose their accumulated left input, next right input, retained rows, excluded rows and duplicates. |
+| DML preview stages | TARGET, INPUT, COLUMN_MAPPING, INSERT, MATCHED_ROWS, SET, CHANGED_ROWS, UNCHANGED_ROWS, DELETE, RETAINED_ROWS and FINAL_TABLE show actual isolated row changes. |
+| DDL schema stages | Catalog, table/column/constraint definitions, ALTER transformation, removed objects and index metadata come from real `sqlite_master` and PRAGMA reads on the isolated copy. |
 
 <details>
 <summary><b>Scope and honest limits</b></summary>
 
-- Visualization is for **supported `SELECT` statements**, including `UNION`, `UNION ALL`, `INTERSECT` and `EXCEPT` compounds. DDL and DML still execute normally in SQLite, but are not visualized.
+- Visualization supports **SELECT** (including compounds), single-table **INSERT/UPDATE/DELETE**, and isolated **CREATE TABLE, ALTER TABLE, DROP TABLE, CREATE INDEX and DROP INDEX** previews. ALTER supports table/column rename and add/drop column; indexes include UNIQUE, expression and partial forms. Mutating previews never change the active database or stored snapshot.
 - Supported joins: INNER, LEFT and CROSS. Comma cross joins are not supported.
 - Supported expressions include comparisons, `AND`/`OR`/`NOT`, `IN`, `BETWEEN`, `IS NULL`, `LIKE`, arithmetic and `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`.
 - **Non-correlated scalar subqueries** are supported in `WHERE`, `SELECT` and `JOIN … ON`, following SQLite's rules: an empty result becomes `NULL`, multiple rows use the first row, and the subquery must return one column.
@@ -202,7 +223,56 @@ See [docs/FEATURES.md](docs/FEATURES.md) for the full capability and limitation 
 
 </details>
 
-### What a query becomes
+## Supported SQL visualization
+
+Everything below runs on real data and is validated against SQLite. Anything outside this surface is
+reported with an explicit reason rather than approximated.
+
+### SELECT
+
+- **Filtering and projection:** `WHERE` predicates and `SELECT` lists, including computed expressions.
+- **Grouping and aggregation:** `GROUP BY` with `COUNT`, `SUM`, `AVG`, `MIN` and `MAX`, plus `HAVING`.
+- **Result shaping:** `DISTINCT`, `ORDER BY` (multiple keys and directions) and `LIMIT` / `OFFSET`.
+- **Joins:** INNER, LEFT and CROSS joins, with each input table rendered as its own source node.
+- **Names and values:** table/column aliases, `*` wildcards and qualified references, using SQLite's
+  own type affinity, `NULL` three-valued logic and collation-aware comparison rules.
+- **Honesty:** filters and `HAVING` show the rows they rejected as visible branches, not just counts.
+
+### Advanced queries
+
+- **Scalar subqueries:** non-correlated, in `WHERE`, `SELECT` and `JOIN … ON`; must return one column,
+  an empty result becomes `NULL`, and multiple rows use the first row.
+- **`IN` / `NOT IN`:** uncorrelated subqueries with SQLite's three-valued logic, including `NULL`
+  members and empty results.
+- **`EXISTS` / `NOT EXISTS`:** uncorrelated subqueries where only row presence matters.
+- **CTEs:** multiple and chained non-recursive `WITH` definitions, explicit column lists, and
+  dependency edges drawn between the blocks that consume each other.
+- **Compound queries:** `UNION`, `UNION ALL`, `INTERSECT` and `EXCEPT`, including mixed chains
+  evaluated strictly left to right, with NULL-safe whole-row duplicate detection.
+- **Independent blocks:** every nested block and compound branch is its own pipeline with its own
+  snapshots, playback and inspector data.
+
+### DML visualization
+
+- **`INSERT`:** single and multiple `VALUES`, supported `INSERT … SELECT`, and `DEFAULT VALUES`.
+- **`UPDATE`:** `WHERE` matching, multiple `SET` assignments, and explicit changed vs. unchanged rows.
+- **`DELETE`:** matched, retained and removed rows, including zero-row and no-`WHERE` statements.
+- **Isolated preview:** the target table is a source-like node, and the final node shows the
+  post-statement table state from the isolated copy — never from your active database.
+
+### DDL visualization
+
+- **`CREATE TABLE`:** explicit columns, constraints, generated columns and `IF NOT EXISTS` no-ops.
+- **`ALTER TABLE`:** `RENAME TO`, `RENAME COLUMN`, `ADD COLUMN` and `DROP COLUMN`, with
+  row-preservation checks across the change.
+- **`DROP TABLE`:** the removed definition, the remaining catalog, dependent index/trigger removal and
+  `IF EXISTS` no-ops.
+- **Indexes:** `CREATE INDEX` / `CREATE UNIQUE INDEX` (ordinary, expression and partial) and
+  `DROP INDEX`, with real PRAGMA metadata and unchanged-row checks.
+- **Real catalog data:** schema nodes are built from `sqlite_master` and PRAGMA reads on the isolated
+  copy, so the before/after view reflects what SQLite actually reports.
+
+### Worked example: from SQL to canvas
 
 ```sql
 SELECT d.department_name,
@@ -232,6 +302,32 @@ Each node carries real row counts; filtered rows branch off at the WHERE gate, g
 into visible groups, and the final node shows the projected result. Because `ORDER BY` fully
 determines the order, the workspace reports **Validated (ordered) vs SQLite**.
 
+## Database execution and safety
+
+There are two separate execution paths, and they never mix:
+
+| Path | What executes | Effect on your data |
+|:---|:---|:---|
+| **Run** | Your statement batch against the active database | **Writable.** INSERT, UPDATE, DELETE and DDL persist exactly as SQLite applies them. |
+| **Visualize** | Supported SELECT reads; DML/DDL run only on an independent database clone | **Never mutates** the active database or its persisted snapshot. |
+
+How the isolated preview works:
+
+- Before a mutating preview, the active database is serialized and loaded into a separate in-memory
+  SQLite connection. Every mutation happens on that clone.
+- Preview rows, PRAGMA output and `sqlite_master` metadata come from the clone, so the canvas,
+  inspector and Table View show what SQLite actually did to it.
+- The active database file, the selected database and the IndexedDB snapshot are left untouched.
+  The browser QA suite verifies this by comparing full database contents before and after every
+  preview, and again after a page reload.
+- If a statement cannot be previewed faithfully (for example triggers, generated-column targets or an
+  unsupported `ALTER TABLE` form), Visualize refuses with explicit reasons and leaves **no partial
+  graph** behind.
+- Empty results and no-ops complete honestly: `WHERE 1 = 0`, an `UPDATE` that changes nothing, or
+  `CREATE TABLE IF NOT EXISTS` on an existing table are shown as completed operations, not errors.
+- Visualize is intentionally scoped. It does not support every valid SQLite statement — unsupported
+  statements still run normally through **Run**.
+
 ## Database management
 
 Databases are first-class records, not tabs on a single global file:
@@ -247,7 +343,26 @@ Databases are first-class records, not tabs on a single global file:
 A visualization trace belongs to the database it was built from. Switching databases invalidates the
 trace rather than showing data from the wrong workspace.
 
-## Node Inspector and canvas interactions
+## Canvas features
+
+The canvas is built from the real trace, not from a fixed template:
+
+- **Trace-driven nodes:** every node corresponds to an operation in this specific trace. Absent stages
+  produce no placeholder nodes, and non-applicable clauses never appear.
+- **One final result:** the terminal stage feeds the single final node, so there is no duplicate
+  terminal data node. It shows the real projected rows, resulting table state or resulting schema.
+- **Stable node identity:** a visualization keeps its node ids for its lifetime. Playback, seeking,
+  panning, zooming and repeated renders update node *state*, never the graph structure.
+- **No stale graphs:** visualizing a different query replaces the graph entirely, and a refused
+  visualization clears it instead of leaving a misleading partial graph.
+- **Legitimate independent blocks:** nested query blocks and compound branches keep their own nodes
+  and playback instead of being merged or duplicated.
+- **Animated connections:** sockets and curved wires connect real data dependencies, with animated
+  packets on the running stage.
+- **Branch-aware tracing:** hovering a node temporarily animates its upstream path; clicking pins the
+  selection and opens the inspector.
+
+### Canvas interactions
 
 - **Pan and zoom** by dragging empty canvas space and scrolling; use fit-to-screen and reset controls.
 - **Drag nodes** to reposition them; collisions settle locally without changing the query.
@@ -296,15 +411,79 @@ Open <http://localhost:5173>. The University example database is created on firs
 
 | Command | What it does |
 |:---|:---|
+| `npm install` | Install dependencies. |
 | `npm run dev` | Start the Vite development server with HMR. |
 | `npm run build` | Type-check and build production assets to `dist/`. |
 | `npm run preview` | Serve the production build locally. |
-| `npm test` | Run the full Vitest suite (40 files, 623 tests). |
+| `npm test` | Run the full Vitest suite (70 files, 1,065 tests). |
 | `npm run test:watch` | Run Vitest in watch mode. |
 | `npm run lint` | Lint the project with oxlint. |
 | `npm run typecheck` | Run the TypeScript project build without emitting. |
+| `npm run qa:browser` | Drive a real headless Chrome through the Canvas QA suite. |
+| `npm run qa:production` | Smoke-test the built bundle without the dev bridge. |
 
-## Project structure
+## Verified results
+
+Current state of this repository at this commit:
+
+| Check | Result |
+|:---|:---|
+| Unit tests | **70 files, 1,065 tests passed** |
+| Browser QA | **583/583 assertions passed** (headless Chrome 157) |
+| Lint | **0 warnings, 0 errors** |
+| Typecheck | **Passed** |
+| Production build | **Passed** |
+
+## Browser QA
+
+The visualization is verified in a real browser, not only in unit tests. `scripts/browser-qa/` drives
+headless Chrome over the DevTools Protocol using only Node built-ins, so the project needs **no
+Playwright or Cypress dependency**.
+
+```bash
+# Full suite: starts its own dev server, writes screenshots and a JSON report,
+# and exits non-zero if any assertion fails.
+QA_MANAGED_SERVER=1 npm run qa:browser
+
+# Production bundle smoke test (no dev bridge is present in the build).
+npm run build
+QA_MANAGED_PREVIEW=1 npm run qa:production
+```
+
+On Windows PowerShell, set the same variables with `$env:QA_MANAGED_SERVER='1'` before running.
+
+The suite covers five checkpoints:
+
+| Checkpoint | What it verifies |
+|:---|:---|
+| **A** | App loads, editor accepts typing, database initializes, Run works, Visualize renders, Flow/Table switch, console and network are clean. |
+| **B** | Canvas node structure for SELECT, JOIN, nested subqueries, CTEs and compound queries; no placeholder or duplicate nodes; empty results complete honestly. |
+| **C** | DML/DDL previews on an isolated clone, with full database-content comparison before/after and after reload; writable Run still mutates the real database. |
+| **D** | Zoom, pan, node drag, click-vs-drag threshold, negative-coordinate layout, hover tracing, inspector drag/resize/minimize/restore, and playback/seeking that never changes graph identity. |
+| **E** | Visual quality at small/medium/large sizes, title legibility, fit-to-screen containment, playback DOM reuse and timing, repeated-visualization stability. |
+
+Artifacts (screenshots and `report.json`) are written to `artifacts/browser-qa/` and are gitignored.
+Chrome or Edge must be installed; set `CHROME_PATH` if it is not in a standard location. Run selected
+checkpoints with `QA_ONLY=A,B,C` and target an already-running server with `APP_URL`.
+
+## Architecture overview
+
+The app is a single-page React/TypeScript frontend with no server. SQLite runs as WebAssembly inside
+the tab, and every layer is separated by typed contracts:
+
+- **Execution:** `services/database/` owns the SQLite connection, multi-database manager, templates and
+  IndexedDB persistence.
+- **Interpretation:** `services/sql/` parses statements; `services/visualization/` contains the typed
+  AST interpreter, capability analyzer, simulator, validators and explanation content.
+- **Visualization:** `graphBuilder` turns immutable snapshots into a laid-out flow graph; `flowLayout`,
+  `flowGeometry` and `flowPath` handle geometry and routing.
+- **UI and state:** `components/` renders the workspace, canvas, inspector and panels; Zustand stores
+  in `store/` hold database, editor, history, UI and playback state.
+- **Automation:** `scripts/browser-qa/` drives the real browser for regression testing.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full runtime paths and invariants.
+
+### Project structure
 
 ```text
 src/
@@ -339,7 +518,7 @@ their implementation.
 - **Storage is browser-managed.** Clearing site data removes databases, history and saved queries.
   Private browsing modes may reject IndexedDB writes.
 - **Single user.** Concurrent editing from multiple tabs is not coordinated.
-- **`SELECT` visualization.** Supported `SELECT` statements, including `UNION`, `UNION ALL`, `INTERSECT` and `EXCEPT` compounds, can be visualized. DDL, DML, transactions and other statements execute in SQLite but cannot be visualized.
+- **Supported statement scope.** Supported SELECT statements, single-table DML, and the table/index DDL listed above can be visualized. Unsupported DML/DDL forms, transactions and other statements execute normally through Run but report explicit Visualize reasons.
 - **Unsupported SELECT constructs.** Correlated subqueries (including correlated `IN` / `EXISTS`),
   recursive CTEs (`WITH RECURSIVE`), nested compound forms not covered by the existing nested-block
   interpreter, derived tables, `RIGHT`/`FULL OUTER JOIN`, `CASE`, window functions and non-constant
@@ -353,6 +532,13 @@ their implementation.
 - **No hosted demo.** Run the project locally with `npm run dev`.
 - **No guided exercises yet.** Knowledge checks and stage explanations are available; full exercises
   are planned.
+- **Bundle size.** The main JavaScript chunk is about 7.1 MB (roughly 1.8 MB gzipped), dominated by
+  Monaco Editor and sql.js. Vite reports its standard >500 kB chunk warning. No code splitting is
+  applied: splitting would not reduce first-load bytes, and lazy-loading Monaco would delay the
+  editor.
+- **Progressive reveal.** While playback is at the start, operations that have not produced data yet
+  can appear as pending cards whose incoming wires arrive as their upstream data does. The completed
+  graph is always fully connected.
 
 ## Roadmap
 
@@ -372,6 +558,11 @@ The roadmap is directional, not a release commitment.
 - [x] Uncorrelated `IN` / `NOT IN` and `EXISTS` / `NOT EXISTS` subqueries with SQLite three-valued logic
 - [x] `UNION` / `UNION ALL` compound selects with independent branch pipelines and SQLite parity
 - [x] `INTERSECT` / `EXCEPT` and mixed compound chains with left-to-right operation snapshots, canvas tracing, inspector inputs and excluded-row inspection
+- [x] Isolated DML previews for `INSERT`, `UPDATE` and `DELETE` with row-level snapshots and zero-change honesty
+- [x] Isolated DDL previews for `CREATE`/`ALTER`/`DROP TABLE` and `CREATE`/`DROP INDEX`, with real catalog metadata and no-op handling
+- [x] SQLite type affinity, collation and comparison parity for simulated expressions
+- [x] Trace-driven Canvas lifecycle: no placeholder stages, no duplicate terminal node, stable node identity during playback
+- [x] Real-browser QA automation (583 assertions) covering Canvas structure, interactions and preview safety
 - [x] SQLite result-parity validation and conservative unsupported-query reporting
 
 ### 🚧 Next up
@@ -393,7 +584,8 @@ The roadmap is directional, not a release commitment.
 |:---|:---|
 | [Architecture](docs/ARCHITECTURE.md) | Runtime paths, simulator guarantees, validation, graph/playback state, inspector geometry and persistence. |
 | [Feature reference](docs/FEATURES.md) | Complete feature matrix, supported SQL constructs and known limitations. |
-| [Development guide](docs/DEVELOPMENT.md) | Local setup, scripts, test strategy, conventions and change checklist. |
+| [Development guide](docs/DEVELOPMENT.md) | Local setup, scripts, test strategy, browser QA, conventions and change checklist. |
+| [Browser QA harness](scripts/browser-qa/) | Real-browser regression suite, CDP driver and production smoke test. |
 | [Assets](docs/assets/) | Product screenshots and the playback recording. |
 
 ## Contributing
@@ -403,7 +595,8 @@ Contributions are welcome — especially tests, simulator coverage and accessibi
 1. Fork the repository and create a focused branch.
 2. Run `npm install` and `npm test` to confirm the baseline.
 3. Make the change; add tests when touching the parser, simulator, validation or playback.
-4. Run `npm run lint`, `npm run typecheck` and `npm test`.
+4. Run `npm run lint`, `npm run typecheck` and `npm test`. Changes that affect the Canvas, playback
+   or preview safety should also pass `QA_MANAGED_SERVER=1 npm run qa:browser`.
 5. Open a pull request describing the change; include a screenshot for UI work.
 
 For larger changes, open an issue first so the approach can be discussed. See the
@@ -412,6 +605,8 @@ For larger changes, open an issue first so the approach can be discussed. See th
 ## License
 
 SQL Visualizer is licensed under the [MIT License](LICENSE).
+
+Copyright © 2026 [Abhishek Kumar](https://github.com/Student-Abhishekkumar).
 
 The MIT License permits use, modification, distribution, and private or commercial use, subject to
 its terms. Third-party libraries, assets, fonts and icons remain under their own licenses.

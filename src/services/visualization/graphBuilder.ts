@@ -48,10 +48,47 @@ const OPERATION_STAGES = new Set<VisualizedStage>([
   'COMPOUND',
   'ORDER_BY',
   'LIMIT',
+  // DML preview stages (TARGET is a source-like table snapshot).
+  'INPUT',
+  'COLUMN_MAPPING',
+  'INSERT',
+  'MATCHED_ROWS',
+  'SET',
+  'CHANGED_ROWS',
+  'UNCHANGED_ROWS',
+  'DELETE',
+  'RETAINED_ROWS',
+  'FINAL_TABLE',
+  // DDL schema-metadata stages.
+  'DATABASE',
+  'TABLE_DEFINITION',
+  'COLUMN_DEFINITIONS',
+  'CONSTRAINTS',
+  'CREATE_TABLE',
+  'ORIGINAL_SCHEMA',
+  'ALTER_OPERATION',
+  'SCHEMA_TRANSFORMATION',
+  'RESULTING_SCHEMA',
+  'DROP_TABLE',
+  'REMOVED_TABLE',
+  'REMAINING_SCHEMA',
+  'INDEX_DEFINITION',
+  'CREATE_INDEX',
+  'INDEX_METADATA',
+  'EXISTING_INDEX',
+  'DROP_INDEX',
+  'REMAINING_INDEXES',
 ])
 
 /** Stages whose snapshot carries a rejected/skipped branch. */
-const BRANCH_STAGES = new Set<VisualizedStage>(['WHERE', 'HAVING', 'DISTINCT', 'COMPOUND', 'LIMIT'])
+const BRANCH_STAGES = new Set<VisualizedStage>([
+  'WHERE',
+  'HAVING',
+  'DISTINCT',
+  'COMPOUND',
+  'LIMIT',
+  'MATCHED_ROWS',
+])
 
 const MAX_GROUP_NODES = 8
 
@@ -92,6 +129,35 @@ const STAGE_HINTS: Partial<Record<VisualizedStage, string>> = {
   COMPOUND: 'Branch results are combined left to right with UNION, UNION ALL, INTERSECT or EXCEPT.',
   ORDER_BY: 'Rows are arranged in this order.',
   LIMIT: 'Only the requested number of rows is kept.',
+  TARGET: 'This is the table the statement changes, inside an isolated copy.',
+  INPUT: 'These are the rows being added to the table.',
+  COLUMN_MAPPING: 'Each input value is paired with the target column that receives it.',
+  INSERT: 'New rows are appended to the target table.',
+  MATCHED_ROWS: 'Only rows satisfying the condition are affected.',
+  SET: 'Each matched row receives the assigned values.',
+  CHANGED_ROWS: 'These matched rows stored different values afterwards.',
+  UNCHANGED_ROWS: 'These matched rows already held the assigned values.',
+  DELETE: 'Matched rows are removed from the target table.',
+  RETAINED_ROWS: 'These rows remain after the delete.',
+  FINAL_TABLE: 'This is the table’s state after the statement, in the isolated copy.',
+  DATABASE: 'The real SQLite catalog before the isolated schema operation.',
+  TABLE_DEFINITION: 'The table name, original CREATE SQL and row count from SQLite.',
+  COLUMN_DEFINITIONS: 'Column names, declared types, defaults and key flags from PRAGMA.',
+  CONSTRAINTS: 'Index and foreign-key metadata reported by SQLite.',
+  CREATE_TABLE: 'SQLite created this table only in the isolated copy.',
+  ORIGINAL_SCHEMA: 'The real table or index metadata before the change.',
+  ALTER_OPERATION: 'One supported SQLite ALTER TABLE action.',
+  SCHEMA_TRANSFORMATION: 'The resulting columns after SQLite preserved existing data.',
+  RESULTING_SCHEMA: 'The real SQLite catalog after the isolated operation.',
+  DROP_TABLE: 'SQLite removed the table only in the isolated copy.',
+  REMOVED_TABLE: 'The real pre-drop table definition.',
+  REMAINING_SCHEMA: 'The catalog entries SQLite still reports after the drop.',
+  INDEX_DEFINITION: 'The actual index definition and owning table.',
+  CREATE_INDEX: 'SQLite created this index without changing table rows.',
+  INDEX_METADATA: 'Uniqueness, origin and key columns from PRAGMA introspection.',
+  EXISTING_INDEX: 'The real index metadata before the drop.',
+  DROP_INDEX: 'SQLite removed the index without changing table rows.',
+  REMAINING_INDEXES: 'Indexes SQLite still reports for the owning table.',
 }
 
 /** Honest description of the dataset a stage produces. */
@@ -105,6 +171,35 @@ const DATA_LABELS: Partial<Record<VisualizedStage, string>> = {
   COMPOUND: 'Compound rows',
   ORDER_BY: 'Sorted rows',
   LIMIT: 'Limited rows',
+  TARGET: 'Target rows',
+  INPUT: 'Input rows',
+  COLUMN_MAPPING: 'Column mappings',
+  INSERT: 'Inserted rows',
+  MATCHED_ROWS: 'Matched rows',
+  SET: 'New values',
+  CHANGED_ROWS: 'Changed rows',
+  UNCHANGED_ROWS: 'Unchanged rows',
+  DELETE: 'Deleted rows',
+  RETAINED_ROWS: 'Retained rows',
+  FINAL_TABLE: 'Final table',
+  DATABASE: 'Catalog objects',
+  TABLE_DEFINITION: 'Table definition',
+  COLUMN_DEFINITIONS: 'Column definitions',
+  CONSTRAINTS: 'Constraints and indexes',
+  CREATE_TABLE: 'Created table',
+  ORIGINAL_SCHEMA: 'Original schema',
+  ALTER_OPERATION: 'ALTER operation',
+  SCHEMA_TRANSFORMATION: 'Transformed schema',
+  RESULTING_SCHEMA: 'Resulting schema',
+  DROP_TABLE: 'Drop table',
+  REMOVED_TABLE: 'Removed table',
+  REMAINING_SCHEMA: 'Remaining schema',
+  INDEX_DEFINITION: 'Index definition',
+  CREATE_INDEX: 'Created index',
+  INDEX_METADATA: 'Index metadata',
+  EXISTING_INDEX: 'Existing index',
+  DROP_INDEX: 'Drop index',
+  REMAINING_INDEXES: 'Remaining indexes',
 }
 
 /** Socket label for an operation's secondary (branch) output. */
@@ -178,11 +273,12 @@ interface PipelineStep {
   operation?: CompoundOperationTrace
 }
 
-/** Expand a compound chain into its real left-to-right operation steps. */
+/** Expand real snapshots into pipeline steps, including each compound operation. */
 function pipelineStepsOf(trace: VisualizationTrace): PipelineStep[] {
   const steps: PipelineStep[] = []
   const operations = trace.compound?.operations ?? []
-  for (const stage of trace.stages) {
+  for (const snapshot of trace.stageSnapshots) {
+    const { stage } = snapshot
     if (stage === 'FROM') continue
     if (stage === 'COMPOUND' && operations.length > 0) {
       for (const operation of operations) {
@@ -195,8 +291,7 @@ function pipelineStepsOf(trace: VisualizationTrace): PipelineStep[] {
       }
       continue
     }
-    const snapshot = trace.stageSnapshots.find((candidate) => candidate.stage === stage)
-    if (snapshot !== undefined) steps.push({ key: stage, stage, snapshot })
+    steps.push({ key: stage, stage, snapshot })
   }
   return steps
 }
@@ -206,6 +301,7 @@ function branchLabel(stage: VisualizedStage, count: number): string {
   if (stage === 'COMPOUND') return `Duplicates removed (${count})`
   if (stage === 'LIMIT') return `Skipped by OFFSET (${count})`
   if (stage === 'HAVING') return `Rejected groups (${count})`
+  if (stage === 'MATCHED_ROWS') return `Unmatched rows (${count})`
   return `Rejected rows (${count})`
 }
 
@@ -214,6 +310,7 @@ function branchHint(stage: VisualizedStage): string {
   if (stage === 'COMPOUND') return 'UNION removed these rows because the compound result already contained them.'
   if (stage === 'LIMIT') return 'These rows were skipped by OFFSET.'
   if (stage === 'HAVING') return 'These groups did not pass the condition.'
+  if (stage === 'MATCHED_ROWS') return 'These rows did not satisfy the condition and are untouched.'
   return 'These rows did not pass the condition.'
 }
 
@@ -221,6 +318,7 @@ function branchEdgeLabel(stage: VisualizedStage): string {
   if (stage === 'LIMIT') return 'offset'
   if (stage === 'DISTINCT') return 'duplicates'
   if (stage === 'COMPOUND') return 'duplicates'
+  if (stage === 'MATCHED_ROWS') return 'unmatched'
   return 'rejected'
 }
 
@@ -425,6 +523,7 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
   for (const step of pipelineSteps) {
     const { stage, snapshot } = step
     const hasOp = OPERATION_STAGES.has(stage)
+    const isFinalStep = step === pipelineSteps[pipelineSteps.length - 1]
     const opY = rowTop
     const dataY = hasOp ? rowTop + OP_H + OP_DATA_GAP : rowTop
     const groupNodes =
@@ -440,7 +539,7 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
         : snapshot.removedRows.length > 0
           ? OP_H + 24 + BRANCH_H
           : 0
-    const spineExtent = (hasOp ? OP_H + OP_DATA_GAP : 0) + DATA_H
+    const spineExtent = (hasOp ? OP_H + OP_DATA_GAP : 0) + (isFinalStep ? FINAL_H : DATA_H)
     const height = Math.max(spineExtent, sideExtent)
     rows.set(step.key, { opY, dataY, height })
     rowTop += height + ROW_GAP
@@ -493,7 +592,7 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
         : 'This subquery is evaluated before the outer pipeline runs.'
     const nodeStage: VisualizedStage = isPrimary
       ? table.role === 'from'
-        ? 'FROM'
+        ? (trace.dml !== undefined ? 'TARGET' : 'FROM')
         : 'JOIN'
       : (table.consumerStage ?? 'SELECT')
     const sockets: FlowSocket[] = []
@@ -1062,6 +1161,68 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
       }
     }
 
+    // The terminal snapshot is the final result itself. Do not append a
+    // second downstream node containing the same rows or schema metadata.
+    if (step === pipelineSteps[pipelineSteps.length - 1]) {
+      const finalNode: FlowGraphNode = {
+        id: 'final',
+        kind: 'final',
+        stage: null,
+        label: trace.ddl !== undefined
+          ? stage === 'INDEX_METADATA'
+            ? 'Index metadata'
+            : stage === 'REMAINING_INDEXES'
+              ? 'Remaining indexes'
+              : 'Resulting schema'
+          : trace.dml !== undefined ? 'Final table' : 'Final result',
+        detail: trace.ddl !== undefined
+          ? `${trace.finalRows.length} schema row${trace.finalRows.length === 1 ? '' : 's'} · isolated preview`
+          : `${trace.finalRows.length} row${trace.finalRows.length === 1 ? '' : 's'}${
+              trace.capability.isReadOnly ? '' : ' · isolated preview'
+            }`,
+        hint: trace.ddl !== undefined
+          ? 'Real sqlite_master and PRAGMA metadata after SQLite ran on the isolated copy; the active database is unchanged.'
+          : trace.dml !== undefined
+            ? 'The real table state after SQLite ran on the isolated copy; the active database is unchanged.'
+            : 'These are the rows SQLite returns.',
+        x: spineX,
+        y: row.dataY,
+        width: NODE_W,
+        height: FINAL_H,
+        sockets: [
+          makeSocket(
+            { id: 'in', direction: 'input', kind: 'data', side: 'top', label: 'in' },
+            NODE_W,
+            FINAL_H,
+          ),
+        ],
+        expandedHeight: expandedHeightFor(FINAL_H, trace.finalRows.length),
+        rows: trace.finalRows,
+        snapshot,
+        revealsAt: stage,
+        revealsAtKey: nodeStageKey,
+        blockId: rootId,
+        stageKey: null,
+        compoundOperationId: operation?.id,
+        incomplete: snapshot.incomplete === true,
+        incompleteReasons: [...(snapshot.incompleteReasons ?? [])],
+      }
+      nodes.push(finalNode)
+      if (previousBottom !== null) {
+        addConnection(
+          previousBottom,
+          'out',
+          finalNode,
+          'in',
+          'final',
+          stage,
+          undefined,
+          operation !== undefined ? nodeStageKey : undefined,
+        )
+      }
+      continue
+    }
+
     const dataNode: FlowGraphNode = {
       id: dataNodeId,
       kind: 'data',
@@ -1112,41 +1273,6 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
     previousBottom = dataNode
   }
 
-  // --- phase 4: final result -------------------------------------------------
-  const finalStage = lastStageOf(trace)
-  const finalNode: FlowGraphNode = {
-    id: 'final',
-    kind: 'final',
-    stage: null,
-    label: 'Final result',
-    detail: `${trace.finalRows.length} row${trace.finalRows.length === 1 ? '' : 's'}${
-      trace.capability.isReadOnly ? '' : ' · not read-only'
-    }`,
-    hint: 'These are the rows SQLite returns.',
-    x: spineX,
-    y: rowTop,
-    width: NODE_W,
-    height: FINAL_H,
-    sockets: [
-      makeSocket(
-        { id: 'in', direction: 'input', kind: 'data', side: 'top', label: 'in' },
-        NODE_W,
-        FINAL_H,
-      ),
-    ],
-    expandedHeight: expandedHeightFor(FINAL_H, trace.finalRows.length),
-    rows: trace.finalRows,
-    snapshot: trace.stageSnapshots[trace.stageSnapshots.length - 1],
-    revealsAt: finalStage,
-    revealsAtKey: finalStage !== null ? stageKeyFor(rootId, finalStage, rootId) : null,
-    blockId: rootId,
-    stageKey: null,
-  }
-  nodes.push(finalNode)
-  if (previousBottom !== null) {
-    addConnection(previousBottom, 'out', finalNode, 'in', 'final', lastStageOf(trace))
-  }
-
   // Bounds come from the actual node extents so a query without branches
   // or groups gets a narrower (and therefore more readable) canvas, while
   // tall source stacks and group fan-outs are never clipped. The flow
@@ -1169,10 +1295,6 @@ export function buildFlowGraph(trace: VisualizationTrace): FlowGraph {
   }
 }
 
-function lastStageOf(trace: VisualizationTrace): VisualizedStage | null {
-  return trace.stages[trace.stages.length - 1] ?? null
-}
-
 /**
  * Derive per-node/per-edge playback status from the current view state.
  * Pure: same inputs always yield the same statuses.
@@ -1181,7 +1303,7 @@ export function deriveFlowState(
   graph: FlowGraph,
   completedStages: ReadonlySet<string>,
   activeStage: string | null,
-  finished: boolean,
+  _finished: boolean,
 ): FlowGraphState {
   const byId = new Map(graph.nodes.map((node) => [node.id, node]))
   const nodes: Record<string, FlowElementStatus> = {}
@@ -1192,12 +1314,10 @@ export function deriveFlowState(
     const revealsKey = node.revealsAtKey ?? node.revealsAt
     const ownerKey = node.stageKey ?? node.stage
     if (node.kind === 'final') {
-      // The final node is always visible as the destination; it only
-      // counts as completed once its data actually exists.
+      // Only the root terminal snapshot reveals the root result. A nested
+      // block's finished flag must never expose rows the root has not run.
       nodes[node.id] =
-        finished || (revealsKey !== null && completedStages.has(revealsKey))
-          ? 'completed'
-          : 'pending'
+        revealsKey !== null && completedStages.has(revealsKey) ? 'completed' : 'pending'
       continue
     }
     if (revealsKey !== null && !completedStages.has(revealsKey)) {

@@ -18,18 +18,27 @@
  *   is always reported and never affects real SQLite results.
  */
 
-import { interpretQuery, structureText, type Expression, type QueryStructure, type SelectItem, type SubqueryExpr } from './astInterpreter'
+import { interpretQuery, structureText, type Expression, type QueryStructure, type SelectItem, type StarExpr, type SubqueryExpr } from './astInterpreter'
 import { rowKey } from './rowIdentity'
 import { detectCorrelation } from './correlation'
 import {
-  compareNonNull,
+  collationOfExpression,
   evaluateAggregate,
   evaluateCondition,
   evaluateExpression,
+  explicitCollationOf,
+  metadataOfExpression,
   EvaluationError,
   type EvalVerdict,
   type RowContext,
 } from './expressionEvaluator'
+import {
+  compareValues,
+  normalizeKeyValue,
+  UNKNOWN_COLUMN_META,
+  type CollationName,
+  type ColumnMeta,
+} from './sqliteAffinity'
 import type {
   GroupSnapshot,
   NestedQueryDependency,
@@ -50,6 +59,12 @@ export interface TableData {
   columns: string[]
   /** Row values aligned with `columns`. */
   rows: unknown[][]
+  /**
+   * Declared affinity/collation per column, aligned with `columns`.
+   * Optional so fixtures without schema metadata keep the historical
+   * behaviour (no comparison-time affinity conversion, BINARY collation).
+   */
+  columnMeta?: (ColumnMeta | null)[]
 }
 
 /** Options that bound the cost of simulation. */
@@ -91,6 +106,10 @@ interface SimState {
   columnLabels: string[]
   /** Display labels for snapshots (bare names where unambiguous). */
   displayLabels: string[]
+  /** SQLite output names for source columns, aligned with `columnLabels`. */
+  sourceColumnNames: string[]
+  /** Affinity/collation metadata aligned with `columnLabels`. */
+  columnMeta: ColumnMeta[]
   rows: SimRow[]
   /** True when this block's own FROM/JOIN dropped rows for display. */
   truncated: boolean
@@ -104,6 +123,8 @@ interface SimState {
   incompleteReasons: string[]
   /** Values of nested query blocks, keyed by SubqueryExpr.id. */
   subqueryValues?: ReadonlyMap<string, unknown>
+  /** Output metadata of nested blocks, keyed by SubqueryExpr.id. */
+  subqueryColumnMeta?: ReadonlyMap<string, ColumnMeta>
   /** Aggregates per group index, keyed by aggregate expression text. */
   aggregateValues?: Map<number, Record<string, unknown>>
   /** Groups produced by GROUP BY, kept in creation order. */
@@ -157,14 +178,19 @@ function displayLabelForItem(item: SelectItem): string {
 }
 
 /** Sort comparator implementing SQLite NULL ordering (NULLs smallest). */
-function sortCompare(a: unknown, b: unknown, descending: boolean): number {
+function sortCompare(
+  a: unknown,
+  b: unknown,
+  descending: boolean,
+  collation: CollationName = 'BINARY',
+): number {
   const aNull = a === null || a === undefined
   const bNull = b === null || b === undefined
   let result: number
   if (aNull && bNull) result = 0
   else if (aNull) result = -1
   else if (bNull) result = 1
-  else result = compareNonNull(a, b)
+  else result = compareValues(a, b, collation)
   if (result === 0) return 0
   return descending ? -result : result
 }
@@ -174,8 +200,10 @@ function contextOf(
   values: unknown[],
   aggregates?: Record<string, unknown>,
   subqueryValues?: ReadonlyMap<string, unknown>,
+  columnMeta?: ReadonlyArray<ColumnMeta | null | undefined>,
+  subqueryColumnMeta?: ReadonlyMap<string, ColumnMeta>,
 ): RowContext {
-  return { columns: labels, values, aggregates, subqueryValues }
+  return { columns: labels, values, aggregates, subqueryValues, columnMeta, subqueryColumnMeta }
 }
 
 function splitDisplayLabel(label: string): { table: string | null; name: string } {
@@ -238,6 +266,8 @@ function loadFrom(
   return {
     columnLabels: data.columns.map((column) => `${alias}.${column}`),
     displayLabels: [...data.columns],
+    sourceColumnNames: [...data.columns],
+    columnMeta: data.columns.map((_, index) => data.columnMeta?.[index] ?? UNKNOWN_COLUMN_META),
     rows: keptRows.map((values, index) => ({
       id: `${base.name}#${index + 1}`,
       values: [...values],
@@ -289,6 +319,11 @@ function joinStage(
               columns: [...state.columnLabels, ...rightLabels],
               values: [...leftRow.values, ...rightValues],
               subqueryValues: state.subqueryValues,
+              subqueryColumnMeta: state.subqueryColumnMeta,
+              columnMeta: [
+                ...state.columnMeta,
+                ...data.columns.map((_, index) => data.columnMeta?.[index] ?? UNKNOWN_COLUMN_META),
+              ],
             })
           } catch (error) {
             throw new SimulationAbort([evaluationMessage(error, 'JOIN condition')])
@@ -316,11 +351,102 @@ function joinStage(
     }
     state.columnLabels = [...state.columnLabels, ...rightLabels]
     state.displayLabels = [...state.displayLabels, ...rightDisplay]
+    state.sourceColumnNames = [...state.sourceColumnNames, ...data.columns]
+    state.columnMeta = [
+      ...state.columnMeta,
+      ...data.columns.map((_, index) => data.columnMeta?.[index] ?? UNKNOWN_COLUMN_META),
+    ]
     state.rows = joinedRows
     state.truncated = state.truncated || truncated
     state.incompleteReasons = uniqueReasons([...state.incompleteReasons, ...reasons])
     state.incomplete = state.incomplete || truncated || reasons.length > 0
   })
+}
+
+// ---------------------------------------------------------------------------
+// Clause alias resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * SQLite prefers a source column when an output alias has the same name.
+ * An alias is used only when the unqualified name is absent from the source
+ * scope. Substitution is structural, so `WHERE i + 1 > 2` evaluates the
+ * aliased expression instead of treating the alias as a string. Substituted
+ * expressions are not re-resolved, matching SQLite's rule that aliases are
+ * not visible inside other output expressions.
+ */
+function resolveClauseAliases(
+  expr: Expression,
+  selectItems: readonly SelectItem[],
+  sourceLabels: readonly string[],
+): Expression {
+  const aliases = new Map<string, Expression>()
+  for (const item of selectItems) {
+    if (item.alias === null || item.expression.kind === 'star') continue
+    const key = item.alias.toLowerCase()
+    if (!aliases.has(key)) aliases.set(key, item.expression)
+  }
+  const sourceNames = new Set(
+    sourceLabels.map((label) => splitDisplayLabel(label).name.toLowerCase()),
+  )
+
+  const walk = (node: Expression, allowAlias: boolean): Expression => {
+    switch (node.kind) {
+      case 'column': {
+        if (node.table !== null || !allowAlias) return node
+        const name = node.name.toLowerCase()
+        if (sourceNames.has(name)) return node
+        return aliases.get(name) ?? node
+      }
+      case 'comparison': {
+        const left = walk(node.left, allowAlias)
+        const right = walk(node.right, allowAlias)
+        return left === node.left && right === node.right
+          ? node
+          : { ...node, left, right }
+      }
+      case 'logical': {
+        const left = walk(node.left, allowAlias)
+        const right = walk(node.right, allowAlias)
+        return left === node.left && right === node.right
+          ? node
+          : { ...node, left, right }
+      }
+      case 'arithmetic': {
+        const left = walk(node.left, allowAlias)
+        const right = walk(node.right, allowAlias)
+        return left === node.left && right === node.right
+          ? node
+          : { ...node, left, right }
+      }
+      case 'not': {
+        const operand = walk(node.operand, allowAlias)
+        return operand === node.operand ? node : { ...node, operand }
+      }
+      case 'unary_minus': {
+        const operand = walk(node.operand, allowAlias)
+        return operand === node.operand ? node : { ...node, operand }
+      }
+      case 'collate': {
+        const operand = walk(node.operand, allowAlias)
+        return operand === node.operand ? node : { ...node, operand }
+      }
+      case 'list': {
+        const exprs = node.exprs.map((item) => walk(item, allowAlias))
+        return exprs.every((item, index) => item === node.exprs[index])
+          ? node
+          : { ...node, exprs }
+      }
+      case 'in_subquery': {
+        const left = walk(node.left, allowAlias)
+        return left === node.left ? node : { ...node, left }
+      }
+      default:
+        return node
+    }
+  }
+
+  return walk(expr, true)
 }
 
 // ---------------------------------------------------------------------------
@@ -334,12 +460,13 @@ function whereStage(
 ): SimRow[] {
   const where = structure.where
   if (where === null) return []
+  const resolvedWhere = resolveClauseAliases(where, structure.selectItems, state.columnLabels)
   const kept: SimRow[] = []
   const filtered: SimRow[] = []
   for (const row of state.rows) {
     let verdict: EvalVerdict
     try {
-      verdict = evaluateCondition(where, contextOf(state.columnLabels, row.values, undefined, state.subqueryValues))
+      verdict = evaluateCondition(resolvedWhere, contextOf(state.columnLabels, row.values, undefined, state.subqueryValues, state.columnMeta, state.subqueryColumnMeta))
     } catch (error) {
       throw new SimulationAbort([evaluationMessage(error, 'WHERE condition')])
     }
@@ -389,10 +516,14 @@ function computeAggregates(
   structure: QueryStructure,
   columnLabels: string[],
   subqueryValues?: ReadonlyMap<string, unknown>,
+  columnMeta?: ReadonlyArray<ColumnMeta | null | undefined>,
+  subqueryColumnMeta?: ReadonlyMap<string, ColumnMeta>,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {}
   const seen = new Set<string>()
-  const contexts = rows.map((row) => contextOf(columnLabels, row.values, undefined, subqueryValues))
+  const contexts = rows.map((row) =>
+    contextOf(columnLabels, row.values, undefined, subqueryValues, columnMeta, subqueryColumnMeta),
+  )
   for (const call of structure.aggregates) {
     if (seen.has(call.text)) continue
     seen.add(call.text)
@@ -417,7 +548,11 @@ function groupContext(state: SimState, row: SimRow): RowContext {
   const baseValues = representative !== undefined ? representative.values : state.columnLabels.map(() => null)
   const labels = [...state.columnLabels, ...Object.keys(aggregates)]
   const values = [...baseValues, ...Object.values(aggregates)]
-  return contextOf(labels, values, aggregates, state.subqueryValues)
+  const columnMeta: ColumnMeta[] = [
+    ...state.columnMeta,
+    ...Object.keys(aggregates).map(() => UNKNOWN_COLUMN_META),
+  ]
+  return contextOf(labels, values, aggregates, state.subqueryValues, columnMeta, state.subqueryColumnMeta)
 }
 
 function groupStage(
@@ -428,6 +563,9 @@ function groupStage(
   const hasAggregates = structure.aggregates.length > 0
   const groupBy = structure.groupBy
   if (groupBy.length === 0 && !hasAggregates) return
+  const resolvedGroupBy = groupBy.map((expr) =>
+    resolveClauseAliases(expr, structure.selectItems, state.columnLabels),
+  )
 
   if (groupBy.length === 0) {
     // Implicit single group over all rows (SQLite behavior).
@@ -437,6 +575,8 @@ function groupStage(
       structure,
       state.columnLabels,
       state.subqueryValues,
+      state.columnMeta,
+      state.subqueryColumnMeta,
     )
     state.aggregateValues = new Map([[0, aggregateValues]])
     const representative = allRows[0]
@@ -464,16 +604,34 @@ function groupStage(
 
   const buckets = new Map<string, { keyValues: unknown[]; rows: SimRow[] }>()
   const orderedKeys: string[] = []
+  // Collation is fixed per GROUP BY term, so it is resolved once. It may
+  // abort (unsupported declared collation) before any row is grouped.
+  const emptyContext = contextOf(
+    state.columnLabels,
+    state.columnLabels.map(() => null),
+    undefined,
+    state.subqueryValues,
+    state.columnMeta,
+    state.subqueryColumnMeta,
+  )
+  let groupCollations: CollationName[]
+  try {
+    groupCollations = resolvedGroupBy.map((expr) => collationOfExpression(expr, emptyContext))
+  } catch (error) {
+    throw new SimulationAbort([evaluationMessage(error, 'GROUP BY collation')])
+  }
   for (const row of state.rows) {
     const keyValues: unknown[] = []
-    for (const expr of groupBy) {
+    for (const expr of resolvedGroupBy) {
       try {
-        keyValues.push(evaluateExpression(expr, contextOf(state.columnLabels, row.values, undefined, state.subqueryValues)))
+        keyValues.push(evaluateExpression(expr, contextOf(state.columnLabels, row.values, undefined, state.subqueryValues, state.columnMeta, state.subqueryColumnMeta)))
       } catch (error) {
         throw new SimulationAbort([evaluationMessage(error, 'GROUP BY expression')])
       }
     }
-    const key = rowKey(keyValues)
+    const key = rowKey(
+      keyValues.map((value, index) => normalizeKeyValue(value, groupCollations[index] ?? 'BINARY')),
+    )
     let bucket = buckets.get(key)
     if (bucket === undefined) {
       bucket = { keyValues, rows: [] }
@@ -495,6 +653,8 @@ function groupStage(
       structure,
       state.columnLabels,
       state.subqueryValues,
+      state.columnMeta,
+      state.subqueryColumnMeta,
     )
     aggregatePerGroup.set(index, aggregateValues)
     const keyText = groupBy
@@ -546,12 +706,13 @@ function havingStage(
   if (state.groups === undefined) {
     throw new SimulationAbort(['HAVING requires grouping, which this query does not have.'])
   }
+  const resolvedHaving = resolveClauseAliases(having, structure.selectItems, state.columnLabels)
   const kept: SimRow[] = []
   const removed: SimRow[] = []
   for (const row of state.rows) {
     let verdict: EvalVerdict
     try {
-      verdict = evaluateCondition(having, groupContext(state, row))
+      verdict = evaluateCondition(resolvedHaving, groupContext(state, row))
     } catch (error) {
       throw new SimulationAbort([evaluationMessage(error, 'HAVING condition')])
     }
@@ -581,51 +742,119 @@ function havingStage(
 // SELECT projection
 // ---------------------------------------------------------------------------
 
+/** Resolve `*` / `table.*` to the source columns visible in this block. */
+function starColumnIndexes(star: StarExpr, state: SimState): number[] {
+  const qualifier = star.table === null ? null : star.table.toLowerCase()
+  const indexes: number[] = []
+  for (let i = 0; i < state.columnLabels.length; i++) {
+    const label = state.columnLabels[i] ?? ''
+    const { table } = splitDisplayLabel(label)
+    if (qualifier === null || (table ?? '').toLowerCase() === qualifier) indexes.push(i)
+  }
+  if (qualifier !== null && indexes.length === 0) {
+    throw new SimulationAbort([
+      `Wildcard "${star.table}.*" does not match a table or alias in this query block.`,
+    ])
+  }
+  return indexes
+}
+
 function projectRows(state: SimState, structure: QueryStructure): {
+  /** Qualified labels used for intermediate snapshots and resolution. */
   columns: string[]
+  /** SQLite-compatible output names exposed as the block's final columns. */
+  outputColumns: string[]
+  /** Affinity/collation of each output column, aligned with `columns`. */
+  outputMeta: ColumnMeta[]
   rows: ProjectedRow[]
 } {
-  const columns: string[] = structure.selectAll
-    ? [...state.displayLabels]
-    : structure.selectItems.map((item) => displayLabelForItem(item))
+  const columns: string[] = []
+  const outputColumns: string[] = []
+  const outputMeta: ColumnMeta[] = []
+  const starIndexes = new Map<number, number[]>()
+  const metaContext = contextOf(
+    state.columnLabels,
+    state.columnLabels.map(() => null),
+    undefined,
+    state.subqueryValues,
+    state.columnMeta,
+    state.subqueryColumnMeta,
+  )
+
+  structure.selectItems.forEach((item, itemIndex) => {
+    if (item.expression.kind === 'star') {
+      const indexes = starColumnIndexes(item.expression, state)
+      starIndexes.set(itemIndex, indexes)
+      for (const index of indexes) {
+        columns.push(state.displayLabels[index] ?? '')
+        outputColumns.push(state.sourceColumnNames[index] ?? '')
+        outputMeta.push({ ...(state.columnMeta[index] ?? UNKNOWN_COLUMN_META) })
+      }
+      return
+    }
+    const label = displayLabelForItem(item)
+    columns.push(label)
+    outputColumns.push(label)
+    outputMeta.push(metadataOfExpression(item.expression, metaContext))
+  })
 
   const rows: ProjectedRow[] = []
   for (const row of state.rows) {
     const ctx =
       row.groupIndex !== undefined
         ? groupContext(state, row)
-        : contextOf(state.columnLabels, row.values, undefined, state.subqueryValues)
+        : contextOf(state.columnLabels, row.values, undefined, state.subqueryValues, state.columnMeta, state.subqueryColumnMeta)
 
-    const values: unknown[] = structure.selectAll
-      ? [...row.values]
-      : []
-    if (!structure.selectAll) {
-      for (const item of structure.selectItems) {
-        try {
-          values.push(evaluateExpression(item.expression, ctx))
-        } catch (error) {
-          throw new SimulationAbort([evaluationMessage(error, `SELECT expression ${item.text}`)])
-        }
+    const values: unknown[] = []
+    structure.selectItems.forEach((item, itemIndex) => {
+      const indexes = starIndexes.get(itemIndex)
+      if (indexes !== undefined) {
+        for (const index of indexes) values.push(ctx.values[index])
+        return
       }
-    }
+      try {
+        values.push(evaluateExpression(item.expression, ctx))
+      } catch (error) {
+        throw new SimulationAbort([evaluationMessage(error, `SELECT expression ${item.text}`)])
+      }
+    })
     rows.push({ id: row.id, values, sortContext: ctx })
   }
-  return { columns, rows }
+  return { columns, outputColumns, outputMeta, rows }
 }
 
 // ---------------------------------------------------------------------------
 // DISTINCT / ORDER BY
 // ---------------------------------------------------------------------------
 
+function assertSupportedOutputCollations(
+  outputMeta: ReadonlyArray<ColumnMeta | undefined>,
+  operation: string,
+): void {
+  for (const meta of outputMeta) {
+    if (meta?.unsupportedCollation !== undefined) {
+      throw new SimulationAbort([
+        `${operation} uses column collation "${meta.unsupportedCollation}", which the visualizer cannot reproduce; only BINARY and NOCASE are supported.`,
+      ])
+    }
+  }
+}
+
 function distinctStage(
   rows: ProjectedRow[],
+  outputMeta: ReadonlyArray<ColumnMeta | undefined>,
   pushFine: (event: BuildEvent) => boolean,
 ): { unique: ProjectedRow[]; duplicates: ProjectedRow[] } {
+  assertSupportedOutputCollations(outputMeta, 'DISTINCT')
   const seen = new Set<string>()
   const unique: ProjectedRow[] = []
   const duplicates: ProjectedRow[] = []
   for (const row of rows) {
-    const key = rowKey(row.values)
+    const key = rowKey(
+      row.values.map((value, index) =>
+        normalizeKeyValue(value, outputMeta[index]?.collation ?? 'BINARY'),
+      ),
+    )
     if (seen.has(key)) {
       duplicates.push(row)
       pushFine({
@@ -646,37 +875,59 @@ function distinctStage(
 function resolveSortKey(
   term: Expression,
   columns: string[],
-): (row: ProjectedRow) => unknown | null {
+  outputMeta: ReadonlyArray<ColumnMeta | undefined>,
+): (row: ProjectedRow) => { value: unknown; collation: CollationName } {
+  const collationForOutput = (index: number): CollationName => {
+    const explicit = explicitCollationOf(term)
+    if (explicit !== null) return explicit
+    const meta = outputMeta[index]
+    if (meta?.unsupportedCollation !== undefined) {
+      throw new SimulationAbort([
+        `ORDER BY uses column collation "${meta.unsupportedCollation}", which the visualizer cannot reproduce; only BINARY and NOCASE are supported.`,
+      ])
+    }
+    return meta?.collation ?? 'BINARY'
+  }
+
   // Ordinal reference: ORDER BY 1
-  if (term.kind === 'literal' && typeof term.value === 'number') {
-    const ordinal = Math.trunc(term.value)
+  const target = term.kind === 'collate' ? term.operand : term
+  if (target.kind === 'literal' && typeof target.value === 'number') {
+    const ordinal = Math.trunc(target.value)
     if (ordinal < 1 || ordinal > columns.length) {
       throw new SimulationAbort([`ORDER BY ordinal ${ordinal} is outside the output column range.`])
     }
-    return (row) => row.values[ordinal - 1]
+    return (row) => ({ value: row.values[ordinal - 1], collation: collationForOutput(ordinal - 1) })
   }
 
   // Column reference: match an output label first (alias or column name).
-  if (term.kind === 'column') {
-    const wanted = term.name.toLowerCase()
-    const wantedTable = term.table?.toLowerCase() ?? null
+  if (target.kind === 'column') {
+    const wanted = target.name.toLowerCase()
+    const wantedTable = target.table?.toLowerCase() ?? null
     const index = columns.findIndex((label) => {
       const { table, name } = splitDisplayLabel(label)
       if (name.toLowerCase() !== wanted) return false
       if (wantedTable !== null && table !== null && table.toLowerCase() !== wantedTable) return false
       return true
     })
-    if (index >= 0) return (row) => row.values[index]
+    if (index >= 0) {
+      return (row) => ({ value: row.values[index], collation: collationForOutput(index) })
+    }
   }
 
   // Fall back to evaluating the expression against the row's own
   // context (source row, or group representative + aggregates).
   return (row) => {
     try {
-      return evaluateExpression(term, row.sortContext)
-    } catch {
+      return {
+        value: evaluateExpression(term, row.sortContext),
+        collation: collationOfExpression(term, row.sortContext),
+      }
+    } catch (error) {
+      if (error instanceof SimulationAbort) throw error
       throw new SimulationAbort([
-        `ORDER BY expression "${term.text}" cannot be resolved against the projected output or the source rows.`,
+        `ORDER BY expression "${term.text}" cannot be resolved against the projected output or the source rows: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
       ])
     }
   }
@@ -737,6 +988,7 @@ interface CteRuntimeResult {
   blockId: string
   name: string
   columns: string[]
+  columnMeta: ColumnMeta[]
   rows: unknown[][]
   /** True when the CTE's rows are not the complete relation. */
   incomplete: boolean
@@ -766,6 +1018,12 @@ interface SimulationRuntime {
   cteDeclarations: Map<string, CteDeclaration>
   /** Number of CTEs that are visible right now (declaration order). */
   cteVisibility: number
+  /**
+   * Output metadata of every completed block, keyed by block id. Lets
+   * CTE/subquery/compound consumers inherit column affinity and collation
+   * without threading it through the public trace types.
+   */
+  outputMeta: Map<string, ColumnMeta[]>
 }
 
 /** A physical table or a CTE result, resolved unambiguously by name. */
@@ -797,7 +1055,11 @@ function resolveRelation(
   const cte = runtime.cteResults.get(key)
   if (cte !== undefined) {
     return {
-      data: { columns: [...cte.columns], rows: cte.rows.map((row) => [...row]) },
+      data: {
+        columns: [...cte.columns],
+        rows: cte.rows.map((row) => [...row]),
+        columnMeta: [...cte.columnMeta],
+      },
       cte,
       incomplete: cte.incomplete,
       incompleteReasons: [...cte.incompleteReasons],
@@ -1027,15 +1289,20 @@ function evaluateSubqueries(
   getTableData: (name: string) => TableData | null,
   options: SimulationOptions,
   runtime: SimulationRuntime,
-): Map<string, unknown> {
+): { values: Map<string, unknown>; columnMeta: Map<string, ColumnMeta> } {
   const values = new Map<string, unknown>()
+  const columnMeta = new Map<string, ColumnMeta>()
   for (const subquery of structure.subqueries) {
     values.set(
       subquery.id,
       evaluateSubquery(subquery, getTableData, options, runtime),
     )
+    if (subquery.usage !== 'exists') {
+      const meta = runtime.outputMeta.get(subquery.query.id)?.[0]
+      if (meta !== undefined) columnMeta.set(subquery.id, meta)
+    }
   }
-  return values
+  return { values, columnMeta }
 }
 
 /**
@@ -1091,6 +1358,9 @@ function evaluateCtes(
       blockId: cte.query.id,
       name: cte.name,
       columns,
+      columnMeta: columns.map(
+        (_, index) => runtime.outputMeta.get(cte.query.id)?.[index] ?? UNKNOWN_COLUMN_META,
+      ),
       rows: rows.map((row) => [...row.values]),
       incomplete: trace.incomplete === true,
       incompleteReasons: [...(trace.incompleteReasons ?? [])],
@@ -1133,11 +1403,18 @@ function evaluateCtes(
 // ---------------------------------------------------------------------------
 
 /** SQLite NULL-safe whole-row identity used by compound set operations. */
-function compoundValueKey(values: unknown[]): string {
+function compoundValueKey(
+  values: unknown[],
+  columnMeta: ReadonlyArray<ColumnMeta | undefined>,
+): string {
   // NULLs compare equal for set-operation deduplication, integers and reals
   // of the same numeric value are equal, and different storage classes stay
-  // distinct. This mirrors the simulator's row identity elsewhere.
-  return rowKey(values)
+  // distinct. The result columns' collations decide case folding.
+  return rowKey(
+    values.map((value, index) =>
+      normalizeKeyValue(value, columnMeta[index]?.collation ?? 'BINARY'),
+    ),
+  )
 }
 interface DistinctCompoundFold {
   rows: VisualizedRow[]
@@ -1151,6 +1428,7 @@ function foldDistinctCompoundRows(
   left: VisualizedRow[],
   right: VisualizedRow[],
   operator: 'INTERSECT' | 'EXCEPT',
+  outputMeta: ReadonlyArray<ColumnMeta | undefined>,
   pushFine: (event: BuildEvent) => boolean,
 ): DistinctCompoundFold {
   const rows: VisualizedRow[] = []
@@ -1173,7 +1451,7 @@ function foldDistinctCompoundRows(
   // right-side duplicates too instead of hiding them inside a lookup Set.
   const rightKeys = new Set<string>()
   for (const row of right) {
-    const key = compoundValueKey(row.values)
+    const key = compoundValueKey(row.values, outputMeta)
     if (rightKeys.has(key)) {
       removeDuplicate(row, 'next branch')
       continue
@@ -1183,7 +1461,7 @@ function foldDistinctCompoundRows(
 
   const leftKeys = new Set<string>()
   for (const row of left) {
-    const key = compoundValueKey(row.values)
+    const key = compoundValueKey(row.values, outputMeta)
     if (leftKeys.has(key)) {
       removeDuplicate(row, 'accumulated left input')
       continue
@@ -1281,6 +1559,7 @@ function simulateCompoundQuery(
       cteResults: new Map(),
       cteDeclarations: new Map(),
       cteVisibility: 0,
+      outputMeta: new Map(),
     }
   const fineEvents: BuildEvent[] = []
   let fineGrainedBudget = maxEvents
@@ -1305,6 +1584,7 @@ function simulateCompoundQuery(
     const branchRows: VisualizedRow[][] = []
     const branchIncompleteReasons: string[] = []
     let columns: string[] | null = null
+    let columnsMeta: ColumnMeta[] | null = null
     let anyBranchTruncated = false
 
     compound.branches.forEach((branch, index) => {
@@ -1327,6 +1607,9 @@ function simulateCompoundQuery(
       const trace = outcome.trace
       if (columns === null) {
         columns = [...trace.finalColumns]
+        columnsMeta = trace.finalColumns.map(
+          (_, index) => runtime.outputMeta.get(branch.query.id)?.[index] ?? UNKNOWN_COLUMN_META,
+        )
       } else if (trace.finalColumns.length !== columns.length) {
         throw new SimulationAbort([
           `Compound SELECT branches must return the same number of columns: branch 1 returns ${columns.length}, branch ${index + 1} returns ${trace.finalColumns.length}.`,
@@ -1401,11 +1684,14 @@ function simulateCompoundQuery(
       let operationRemoved: VisualizedRow[] = []
       let operationDuplicates: VisualizedRow[] = []
       let excludedCount = 0
+      if (operator !== 'UNION ALL') {
+        assertSupportedOutputCollations(columnsMeta ?? [], operator)
+      }
 
       if (operator === 'UNION ALL') {
         rows = [...rows, ...incoming]
       } else if (operator === 'INTERSECT' || operator === 'EXCEPT') {
-        const folded = foldDistinctCompoundRows(rows, incoming, operator, pushFine)
+        const folded = foldDistinctCompoundRows(rows, incoming, operator, columnsMeta ?? [], pushFine)
         rows = folded.rows
         operationRemoved = folded.removedRows
         operationDuplicates = folded.duplicates
@@ -1413,24 +1699,47 @@ function simulateCompoundQuery(
       } else {
         // UNION deduplicates the whole accumulated result, not just the
         // incoming branch: `A UNION ALL B UNION C` removes duplicates that
-        // A/B themselves introduced.
-        const seen = new Set<string>()
+        // A/B themselves introduced. SQLite keeps the first representative
+        // within each input; a distinct right representative supersedes an
+        // equal left one (observable when NOCASE folds different spellings).
         const deduped: VisualizedRow[] = []
-        for (const row of [...rows, ...incoming]) {
-          const key = compoundValueKey(row.values)
-          if (seen.has(key)) {
-            operationRemoved.push(row)
-            operationDuplicates.push(row)
-            pushFine({
-              type: 'DUPLICATE_DETECTED',
-              stage: 'COMPOUND',
-              description: `Row ${row.id} duplicates a row already in the compound result and is removed by ${operator}.`,
-              payload: { rowId: row.id },
-            })
+        const positions = new Map<string, number>()
+        const removeDuplicate = (row: VisualizedRow): void => {
+          operationRemoved.push(row)
+          operationDuplicates.push(row)
+          pushFine({
+            type: 'DUPLICATE_DETECTED',
+            stage: 'COMPOUND',
+            description: `Row ${row.id} duplicates another row in the compound result and is removed by ${operator}.`,
+            payload: { rowId: row.id },
+          })
+        }
+        for (const row of rows) {
+          const key = compoundValueKey(row.values, columnsMeta ?? [])
+          if (positions.has(key)) {
+            removeDuplicate(row)
             continue
           }
-          seen.add(key)
+          positions.set(key, deduped.length)
           deduped.push(row)
+        }
+        const rightKeys = new Set<string>()
+        for (const row of incoming) {
+          const key = compoundValueKey(row.values, columnsMeta ?? [])
+          if (rightKeys.has(key)) {
+            removeDuplicate(row)
+            continue
+          }
+          rightKeys.add(key)
+          const existing = positions.get(key)
+          if (existing === undefined) {
+            positions.set(key, deduped.length)
+            deduped.push(row)
+            continue
+          }
+          const replaced = deduped[existing]
+          if (replaced !== undefined) removeDuplicate(replaced)
+          deduped[existing] = row
         }
         rows = deduped
       }
@@ -1509,22 +1818,26 @@ function simulateCompoundQuery(
     let hasDeterministicOrder = false
     if (structure.orderBy.length > 0) {
       const comparators = structure.orderBy.map((term) => ({
-        extractor: resolveSortKey(term.expression, columns as string[]),
+        extractor: resolveSortKey(term.expression, columns as string[], columnsMeta ?? []),
         descending: term.direction === 'DESC',
       }))
       const projected: ProjectedRow[] = finalRows.map((row) => ({
         id: row.id,
         values: [...row.values],
-        sortContext: contextOf(columns as string[], row.values),
+        sortContext: contextOf(
+          columns as string[],
+          row.values,
+          undefined,
+          undefined,
+          columnsMeta ?? [],
+        ),
       }))
       const indexed = projected.map((row, index) => ({ row, index }))
       indexed.sort((a, b) => {
         for (const comparator of comparators) {
-          const result = sortCompare(
-            comparator.extractor(a.row),
-            comparator.extractor(b.row),
-            comparator.descending,
-          )
+          const left = comparator.extractor(a.row)
+          const right = comparator.extractor(b.row)
+          const result = sortCompare(left.value, right.value, comparator.descending, left.collation)
           if (result !== 0) return result
         }
         return a.index - b.index
@@ -1535,14 +1848,11 @@ function simulateCompoundQuery(
           if (index === 0) return true
           const previous = indexed[index - 1]
           if (previous === undefined) return true
-          return comparators.some(
-            (comparator) =>
-              sortCompare(
-                comparator.extractor(previous.row),
-                comparator.extractor(entry.row),
-                false,
-              ) !== 0,
-          )
+          return comparators.some((comparator) => {
+            const left = comparator.extractor(previous.row)
+            const right = comparator.extractor(entry.row)
+            return sortCompare(left.value, right.value, false, left.collation) !== 0
+          })
         })
       indexed.forEach((entry, newIndex) => {
         if (entry.index !== newIndex) {
@@ -1712,6 +2022,7 @@ function simulateCompoundQuery(
       incomplete,
       incompleteReasons: uniqueReasons(incompleteReasons),
     }
+    runtime.outputMeta.set(structure.id, columnsMeta ?? [])
     return { ok: true, trace }
   } catch (error) {
     if (error instanceof SimulationAbort) {
@@ -1755,6 +2066,7 @@ export function simulateQuery(
       cteResults: new Map(),
       cteDeclarations: new Map(),
       cteVisibility: 0,
+      outputMeta: new Map(),
     }
   const events: BuildEvent[] = []
   let fineGrainedBudget = maxEvents
@@ -1782,7 +2094,8 @@ export function simulateQuery(
 
     // Nested blocks are inputs: evaluate them once against real data
     // before the outer pipeline starts, and never per visible row.
-    const subqueryValues = evaluateSubqueries(structure, getTableData, options, runtime)
+    const subqueryResults = evaluateSubqueries(structure, getTableData, options, runtime)
+    const subqueryValues = subqueryResults.values
 
     const fromRelation = resolveRelation(structure.from.name, getTableData, runtime)
     if (fromRelation === null) {
@@ -1802,6 +2115,7 @@ export function simulateQuery(
 
     const state = loadFrom(structure, fromRelation, maxRows)
     state.subqueryValues = subqueryValues
+    state.subqueryColumnMeta = subqueryResults.columnMeta
 
     // Nested blocks are inputs too. If one was capped or read an
     // incomplete CTE, this block's rows are also incomplete, even when
@@ -2023,7 +2337,7 @@ export function simulateQuery(
 
     // DISTINCT
     const distinctResult = structure.distinct
-      ? distinctStage(projection.rows, pushFine)
+      ? distinctStage(projection.rows, projection.outputMeta, pushFine)
       : { unique: projection.rows, duplicates: [] as ProjectedRow[] }
     const distinctSnapshot = structure.distinct
       ? snapshotOf(
@@ -2045,17 +2359,15 @@ export function simulateQuery(
     let hasDeterministicOrder = false
     if (structure.orderBy.length > 0) {
       const comparators = structure.orderBy.map((term) => ({
-        extractor: resolveSortKey(term.expression, projection.columns),
+        extractor: resolveSortKey(term.expression, projection.columns, projection.outputMeta),
         descending: term.direction === 'DESC',
       }))
       const indexed = finalRows.map((row, index) => ({ row, index }))
       indexed.sort((a, b) => {
         for (const comparator of comparators) {
-          const result = sortCompare(
-            comparator.extractor(a.row),
-            comparator.extractor(b.row),
-            comparator.descending,
-          )
+          const left = comparator.extractor(a.row)
+          const right = comparator.extractor(b.row)
+          const result = sortCompare(left.value, right.value, comparator.descending, left.collation)
           if (result !== 0) return result
         }
         return a.index - b.index // stable tie-break
@@ -2066,14 +2378,11 @@ export function simulateQuery(
           if (index === 0) return true
           const previous = indexed[index - 1]
           if (previous === undefined) return true
-          return comparators.some(
-            (comparator) =>
-              sortCompare(
-                comparator.extractor(previous.row),
-                comparator.extractor(entry.row),
-                false,
-              ) !== 0,
-          )
+          return comparators.some((comparator) => {
+            const left = comparator.extractor(previous.row)
+            const right = comparator.extractor(entry.row)
+            return sortCompare(left.value, right.value, false, left.collation) !== 0
+          })
         })
       const sorted = indexed.map((entry) => entry.row)
       indexed.forEach((entry, newIndex) => {
@@ -2250,12 +2559,13 @@ export function simulateQuery(
       rootBlockId: structure.id,
       totalSteps: serialized.length,
       finalRows: toVisualizedProjected(finalRows),
-      finalColumns: projection.columns,
+      finalColumns: projection.outputColumns,
       hasDeterministicOrder,
       truncated: state.truncated,
       incomplete: state.incomplete,
       incompleteReasons: uniqueReasons(state.incompleteReasons),
     }
+    runtime.outputMeta.set(structure.id, projection.outputMeta.map((meta) => ({ ...meta })))
     return { ok: true, trace }
   } catch (error) {
     if (error instanceof SimulationAbort) {

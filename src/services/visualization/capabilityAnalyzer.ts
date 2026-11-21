@@ -13,6 +13,8 @@ import type {
   Expression,
   InterpretationResult,
 } from './astInterpreter'
+import type { SupportedDml } from './dmlInterpreter'
+import type { SupportedDdl } from './ddlInterpreter'
 import type { DetectedConstruct, VisualizedStage, VisualizationCapability } from '../../types/visualization'
 
 /** Row-count thresholds used to classify visualization cost. */
@@ -29,6 +31,8 @@ function isAggregateExpression(expr: Expression): boolean {
       return isAggregateExpression(expr.left) || isAggregateExpression(expr.right)
     case 'not':
     case 'unary_minus':
+      return isAggregateExpression(expr.operand)
+    case 'collate':
       return isAggregateExpression(expr.operand)
     case 'in_subquery':
       return isAggregateExpression(expr.left)
@@ -63,6 +67,9 @@ function collectOperators(expr: Expression | null, operators: Set<string>): void
       collectOperators(expr.operand, operators)
       break
     case 'unary_minus':
+      collectOperators(expr.operand, operators)
+      break
+    case 'collate':
       collectOperators(expr.operand, operators)
       break
     case 'in_subquery':
@@ -344,5 +351,111 @@ export function analyzeCapability(
     hasJoin,
     estimatedComplexity,
     unsupportedReason: supported ? undefined : unsupportedFeatures[0]?.detail,
+  }
+}
+
+/** Logical stages of an isolated DML preview, in processing order. */
+export function dmlStagesFor(statement: SupportedDml): VisualizedStage[] {
+  if (statement.kind === 'INSERT') {
+    return ['TARGET', 'INPUT', 'COLUMN_MAPPING', 'INSERT', 'FINAL_TABLE']
+  }
+  if (statement.kind === 'UPDATE') {
+    return ['TARGET', 'MATCHED_ROWS', 'SET', 'CHANGED_ROWS', 'UNCHANGED_ROWS', 'FINAL_TABLE']
+  }
+  return ['TARGET', 'MATCHED_ROWS', 'DELETE', 'RETAINED_ROWS', 'FINAL_TABLE']
+}
+
+/**
+ * Capability contract for an INSERT / UPDATE / DELETE preview.
+ *
+ * DML is never executed on the active connection. The trace describes a
+ * logical plan whose final table is validated against real SQLite
+ * execution on an isolated copy, so `isReadOnly` is false even though the
+ * user's database is not modified.
+ */
+export function analyzeDmlCapability(statement: SupportedDml): VisualizationCapability {
+  const detected: DetectedConstruct[] = [
+    { kind: 'dml', detail: `${statement.kind} on ${statement.table}` },
+    { kind: 'target-table', detail: statement.table },
+  ]
+  if (statement.kind === 'INSERT') {
+    detected.push({
+      kind: 'insert-input',
+      detail:
+        statement.input.kind === 'SELECT'
+          ? `INSERT … SELECT from ${statement.table}`
+          : statement.input.kind === 'DEFAULT VALUES'
+            ? 'INSERT … DEFAULT VALUES'
+            : `INSERT … VALUES with ${statement.input.rows.length} row${statement.input.rows.length === 1 ? '' : 's'}`,
+    })
+  } else if (statement.kind === 'UPDATE') {
+    detected.push({
+      kind: 'update-assignments',
+      detail: statement.assignments.map((assignment) => assignment.column).join(', '),
+    })
+    if (statement.where !== null) detected.push({ kind: 'where', detail: statement.where.text })
+  } else if (statement.where !== null) {
+    detected.push({ kind: 'where', detail: statement.where.text })
+  }
+
+  return {
+    supported: true,
+    supportedStages: dmlStagesFor(statement),
+    unsupportedFeatures: [],
+    warnings: [
+      {
+        kind: 'isolated-preview',
+        detail:
+          'The preview runs on a temporary copy of the database. Your active database, its stored snapshot, and the selected database are not changed.',
+      },
+    ],
+    detected,
+    isReadOnly: false,
+    hasAggregation: false,
+    hasJoin: false,
+    estimatedComplexity: 'small',
+  }
+}
+
+/** Logical stages of an isolated DDL schema preview. */
+export function ddlStagesFor(statement: SupportedDdl): VisualizedStage[] {
+  switch (statement.operation) {
+    case 'CREATE_TABLE':
+      return ['DATABASE', 'TABLE_DEFINITION', 'COLUMN_DEFINITIONS', 'CONSTRAINTS', 'CREATE_TABLE', 'RESULTING_SCHEMA']
+    case 'ALTER_TABLE':
+      return ['ORIGINAL_SCHEMA', 'ALTER_OPERATION', 'SCHEMA_TRANSFORMATION', 'RESULTING_SCHEMA']
+    case 'DROP_TABLE':
+      return ['ORIGINAL_SCHEMA', 'DROP_TABLE', 'REMOVED_TABLE', 'REMAINING_SCHEMA']
+    case 'CREATE_INDEX':
+      return ['DATABASE', 'INDEX_DEFINITION', 'CREATE_INDEX', 'INDEX_METADATA']
+    case 'DROP_INDEX':
+      return ['EXISTING_INDEX', 'DROP_INDEX', 'REMAINING_INDEXES']
+  }
+}
+
+/** Capability contract for a clone-only schema transformation preview. */
+export function analyzeDdlCapability(statement: SupportedDdl): VisualizationCapability {
+  const objectType = statement.operation === 'CREATE_INDEX' || statement.operation === 'DROP_INDEX'
+    ? 'INDEX'
+    : 'TABLE'
+  const objectName = statement.operation === 'CREATE_INDEX' || statement.operation === 'DROP_INDEX'
+    ? statement.index
+    : statement.table
+  return {
+    supported: true,
+    supportedStages: ddlStagesFor(statement),
+    unsupportedFeatures: [],
+    warnings: [{
+      kind: 'isolated-preview',
+      detail: 'DDL runs only on a temporary copy. Schema snapshots come from SQLite introspection; the active database and stored snapshot are not changed.',
+    }],
+    detected: [
+      { kind: 'ddl', detail: statement.operation.replaceAll('_', ' ') },
+      { kind: `${objectType.toLowerCase()}-object`, detail: objectName },
+    ],
+    isReadOnly: false,
+    hasAggregation: false,
+    hasJoin: false,
+    estimatedComplexity: 'small',
   }
 }

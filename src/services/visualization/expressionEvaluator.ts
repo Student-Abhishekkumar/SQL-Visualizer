@@ -28,6 +28,15 @@ import type {
   Expression,
   ListExpr,
 } from './astInterpreter'
+import { rowKey } from './rowIdentity'
+import {
+  applyNumericAffinity,
+  applyTextAffinity,
+  compareValues,
+  normalizeKeyValue,
+  type CollationName,
+  type ColumnMeta,
+} from './sqliteAffinity'
 
 /** Three-valued verdict of a condition evaluation. */
 export type EvalVerdict = 'true' | 'false' | 'unknown'
@@ -61,6 +70,14 @@ export interface RowContext {
    * here, so expression evaluation never re-executes SQL.
    */
   subqueryValues?: ReadonlyMap<string, unknown>
+  /**
+   * Metadata aligned with `columns`: declared affinity and collation for
+   * each visible column. Absent/falsy entries mean "no reliably inferable
+   * affinity" and BINARY collation (the historical behaviour).
+   */
+  columnMeta?: ReadonlyArray<ColumnMeta | null | undefined>
+  /** Output metadata of nested blocks keyed by SubqueryExpr.id. */
+  subqueryColumnMeta?: ReadonlyMap<string, ColumnMeta>
 }
 
 // ---------------------------------------------------------------------------
@@ -88,22 +105,11 @@ function isIntegerValue(value: unknown): boolean {
 }
 
 /**
- * Compare two non-NULL values using SQLite's type ordering:
- * numbers sort before text; equal types compare numerically/lexically.
+ * Compare two non-NULL values using SQLite's storage-class ordering
+ * (numbers < text < blobs) with BINARY collation.
  */
 export function compareNonNull(a: unknown, b: unknown): number {
-  const aIsNumber = typeof a === 'number' || typeof a === 'bigint'
-  const bIsNumber = typeof b === 'number' || typeof b === 'bigint'
-  if (aIsNumber && bIsNumber) {
-    const an = toSqliteNumber(a)
-    const bn = toSqliteNumber(b)
-    return an < bn ? -1 : an > bn ? 1 : 0
-  }
-  if (aIsNumber) return -1
-  if (bIsNumber) return 1
-  const as = String(a)
-  const bs = String(b)
-  return as < bs ? -1 : as > bs ? 1 : 0
+  return compareValues(a, b, 'BINARY')
 }
 
 /**
@@ -133,12 +139,13 @@ function splitLabel(label: string): { table: string | null; name: string } {
   return { table: null, name: label }
 }
 
-function resolveColumn(
+/** Resolve a column reference to its index in the row context. */
+function resolveColumnIndex(
   table: string | null,
   name: string,
   text: string,
   ctx: RowContext,
-): unknown {
+): number {
   const wantedName = name.toLowerCase()
   const wantedTable = table === null ? null : table.toLowerCase()
   let matchIndex = -1
@@ -159,7 +166,168 @@ function resolveColumn(
       `Column "${name}" is ambiguous — qualify it with a table name or alias.`,
     )
   }
-  return ctx.values[matchIndex]
+  return matchIndex
+}
+
+function resolveColumn(
+  table: string | null,
+  name: string,
+  text: string,
+  ctx: RowContext,
+): unknown {
+  return ctx.values[resolveColumnIndex(table, name, text, ctx)]
+}
+
+/** Metadata of a column reference, or null when unknown/not a column. */
+function columnMetaOf(expr: Expression, ctx: RowContext): ColumnMeta | null {
+  if (expr.kind === 'subquery') return ctx.subqueryColumnMeta?.get(expr.id) ?? null
+  if (expr.kind !== 'column') return null
+  try {
+    const index = resolveColumnIndex(expr.table, expr.name, expr.text, ctx)
+    return ctx.columnMeta?.[index] ?? null
+  } catch {
+    // The value evaluation reports the real unknown/ambiguous-column
+    // error; metadata must never mask it with a second failure.
+    return null
+  }
+}
+
+/**
+ * SQLite affinity of an expression: a column's declared affinity, the
+ * operand's affinity for `COLLATE`, a subquery's output affinity, and
+ * "none" for computed expressions and literals.
+ */
+export function affinityOfExpression(expr: Expression, ctx: RowContext): ColumnMeta['affinity'] {
+  if (expr.kind === 'collate') return affinityOfExpression(expr.operand, ctx)
+  return columnMetaOf(expr, ctx)?.affinity ?? null
+}
+
+/** Collation explicitly written with COLLATE, or null. */
+export function explicitCollationOf(expr: Expression): CollationName | null {
+  return expr.kind === 'collate' ? expr.collation : null
+}
+
+function assertSupportedCollation(meta: ColumnMeta): void {
+  if (meta.unsupportedCollation !== undefined) {
+    throw new EvaluationError(
+      `Column collation "${meta.unsupportedCollation}" is not reproducible by the visualizer; only BINARY and NOCASE are supported.`,
+    )
+  }
+}
+
+/** Column-declared collation that participates in an expression, or null. */
+function declaredCollationOf(expr: Expression, ctx: RowContext): CollationName | null {
+  const meta = columnMetaOf(expr, ctx)
+  if (meta === null) return null
+  assertSupportedCollation(meta)
+  return meta.collation
+}
+
+/**
+ * Collation SQLite uses for a comparison: explicit left, explicit right,
+ * left column declaration, right column declaration, else BINARY.
+ */
+export function comparisonCollation(
+  left: Expression,
+  right: Expression,
+  ctx: RowContext,
+): CollationName {
+  return (
+    explicitCollationOf(left) ??
+    explicitCollationOf(right) ??
+    declaredCollationOf(left, ctx) ??
+    declaredCollationOf(right, ctx) ??
+    'BINARY'
+  )
+}
+
+/** Collation an expression carries on its own (for ORDER/GROUP/DISTINCT). */
+export function collationOfExpression(expr: Expression, ctx: RowContext): CollationName {
+  return explicitCollationOf(expr) ?? declaredCollationOf(expr, ctx) ?? 'BINARY'
+}
+
+/**
+ * Metadata of a projected output column. Columns propagate their source
+ * metadata; `COLLATE` overrides only the collation; every other computed
+ * expression honestly reports no affinity.
+ */
+export function metadataOfExpression(expr: Expression, ctx: RowContext): ColumnMeta {
+  if (expr.kind === 'collate') {
+    const meta = { ...metadataOfExpression(expr.operand, ctx) }
+    // An explicit supported collation replaces the declaration completely.
+    delete meta.unsupportedCollation
+    return { ...meta, collation: expr.collation }
+  }
+  const meta = columnMetaOf(expr, ctx)
+  if (meta !== null) return { ...meta }
+  return { affinity: null, collation: 'BINARY' }
+}
+
+/** One comparison operand: value plus the semantics SQLite applies. */
+interface ComparisonOperand {
+  value: unknown
+  affinity: ColumnMeta['affinity']
+  /** COLLATE written directly on this operand. */
+  explicitCollation: CollationName | null
+  /** Column/subquery-declared collation of this operand. */
+  declaredCollation: CollationName | null
+  numberKind?: 'integer' | 'real'
+}
+
+function operandOf(expr: Expression, ctx: RowContext): ComparisonOperand {
+  const value = evaluateExpression(expr, ctx)
+  const meta = columnMetaOf(expr, ctx)
+  if (meta !== null) assertSupportedCollation(meta)
+  return {
+    value,
+    affinity: affinityOfExpression(expr, ctx),
+    explicitCollation: explicitCollationOf(expr),
+    declaredCollation: meta?.collation ?? null,
+    numberKind:
+      expr.kind === 'literal' ? expr.numberKind : undefined,
+  }
+}
+
+function isNumericAffinity(affinity: ColumnMeta['affinity']): boolean {
+  return affinity === 'INTEGER' || affinity === 'REAL' || affinity === 'NUMERIC'
+}
+
+/**
+ * Compare two operands with SQLite comparison-affinity rules. If exactly
+ * one side carries a numeric affinity and the other has TEXT/BLOB/no
+ * affinity, NUMERIC affinity is applied to the other side. If one side is
+ * TEXT and the other has no affinity, TEXT affinity is applied. When both
+ * operands have affinity, no conversion happens.
+ */
+function compareOperands(left: ComparisonOperand, right: ComparisonOperand): number {
+  let leftValue = left.value
+  let rightValue = right.value
+  const leftAffinity = left.affinity
+  const rightAffinity = right.affinity
+
+  if (
+    isNumericAffinity(leftAffinity) &&
+    (rightAffinity === null || rightAffinity === 'TEXT' || rightAffinity === 'BLOB')
+  ) {
+    rightValue = applyNumericAffinity(rightValue, right.numberKind)
+  } else if (
+    isNumericAffinity(rightAffinity) &&
+    (leftAffinity === null || leftAffinity === 'TEXT' || leftAffinity === 'BLOB')
+  ) {
+    leftValue = applyNumericAffinity(leftValue, left.numberKind)
+  } else if (leftAffinity === 'TEXT' && rightAffinity === null) {
+    rightValue = applyTextAffinity(rightValue, right.numberKind)
+  } else if (rightAffinity === 'TEXT' && leftAffinity === null) {
+    leftValue = applyTextAffinity(leftValue, left.numberKind)
+  }
+
+  const collation =
+    left.explicitCollation ??
+    right.explicitCollation ??
+    left.declaredCollation ??
+    right.declaredCollation ??
+    'BINARY'
+  return compareValues(leftValue, rightValue, collation)
 }
 
 // ---------------------------------------------------------------------------
@@ -185,87 +353,88 @@ function andVerdicts(a: EvalVerdict, b: EvalVerdict): EvalVerdict {
   return 'true'
 }
 
-/** Evaluate one scalar comparison against pre-resolved values. */
-function compareVerdict(
-  operator: ComparisonExpr['operator'],
-  left: unknown,
-  right: unknown,
-): EvalVerdict {
+/** Turn an ordering result into the operator's three-valued verdict. */
+function verdictFromOrder(operator: ComparisonExpr['operator'], order: number): EvalVerdict {
+  let result: boolean
   switch (operator) {
     case '=':
+      result = order === 0
+      break
     case '!=':
     case '<>':
+      result = order !== 0
+      break
     case '>':
+      result = order > 0
+      break
     case '<':
+      result = order < 0
+      break
     case '>=':
-    case '<=': {
-      if (left === null || left === undefined || right === null || right === undefined) {
-        return 'unknown'
-      }
-      const order = compareNonNull(left, right)
-      let result: boolean
-      switch (operator) {
-        case '=':
-          result = order === 0
-          break
-        case '!=':
-        case '<>':
-          result = order !== 0
-          break
-        case '>':
-          result = order > 0
-          break
-        case '<':
-          result = order < 0
-          break
-        case '>=':
-          result = order >= 0
-          break
-        case '<=':
-          result = order <= 0
-          break
-      }
-      return result ? 'true' : 'false'
-    }
-    case 'IS':
-    case 'IS NOT': {
-      // Null-safe equality: NULL IS NULL → true; NULL IS 5 → false.
-      const leftNull = left === null || left === undefined
-      const rightNull = right === null || right === undefined
-      let equal: boolean
-      if (leftNull && rightNull) equal = true
-      else if (leftNull !== rightNull) equal = false
-      else equal = compareNonNull(left, right) === 0
-      if (operator === 'IS NOT') equal = !equal
-      return equal ? 'true' : 'false'
-    }
+      result = order >= 0
+      break
+    case '<=':
+      result = order <= 0
+      break
     default:
       throw new EvaluationError(`Operator "${operator}" is not a scalar comparison.`)
   }
+  return result ? 'true' : 'false'
+}
+
+/** Evaluate one scalar comparison with SQLite affinity and collation. */
+function compareVerdict(
+  operator: ComparisonExpr['operator'],
+  left: ComparisonOperand,
+  right: ComparisonOperand,
+): EvalVerdict {
+  if (operator === 'IS' || operator === 'IS NOT') {
+    // Null-safe equality: NULL IS NULL → true; NULL IS 5 → false. The
+    // same affinity and collation rules as `=` apply to non-NULL values.
+    const leftNull = left.value === null || left.value === undefined
+    const rightNull = right.value === null || right.value === undefined
+    let equal: boolean
+    if (leftNull && rightNull) equal = true
+    else if (leftNull !== rightNull) equal = false
+    else equal = compareOperands(left, right) === 0
+    if (operator === 'IS NOT') equal = !equal
+    return equal ? 'true' : 'false'
+  }
+
+  if (
+    left.value === null ||
+    left.value === undefined ||
+    right.value === null ||
+    right.value === undefined
+  ) {
+    return 'unknown'
+  }
+  return verdictFromOrder(operator, compareOperands(left, right))
 }
 
 /**
- * Three-valued IN over already-resolved values, matching SQLite:
+ * Three-valued IN, comparing the left operand against every list member
+ * with SQLite's pairwise affinity/collation rules:
  * - empty set: IN → false, NOT IN → true
  * - NULL left → UNKNOWN (even for NOT IN)
  * - a match → IN true / NOT IN false
  * - no match but a NULL member → UNKNOWN
  * - otherwise IN false / NOT IN true
  */
-function inValuesVerdict(
-  left: unknown,
-  items: readonly unknown[],
+function inOperandsVerdict(
+  left: ComparisonOperand,
+  items: readonly ComparisonOperand[],
   negated: boolean,
 ): EvalVerdict {
   if (items.length === 0) return negated ? 'true' : 'false'
-  if (left === null || left === undefined) return 'unknown'
+  if (left.value === null || left.value === undefined) return 'unknown'
   let sawNull = false
-  for (const itemValue of items) {
-    if (itemValue === null || itemValue === undefined) {
+  for (const item of items) {
+    if (item.value === null || item.value === undefined) {
       sawNull = true
       continue
     }
-    if (compareNonNull(left, itemValue) === 0) {
+    if (compareOperands(left, item) === 0) {
       return negated ? 'false' : 'true'
     }
   }
@@ -273,12 +442,30 @@ function inValuesVerdict(
   return negated ? 'true' : 'false'
 }
 
-function inVerdict(left: unknown, list: ListExpr, negated: boolean, ctx: RowContext): EvalVerdict {
-  return inValuesVerdict(
-    left,
-    list.exprs.map((item) => evaluateExpression(item, ctx)),
+function inVerdict(
+  leftExpr: Expression,
+  list: ListExpr,
+  negated: boolean,
+  ctx: RowContext,
+): EvalVerdict {
+  return inOperandsVerdict(
+    operandOf(leftExpr, ctx),
+    list.exprs.map((item) => operandOf(item, ctx)),
     negated,
   )
+}
+
+/** Build operands for values returned by an IN subquery's single column. */
+function subqueryOperands(
+  values: readonly unknown[],
+  meta: ColumnMeta | undefined,
+): ComparisonOperand[] {
+  return values.map((value) => ({
+    value,
+    affinity: meta?.affinity ?? null,
+    explicitCollation: null,
+    declaredCollation: meta?.collation ?? null,
+  }))
 }
 
 function likeVerdict(left: unknown, pattern: unknown, negated: boolean): EvalVerdict {
@@ -291,13 +478,17 @@ function likeVerdict(left: unknown, pattern: unknown, negated: boolean): EvalVer
 }
 
 function betweenVerdict(
-  left: unknown,
-  low: unknown,
-  high: unknown,
+  leftExpr: Expression,
+  lowExpr: Expression,
+  highExpr: Expression,
   negated: boolean,
+  ctx: RowContext,
 ): EvalVerdict {
-  const geLow = compareVerdict('>=', left, low)
-  const leHigh = compareVerdict('<=', left, high)
+  // SQLite BETWEEN is `x >= low AND x <= high`, applying affinity and
+  // collation to each pair independently.
+  const left = operandOf(leftExpr, ctx)
+  const geLow = compareVerdict('>=', left, operandOf(lowExpr, ctx))
+  const leHigh = compareVerdict('<=', left, operandOf(highExpr, ctx))
   const inside = andVerdicts(geLow, leHigh)
   return negated ? notVerdict(inside) : inside
 }
@@ -347,9 +538,9 @@ export function evaluateExpression(expr: Expression, ctx: RowContext): unknown {
           `Subquery ${expr.subquery.text} has not been evaluated in this context.`,
         )
       }
-      const verdict = inValuesVerdict(
-        evaluateExpression(expr.left, ctx),
-        values,
+      const verdict = inOperandsVerdict(
+        operandOf(expr.left, ctx),
+        subqueryOperands(values, ctx.subqueryColumnMeta?.get(expr.subquery.id)),
         expr.operator === 'NOT IN',
       )
       return verdict === 'unknown' ? null : verdict === 'true'
@@ -394,7 +585,7 @@ export function evaluateExpression(expr: Expression, ctx: RowContext): unknown {
         if (expr.right.kind !== 'list') {
           throw new EvaluationError('IN requires a parenthesized value list.')
         }
-        const verdict = inVerdict(evaluateExpression(expr.left, ctx), expr.right, op === 'NOT IN', ctx)
+        const verdict = inVerdict(expr.left, expr.right, op === 'NOT IN', ctx)
         return verdict === 'unknown' ? null : verdict === 'true'
       }
       if (op === 'LIKE' || op === 'NOT LIKE') {
@@ -409,23 +600,27 @@ export function evaluateExpression(expr: Expression, ctx: RowContext): unknown {
         if (expr.right.kind !== 'list' || expr.right.exprs.length !== 2) {
           throw new EvaluationError('BETWEEN requires exactly two bounds.')
         }
-        const low = evaluateExpression(expr.right.exprs[0] as Expression, ctx)
-        const high = evaluateExpression(expr.right.exprs[1] as Expression, ctx)
+        const low = expr.right.exprs[0] as Expression
+        const high = expr.right.exprs[1] as Expression
         const verdict = betweenVerdict(
-          evaluateExpression(expr.left, ctx),
+          expr.left,
           low,
           high,
           op === 'NOT BETWEEN',
+          ctx,
         )
         return verdict === 'unknown' ? null : verdict === 'true'
       }
       const verdict = compareVerdict(
         op,
-        evaluateExpression(expr.left, ctx),
-        evaluateExpression(expr.right, ctx),
+        operandOf(expr.left, ctx),
+        operandOf(expr.right, ctx),
       )
       return verdict === 'unknown' ? null : verdict === 'true'
     }
+    case 'collate':
+      // COLLATE changes comparison/collation semantics, never the value.
+      return evaluateExpression(expr.operand, ctx)
     case 'arithmetic': {
       const left = evaluateExpression(expr.left, ctx)
       const right = evaluateExpression(expr.right, ctx)
@@ -474,11 +669,11 @@ export function evaluateCondition(expr: Expression, ctx: RowContext): EvalVerdic
 // Aggregate evaluation (per group)
 // ---------------------------------------------------------------------------
 
-function distinctValues(values: unknown[]): unknown[] {
+function distinctValues(values: unknown[], collation: CollationName): unknown[] {
   const seen = new Set<string>()
   const unique: unknown[] = []
   for (const value of values) {
-    const key = `${typeof value}:${String(value)}`
+    const key = rowKey([normalizeKeyValue(value, collation)])
     if (seen.has(key)) continue
     seen.add(key)
     unique.push(value)
@@ -506,7 +701,11 @@ export function evaluateAggregate(
     const value = evaluateExpression(call.argument, row)
     if (value !== null && value !== undefined) values.push(value)
   }
-  const considered = call.distinct ? distinctValues(values) : values
+  const collation =
+    (call.distinct || call.name === 'MIN' || call.name === 'MAX') && rows.length > 0
+      ? collationOfExpression(call.argument, rows[0] as RowContext)
+      : 'BINARY'
+  const considered = call.distinct ? distinctValues(values, collation) : values
   switch (call.name) {
     case 'COUNT':
       return considered.length
@@ -523,7 +722,7 @@ export function evaluateAggregate(
       if (considered.length === 0) return null
       let min = considered[0] as unknown
       for (const value of considered) {
-        if (compareNonNull(value, min) < 0) min = value
+        if (compareValues(value, min, collation) < 0) min = value
       }
       return min
     }
@@ -531,7 +730,7 @@ export function evaluateAggregate(
       if (considered.length === 0) return null
       let max = considered[0] as unknown
       for (const value of considered) {
-        if (compareNonNull(value, max) > 0) max = value
+        if (compareValues(value, max, collation) > 0) max = value
       }
       return max
     }

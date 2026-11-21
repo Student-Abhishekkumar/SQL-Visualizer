@@ -13,10 +13,12 @@ import {
   Gauge,
   GitMerge,
   Layers,
+  Plus,
   Scissors,
   SlidersHorizontal,
   Sparkles,
   Table2,
+  Trash2,
 } from 'lucide-react'
 import type { FlowElementStatus, FlowGraphNode, FlowSocket } from '../../../types/flowGraph'
 import type { RowRole, VisualizedStage } from '../../../types/visualization'
@@ -42,6 +44,12 @@ const ROLE_CELL_CLASSES: Record<RowRole, string> = {
   selected: 'text-accent font-medium',
   skipped: 'text-text-muted line-through opacity-70',
   grouped: 'text-purple',
+  // DML preview roles.
+  inserted: 'text-success',
+  changed: 'text-warning font-medium',
+  deleted: 'text-danger line-through opacity-70',
+  retained: 'text-text-secondary',
+  mapped: 'text-accent',
 }
 
 const STAGE_ICONS: Partial<Record<VisualizedStage, typeof Filter>> = {
@@ -54,6 +62,35 @@ const STAGE_ICONS: Partial<Record<VisualizedStage, typeof Filter>> = {
   COMPOUND: Layers,
   ORDER_BY: ArrowDownUp,
   LIMIT: Gauge,
+  TARGET: Database,
+  INPUT: ArrowRight,
+  COLUMN_MAPPING: Table2,
+  INSERT: Plus,
+  MATCHED_ROWS: Filter,
+  SET: SlidersHorizontal,
+  CHANGED_ROWS: ArrowDownUp,
+  UNCHANGED_ROWS: Check,
+  DELETE: Trash2,
+  RETAINED_ROWS: Table2,
+  FINAL_TABLE: Check,
+  DATABASE: Database,
+  TABLE_DEFINITION: Table2,
+  COLUMN_DEFINITIONS: Table2,
+  CONSTRAINTS: GitMerge,
+  CREATE_TABLE: Plus,
+  ORIGINAL_SCHEMA: Database,
+  ALTER_OPERATION: SlidersHorizontal,
+  SCHEMA_TRANSFORMATION: ArrowDownUp,
+  RESULTING_SCHEMA: Check,
+  DROP_TABLE: Trash2,
+  REMOVED_TABLE: Trash2,
+  REMAINING_SCHEMA: Database,
+  INDEX_DEFINITION: Table2,
+  CREATE_INDEX: Plus,
+  INDEX_METADATA: Table2,
+  EXISTING_INDEX: Table2,
+  DROP_INDEX: Trash2,
+  REMAINING_INDEXES: Table2,
 }
 
 const PREVIEW_ROWS = 3
@@ -289,6 +326,8 @@ function NodeFrame({
       data-accent={nodeAccentKey(node)}
       data-node-id={node.id}
       data-kind={node.kind}
+      data-stage={node.stage ?? undefined}
+      data-block-id={node.blockId}
       data-status={status}
       data-selected={selected ? 'true' : undefined}
       data-hovered={hovered ? 'true' : undefined}
@@ -647,12 +686,17 @@ export const FlowNodeView = memo(function FlowNodeView({
       dragging={dragging}
       offsetX={offsetX}
       offsetY={offsetY}
-      ariaLabel={finished ? 'Final result' : 'Final result (pending)'}
+      ariaLabel={finished ? node.label : `${node.label} (pending)`}
       onSelect={onSelect}
       onHover={onHover}
     >
       <div className="flow-node-surface">
-        <NodeHeader icon={Sparkles} title="Final result" badge="OUTPUT" status={status}>
+        <NodeHeader
+          icon={Sparkles}
+          title={node.label}
+          badge={node.label === 'Final result' ? 'OUTPUT' : 'PREVIEW'}
+          status={status}
+        >
           {finished && <CountBadge>{rows.length}</CountBadge>}
           {expandable && <ExpandButton expanded={expanded} onClick={toggle} />}
         </NodeHeader>
@@ -660,7 +704,7 @@ export const FlowNodeView = memo(function FlowNodeView({
           <div className="flow-meta-row">
             <span className="flow-meta-text truncate">
               {finished
-                ? `${rows.length} row${rows.length === 1 ? '' : 's'} returned by the query`
+                ? (node.detail ?? `${rows.length} row${rows.length === 1 ? '' : 's'} returned by the query`)
                 : 'waiting for playback'}
             </span>
           </div>

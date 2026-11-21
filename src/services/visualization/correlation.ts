@@ -53,6 +53,9 @@ function collectReferences(expr: Expression | null, out: ColumnReference[]): voi
     case 'unary_minus':
       collectReferences(expr.operand, out)
       break
+    case 'collate':
+      collectReferences(expr.operand, out)
+      break
     case 'aggregate':
       collectReferences(expr.call.argument, out)
       break

@@ -34,10 +34,12 @@ No environment variables are required. SQLite WASM assets and Monaco are bundled
 | `npm run test:watch` | Run Vitest in watch mode. |
 | `npm run lint` | Lint with oxlint. |
 | `npm run typecheck` | Run the TypeScript project build without emitting output. |
+| `npm run qa:browser` | Drive a real headless Chrome through the Canvas QA suite. |
+| `npm run qa:production` | Smoke-test the built bundle (no dev bridge). |
 
 ## Testing
 
-The suite currently covers 47 files and 748 tests.
+The suite covers parser, simulator, graph, component, store and real-SQLite integration behavior. Run `npm test` for the current file/test counts.
 
 - Vitest is configured in `vite.config.ts`.
 - Domain, service and store tests run in the default Node environment.
@@ -54,6 +56,28 @@ npm run typecheck
 npm test
 ```
 
+### Browser QA
+
+`scripts/browser-qa/` drives a real headless Chrome over the DevTools Protocol
+using only Node built-ins, so no browser-automation dependency is installed. It
+verifies the rendered application rather than the stores: Canvas node structure
+for SELECT/nested/CTE/compound/DML/DDL, empty and no-op results, preview
+database safety (including a reload to prove persistence is untouched), zoom,
+pan, node drag, hover traces, the Node Inspector and playback.
+
+```bash
+# Starts its own dev server on 127.0.0.1:5173, writes screenshots and a
+# JSON report under artifacts/browser-qa/, and exits non-zero on failure.
+QA_MANAGED_SERVER=1 npm run qa:browser
+
+# Production bundle check (no __sqlviz bridge); build first.
+npm run build && QA_MANAGED_PREVIEW=1 npm run qa:production
+```
+
+Set `QA_ONLY=A,B,C,D,E` to run selected checkpoints and `APP_URL` to target an
+already-running server. Chrome or Edge must be installed; set `CHROME_PATH` if
+it is not in a standard location.
+
 ### What deserves tests
 
 - **Parser and interpreter changes:** supported constructs, aliases, unsupported reasons.
@@ -64,6 +88,12 @@ npm test
 - **Query blocks:** deterministic block ids, parent/child scope, dependency edges (including CTE reads
   inside nested subqueries), correlation rejection and per-block validation.
 - **Validation:** ordered and unordered comparison, column mismatches, floating-point tolerance, all four set operators, and incomplete compound-result suppression.
+- **DML and DDL isolation:** success and failure close exactly one clone; active bytes, stored snapshots, selection and connection usability remain unchanged. Run parity/reference checks against independent sql.js databases rather than fabricated schema snapshots.
+- **DDL schema traces:** classifier rejection, all five operation groups, real sqlite_master/PRAGMA metadata, constraints and expression indexes, IF EXISTS no-ops, ALTER/index row preservation, cascade-side-effect rejection, graph/inspector/playback and Table View rendering.
+- **SQLite value semantics:** declared-type affinity, comparison-time coercion, integer/real literal spelling,
+  BINARY and ASCII-only NOCASE comparisons, grouping, `DISTINCT`, aggregates, ordering, CTE/subquery
+  metadata propagation and compound operations. Parity suites execute the same SQL against real sql.js;
+  unsupported declared collations must fail explicitly rather than fall back to BINARY.
 - **Graph layout:** node/edge determinism, branch visibility, subquery sources, compound operation
   sequencing, left-to-right branch wiring and connectivity.
 - **Playback:** event folding, per-operation snapshots, seeking, speed and database-switch invalidation.
@@ -76,18 +106,19 @@ npm test
 These rules keep the educational visualization honest:
 
 1. **SQLite is the source of truth.** Never replace real execution results with simulated ones.
-2. **The simulator is read-only.** It reads through the database accessor and never mutates data.
-3. **No guessed semantics.** If a construct cannot be modeled faithfully, add an unsupported reason
+2. **SELECT simulation is read-only.** It reads through the database accessor and never mutates data.
+3. **DML and DDL previews are isolated.** Visualization exports active bytes into a separate in-memory sql.js connection, executes there, and always closes it. Never run preview mutations on the active connection or persist its copy; normal Run remains writable. DDL snapshots must come from real sqlite_master/PRAGMA reads and preserve active/stored bytes and selection on success and failure.
+4. **No guessed semantics.** If a construct cannot be modeled faithfully, add an unsupported reason
    instead of approximating it silently.
-4. **Determinism matters.** The same query and data must produce the same trace, graph and playback.
-5. **Row ids are stable.** Never derive identity from an array index that can move.
-6. **Seeking is not recomputation.** The trace is immutable; playback only changes the visible event.
-7. **Results are not persisted.** History stores SQL text and metadata only.
-8. **Workspace state survives switching.** Query and Canvas stay mounted; do not reset editor,
+5. **Determinism matters.** The same query and data must produce the same trace, graph and playback.
+6. **Row ids are stable.** Never derive identity from an array index that can move.
+7. **Seeking is not recomputation.** The trace is immutable; playback only changes the visible event.
+8. **Results are not persisted.** History stores SQL text and metadata only.
+9. **Workspace state survives switching.** Query and Canvas stay mounted; do not reset editor,
    results, zoom, selection or playback when toggling views.
-9. **The inspector's visible box is the interaction box.** Collapsed mode uses the real header
-   height for layout, dragging and clamping; the saved expanded geometry is kept separately.
-10. **Nested blocks are real inputs.** Evaluate each scalar / `IN` / `EXISTS` / CTE / compound-branch
+10. **The inspector's visible box is the interaction box.** Collapsed mode uses the real header
+    height for layout, dragging and clamping; the saved expanded geometry is kept separately.
+11. **Nested blocks are real inputs.** Evaluate each scalar / `IN` / `EXISTS` / CTE / compound-branch
     block once from live data, reuse its cached value, and propagate truncation and incompleteness
     through real dependency edges. Compound operations fold left-to-right and expose their actual
     accumulated left input, next right input, retained rows, excluded rows and duplicates. Never
@@ -100,12 +131,10 @@ If a change would violate one of these rules, discuss the design before implemen
 A new logical stage touches several layers. Use this checklist:
 
 1. Add the stage to the relevant types in `src/types/visualization.ts`.
-2. Teach `src/services/visualization/astInterpreter.ts` to interpret the construct, or return a
-   clear unsupported reason.
+2. Teach `src/services/visualization/astInterpreter.ts`, `dmlInterpreter.ts` or `ddlInterpreter.ts` to interpret the construct, or return a clear unsupported reason.
 3. Update `src/services/visualization/capabilityAnalyzer.ts` so the stage is detected, ordered and
    described.
-4. Implement the transformation and snapshot in `src/services/visualization/simulator.ts`, including
-   row roles and events.
+4. Implement the transformation and snapshot in `src/services/visualization/simulator.ts`, `dmlSimulator.ts` or `ddlSimulator.ts`, including real row/schema metadata, roles and events.
 5. Update `src/services/visualization/graphBuilder.ts` for nodes, edges, sockets and layout.
 6. Update `src/services/visualization/clauseMapper.ts` so the clause strip and Monaco highlight stay
    synchronized.
@@ -164,6 +193,12 @@ Before a release or a README asset refresh:
 - [ ] Visualize a mixed compound chain and confirm operations and playback run left-to-right, with the final compound result in Table View.
 - [ ] Try an unsupported query (for example a correlated subquery, `WITH RECURSIVE`, `INTERSECT ALL`, `EXCEPT ALL` or a nested compound form) and confirm the reasons appear.
 - [ ] Confirm the validation badge matches SQLite for each supported query.
+- [ ] Visualize INSERT VALUES, INSERT SELECT and DEFAULT VALUES; inspect input mappings, generated ids/defaults and the final table.
+- [ ] Visualize UPDATE and DELETE; inspect matched/unmatched, changed/unchanged and deleted/retained rows in Flow and Table View.
+- [ ] Confirm DML Visualize leaves active rows, stored snapshots and database selection unchanged, while normal Run still mutates the active database.
+- [ ] Visualize CREATE TABLE, each ALTER TABLE action, DROP TABLE, CREATE INDEX and DROP INDEX; inspect real columns, constraints, index keys and before/after catalog states in Flow and Table View.
+- [ ] Confirm DDL Visualize leaves active/stored bytes and selection unchanged on success and failure, while normal Run still applies schema changes. Try IF EXISTS / IF NOT EXISTS no-ops, an expression index and a constraint failure.
+- [ ] Try unsupported DML (UPSERT, RETURNING, a trigger-backed target or a constraint violation) and confirm no successful trace is shown.
 - [ ] Step backward and forward through playback; seek to a stage from the clause strip.
 - [ ] Switch Flow/Table and Query/Canvas; confirm state is preserved.
 - [ ] Hover and click nodes to check upstream tracing, branch emphasis and inspector opening.

@@ -47,6 +47,8 @@ function isTransactionControlStatement(sql: string): boolean {
 }
 
 let sqlJsSingleton: Promise<SqlJsStatic> | null = null
+/** Resolved runtime, retained so snapshot clones can be created synchronously. */
+let sqlJsRuntime: SqlJsStatic | null = null
 
 /**
  * Load (and memoize) the SQLite WASM runtime. `config` is only used on
@@ -67,15 +69,21 @@ export function loadSqlJs(config?: Parameters<typeof initSqlJs>[0]): Promise<Sql
   sqlJsSingleton = attempt
   // Cache only the in-flight/successful attempt. A rejection clears itself,
   // but must never clear a newer attempt installed after an explicit reset.
-  void attempt.catch(() => {
-    if (sqlJsSingleton === attempt) sqlJsSingleton = null
-  })
+  void attempt.then(
+    (runtime) => {
+      if (sqlJsSingleton === attempt) sqlJsRuntime = runtime
+    },
+    () => {
+      if (sqlJsSingleton === attempt) sqlJsSingleton = null
+    },
+  )
   return attempt
 }
 
 /** Test/worker hosts may need to reset the memoized runtime. */
 export function disposeSqlJsRuntime(): void {
   sqlJsSingleton = null
+  sqlJsRuntime = null
 }
 
 export class SQLiteDatabase {
@@ -91,8 +99,25 @@ export class SQLiteDatabase {
     snapshot?: Uint8Array,
   ): Promise<SQLiteDatabase> {
     const SQL = await loadSqlJs(config)
+    sqlJsRuntime = SQL
     const raw = snapshot ? new SQL.Database(snapshot) : new SQL.Database()
     // Foreign key enforcement is a per-connection pragma in SQLite.
+    raw.run('PRAGMA foreign_keys = ON;')
+    return new SQLiteDatabase(raw)
+  }
+
+  /**
+   * Create an independent, unpersisted database from serialized bytes.
+   * The active database implies that the shared sql.js runtime is loaded,
+   * so visualization can clone synchronously without touching its connection.
+   */
+  static createFromSnapshot(bytes: Uint8Array): SQLiteDatabase {
+    if (sqlJsRuntime === null) {
+      throw new Error('SQLite must be initialized before cloning a database snapshot.')
+    }
+    // Copy the bytes: sql.js may retain the buffer, and the active database
+    // must never share storage with a preview connection.
+    const raw = new sqlJsRuntime.Database(new Uint8Array(bytes))
     raw.run('PRAGMA foreign_keys = ON;')
     return new SQLiteDatabase(raw)
   }
@@ -205,11 +230,17 @@ export class SQLiteDatabase {
 
   /** Execute a single query and return positional rows. */
   queryAll(sql: string): { columns: string[]; values: unknown[][] } {
-    const result = this.db.exec(sql)
-    const primary = result[0]
-    return {
-      columns: primary?.columns ?? [],
-      values: primary?.values ?? [],
+    // prepare/step instead of exec() so zero-row queries still expose their
+    // column names. exec() omits an empty result set entirely, which would
+    // make an empty table look like a table without columns.
+    const stmt = this.db.prepare(sql)
+    try {
+      const columns = stmt.getColumnNames()
+      const values: unknown[][] = []
+      while (stmt.step()) values.push(stmt.get() as unknown[])
+      return { columns, values }
+    } finally {
+      stmt.free()
     }
   }
 

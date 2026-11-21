@@ -11,7 +11,9 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc -b"
+    "typecheck": "tsc -b",
+    "qa:browser": "node scripts/browser-qa/run.mjs",
+    "qa:production": "node scripts/browser-qa/production-smoke.mjs"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

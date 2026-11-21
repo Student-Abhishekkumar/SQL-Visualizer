@@ -173,7 +173,7 @@ function inspectNodeCore(node: FlowGraphNode, trace: VisualizationTrace): NodeIn
         ? `${isSubquery ? 'Subquery result' : 'CTE result'}: ${table?.name ?? node.label}`
         : `Source table: ${table?.name ?? node.label}`
       const operation = isFrom
-        ? 'FROM'
+        ? (trace.dml !== undefined ? 'TARGET' : 'FROM')
         : isSubquery
           ? 'Subquery'
           : table?.role === 'cte'
@@ -381,7 +381,9 @@ function inspectNodeCore(node: FlowGraphNode, trace: VisualizationTrace): NodeIn
               ? snapshot.label.includes('INTERSECT') || snapshot.label.includes('EXCEPT')
                 ? snapshot.explanation
                 : 'UNION removed these rows because the accumulated compound result already contained an equal row (NULLs compare equal).'
-              : node.hint ?? 'These rows did not pass the condition and did not continue.'
+              : snapshot?.stage === 'MATCHED_ROWS'
+                ? 'These rows did not satisfy the condition and are left untouched by the statement.'
+                : node.hint ?? 'These rows did not pass the condition and did not continue.'
       return {
         header: {
           title: node.label,
@@ -478,14 +480,19 @@ function inspectNodeCore(node: FlowGraphNode, trace: VisualizationTrace): NodeIn
       const lastStage = trace.stages[trace.stages.length - 1] ?? null
       return {
         header: {
-          title: 'Final result',
-          operation: 'OUTPUT',
+          title: trace.ddl !== undefined
+            ? 'Schema preview (isolated)'
+            : trace.dml !== undefined ? 'Final table (isolated preview)' : 'Final result',
+          operation: trace.ddl?.operation.replaceAll('_', ' ') ?? (trace.dml !== undefined ? 'FINAL TABLE' : 'OUTPUT'),
           stage: lastStage,
-          badge: 'result',
+          badge: trace.dml !== undefined || trace.ddl !== undefined ? 'preview' : 'result',
         },
         overview: {
-          description:
-            'The logical simulation’s final rows — validated against SQLite’s real result when the trace reports validation.',
+          description: trace.ddl !== undefined
+            ? 'Real schema metadata after SQLite executed on an isolated copy. The active database and stored snapshot were not modified.'
+            : trace.dml !== undefined
+            ? 'The real target-table state after SQLite ran on the isolated copy. The active database was not modified.'
+            : 'The logical simulation’s final rows — validated against SQLite’s real result when the trace reports validation.',
           inputRows: lastSnapshot?.outputRowCount ?? null,
           outputRows: trace.finalRows.length,
         },

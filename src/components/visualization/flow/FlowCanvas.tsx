@@ -1033,6 +1033,9 @@ export function FlowCanvas({
                 <g
                   key={edge.id}
                   className="flow-edge"
+                  data-edge-id={edge.id}
+                  data-from={edge.from}
+                  data-to={edge.to}
                   data-kind={edge.kind}
                   data-status={status}
                   data-selected-path={

@@ -61,6 +61,26 @@ export const DOC_SOURCES: DocSource[] = [
     url: 'https://www.sqlite.org/lang_select.html#compound',
     stages: ['COMPOUND'],
   },
+  {
+    label: 'SQLite: CREATE TABLE',
+    url: 'https://www.sqlite.org/lang_createtable.html',
+    stages: ['DATABASE', 'TABLE_DEFINITION', 'COLUMN_DEFINITIONS', 'CONSTRAINTS', 'CREATE_TABLE', 'RESULTING_SCHEMA'],
+  },
+  {
+    label: 'SQLite: ALTER TABLE',
+    url: 'https://www.sqlite.org/lang_altertable.html',
+    stages: ['ORIGINAL_SCHEMA', 'ALTER_OPERATION', 'SCHEMA_TRANSFORMATION', 'RESULTING_SCHEMA'],
+  },
+  {
+    label: 'SQLite: CREATE INDEX and DROP INDEX',
+    url: 'https://www.sqlite.org/lang_createindex.html',
+    stages: ['INDEX_DEFINITION', 'CREATE_INDEX', 'INDEX_METADATA', 'EXISTING_INDEX', 'DROP_INDEX', 'REMAINING_INDEXES'],
+  },
+  {
+    label: 'SQLite: DROP TABLE',
+    url: 'https://www.sqlite.org/lang_droptable.html',
+    stages: ['DROP_TABLE', 'REMOVED_TABLE', 'REMAINING_SCHEMA'],
+  },
 ]
 
 /** Human-readable stage titles. */
@@ -75,6 +95,35 @@ export const STAGE_TITLES: Record<VisualizedStage, string> = {
   COMPOUND: 'COMPOUND — combine SELECT branches',
   ORDER_BY: 'ORDER BY — sort the result',
   LIMIT: 'LIMIT — keep the first rows',
+  TARGET: 'TARGET — open the target table',
+  INPUT: 'INPUT — gather incoming rows',
+  COLUMN_MAPPING: 'COLUMN MAPPING — align input to columns',
+  INSERT: 'INSERT — add new rows',
+  MATCHED_ROWS: 'MATCHED ROWS — find affected rows',
+  SET: 'SET — compute new values',
+  CHANGED_ROWS: 'CHANGED ROWS — rows that differ',
+  UNCHANGED_ROWS: 'UNCHANGED ROWS — rows already equal',
+  DELETE: 'DELETE — remove matched rows',
+  RETAINED_ROWS: 'RETAINED ROWS — rows left behind',
+  FINAL_TABLE: 'FINAL TABLE — resulting table state',
+  DATABASE: 'DATABASE — inspect the catalog',
+  TABLE_DEFINITION: 'TABLE DEFINITION — read the CREATE SQL',
+  COLUMN_DEFINITIONS: 'COLUMN DEFINITIONS — inspect columns',
+  CONSTRAINTS: 'CONSTRAINTS — inspect keys and indexes',
+  CREATE_TABLE: 'CREATE TABLE — add a table definition',
+  ORIGINAL_SCHEMA: 'ORIGINAL SCHEMA — capture the starting object',
+  ALTER_OPERATION: 'ALTER OPERATION — describe the schema change',
+  SCHEMA_TRANSFORMATION: 'SCHEMA TRANSFORMATION — inspect changed columns',
+  RESULTING_SCHEMA: 'RESULTING SCHEMA — read the resulting catalog',
+  DROP_TABLE: 'DROP TABLE — remove a table definition',
+  REMOVED_TABLE: 'REMOVED TABLE — inspect the removed definition',
+  REMAINING_SCHEMA: 'REMAINING SCHEMA — inspect surviving objects',
+  INDEX_DEFINITION: 'INDEX DEFINITION — read the index SQL',
+  CREATE_INDEX: 'CREATE INDEX — add an index definition',
+  INDEX_METADATA: 'INDEX METADATA — inspect keys and uniqueness',
+  EXISTING_INDEX: 'EXISTING INDEX — capture the starting index',
+  DROP_INDEX: 'DROP INDEX — remove an index definition',
+  REMAINING_INDEXES: 'REMAINING INDEXES — inspect surviving indexes',
 }
 
 /** The conceptual (static) explanation per stage — level-specific. */
@@ -159,6 +208,184 @@ const CONCEPTS: Record<VisualizedStage, Record<LearningLevel, string>> = {
     advanced:
       'In SQLite, `LIMIT x OFFSET y` and `LIMIT y, x` are equivalent forms (the comma form puts OFFSET first). LIMIT applies to the final ordered row set; with no ORDER BY, "first N" is whatever order SQLite produces.',
   },
+  TARGET: {
+    beginner:
+      'TARGET is the table the statement changes. The preview shows this table inside a temporary copy of the database, not your real one.',
+    intermediate:
+      'The target table is resolved and its columns, declared types and defaults are read from the isolated copy. Every later DML stage operates on this table only.',
+    advanced:
+      'DML visualization never executes on the active connection. The target is resolved from sqlite_master on a byte-for-byte clone, and previews that would fan out (triggers, cascading foreign keys) are rejected.',
+  },
+  INPUT: {
+    beginner:
+      'INPUT is the data being added: literal VALUES, the result of an INSERT … SELECT, or DEFAULT VALUES.',
+    intermediate:
+      'The incoming rows are produced before any write happens. For INSERT … SELECT the source query is simulated and validated on the isolated copy first.',
+    advanced:
+      'Input rows are evaluated with SQLite affinity rules applied at storage time. The simulator predicts each row, then real execution on the clone confirms it.',
+  },
+  COLUMN_MAPPING: {
+    beginner:
+      'COLUMN MAPPING pairs each incoming value with the target column that will receive it. Columns left out get their declared default or NULL.',
+    intermediate:
+      'Positional or named columns are matched case-insensitively to insertable target columns. Omitted columns are filled from defaults; INTEGER PRIMARY KEY values are assigned by SQLite.',
+    advanced:
+      'Generated columns are rejected because their values cannot be predicted faithfully. The mapping is shown explicitly so a mismatched column count or name is visible before execution.',
+  },
+  INSERT: {
+    beginner:
+      'INSERT adds the mapped rows to the table. Only the newly added rows are shown here.',
+    intermediate:
+      'The isolated copy executes the real INSERT; the rows reported are the ones that actually appeared compared with the pre-statement snapshot.',
+    advanced:
+      'Affected-row counts come from sql.js `rowsModified`. The preview never persists: the clone is discarded after the trace is built.',
+  },
+  MATCHED_ROWS: {
+    beginner:
+      'MATCHED ROWS are the rows the WHERE condition selects. Only these rows can be updated or deleted.',
+    intermediate:
+      'The condition is evaluated per row with SQLite three-valued logic; rows evaluating to UNKNOWN are not matched. Unmatched rows are shown as removed from this stage.',
+    advanced:
+      'Matching is computed on the isolated copy using the same affinity and collation metadata SQLite uses, then confirmed against real execution.',
+  },
+  SET: {
+    beginner:
+      'SET computes each new value for the matched rows. SQLite evaluates every assignment against the row’s original values.',
+    intermediate:
+      'All SET expressions see the pre-update row, so assignments do not see each other’s changes. Storage affinity is applied to each computed value.',
+    advanced:
+      'Assignment to the INTEGER PRIMARY KEY / rowid column is rejected because it changes stable row identity. The predicted values are compared with the isolated copy’s actual rows.',
+  },
+  CHANGED_ROWS: {
+    beginner:
+      'CHANGED ROWS are matched rows whose stored values differ after the update.',
+    intermediate:
+      'A row is changed only when its full value tuple differs from before; matched rows that already held the assigned values are reported separately.',
+    advanced:
+      'Change detection uses collision-safe row identity and storage-class-aware equality, so a value that only changes type (for example integer to text) still counts as changed.',
+  },
+  UNCHANGED_ROWS: {
+    beginner:
+      'UNCHANGED ROWS matched the condition but already had the assigned values, so nothing about them changed.',
+    intermediate:
+      'These rows were affected by the statement in the sense that SQLite processed them, but their stored values stayed identical.',
+    advanced:
+      'Separating changed from unchanged rows explains why an UPDATE can report affected rows without visibly altering data.',
+  },
+  DELETE: {
+    beginner:
+      'DELETE removes the matched rows. Only the removed rows are shown here.',
+    intermediate:
+      'The isolated copy executes the real DELETE; the rows shown are the ones that actually disappeared compared with the pre-statement snapshot.',
+    advanced:
+      'Deletion counts come from sql.js `rowsModified`. Foreign-key cascade actions are rejected so no row outside the target table can change.',
+  },
+  RETAINED_ROWS: {
+    beginner:
+      'RETAINED ROWS are the rows that remain after the delete because they did not match.',
+    intermediate:
+      'These rows are the table’s surviving contents in the isolated copy after the statement runs.',
+    advanced:
+      'Retained rows are read back from the clone, not inferred, so the final table reflects real SQLite state.',
+  },
+  FINAL_TABLE: {
+    beginner:
+      'FINAL TABLE is what the table would look like after the statement. It comes from a temporary copy — your real database is unchanged.',
+    intermediate:
+      'The final table is read from the isolated copy after execution and validated against the simulator’s prediction. The active database and its stored snapshot are untouched.',
+    advanced:
+      'The preview discards the clone in a `finally` block on success and failure. Validation compares predicted final rows with the clone’s actual rows; a mismatch is reported honestly.',
+  },
+  DATABASE: {
+    beginner: 'DATABASE shows the tables, indexes, views and triggers currently known to SQLite.',
+    intermediate: 'The catalog rows come directly from sqlite_master on the isolated copy before or after DDL.',
+    advanced: 'Automatic constraint indexes are retained in the catalog so UNIQUE and PRIMARY KEY side effects remain visible.',
+  },
+  TABLE_DEFINITION: {
+    beginner: 'TABLE DEFINITION shows the table name and the CREATE TABLE SQL SQLite stored.',
+    intermediate: 'The displayed SQL comes from sqlite_master, not from reconstructing or formatting the input statement.',
+    advanced: 'The row count is read separately from the cloned table, making IF NOT EXISTS no-op definitions explicit.',
+  },
+  COLUMN_DEFINITIONS: {
+    beginner: 'COLUMN DEFINITIONS lists each column with its type, default and key information.',
+    intermediate: 'PRAGMA table_xinfo supplies declared types, nullability, primary-key positions and defaults, including generated columns.',
+    advanced: 'Affinity follows SQLite’s ordered declared-type substring rules; single-column uniqueness is derived from real indexes.',
+  },
+  CONSTRAINTS: {
+    beginner: 'CONSTRAINTS shows indexes and foreign keys attached to the table.',
+    intermediate: 'PRAGMA index_list, index_xinfo and foreign_key_list provide uniqueness, origin, key order and referential actions.',
+    advanced: 'Expression index keys remain null in structured metadata and are labelled as expressions only for display.',
+  },
+  CREATE_TABLE: {
+    beginner: 'CREATE TABLE adds a new table definition in the temporary preview database.',
+    intermediate: 'SQLite executes the real statement on a byte-copy clone, then the trace reads back the stored definition.',
+    advanced: 'Existing-table errors and IF NOT EXISTS no-ops are distinguished; neither path executes on or persists to the active connection.',
+  },
+  ORIGINAL_SCHEMA: {
+    beginner: 'ORIGINAL SCHEMA is the object as it existed before the change.',
+    intermediate: 'Before metadata and table rows are captured on the clone before any DDL executes.',
+    advanced: 'Keeping the complete before image allows the preview to verify preservation instead of merely claiming it.',
+  },
+  ALTER_OPERATION: {
+    beginner: 'ALTER OPERATION identifies the one table rename, column rename, add or drop being performed.',
+    intermediate: 'The conservative classifier accepts exactly one SQLite ALTER action and rejects batches or schema-qualified targets.',
+    advanced: 'The original SQL remains attached to this stage while execution is deferred to the isolated SQLite connection.',
+  },
+  SCHEMA_TRANSFORMATION: {
+    beginner: 'SCHEMA TRANSFORMATION shows the columns after ALTER TABLE.',
+    intermediate: 'SQLite supplies the new definitions; renames preserve every row and ADD/DROP COLUMN preserves every surviving column.',
+    advanced: 'Complete before/after row multisets are compared. Any unexpected data change discards the preview rather than producing a trace.',
+  },
+  RESULTING_SCHEMA: {
+    beginner: 'RESULTING SCHEMA shows what the database would contain after the statement.',
+    intermediate: 'The final catalog and object metadata are fresh SQLite reads from the isolated post-statement database.',
+    advanced: 'No preview bytes are exported or persisted; the temporary connection closes immediately after the trace is complete.',
+  },
+  DROP_TABLE: {
+    beginner: 'DROP TABLE removes a table definition in the temporary preview database.',
+    intermediate: 'The isolated SQLite execution also removes dependent indexes and triggers, which the remaining catalog reveals.',
+    advanced: 'Foreign-key delete actions that could mutate other tables are rejected before execution; ordinary SQLite failures remain errors.',
+  },
+  REMOVED_TABLE: {
+    beginner: 'REMOVED TABLE keeps the old table definition visible so you can see what was dropped.',
+    intermediate: 'Its CREATE SQL and row count come from the pre-drop sqlite_master and table reads.',
+    advanced: 'Row-data change is reported only for an actual drop, never for a missing-table IF EXISTS no-op.',
+  },
+  REMAINING_SCHEMA: {
+    beginner: 'REMAINING SCHEMA lists the objects left after a drop.',
+    intermediate: 'The complete post-drop catalog proves that the target and its dependent entries no longer exist.',
+    advanced: 'The active catalog is not queried for this after image; it comes exclusively from the isolated clone.',
+  },
+  INDEX_DEFINITION: {
+    beginner: 'INDEX DEFINITION shows the index SQL, owning table and indexed keys.',
+    intermediate: 'SQLite stores the authoritative CREATE INDEX SQL while PRAGMA supplies uniqueness and key metadata.',
+    advanced: 'Expression keys are represented honestly as null rather than being assigned invented column names.',
+  },
+  CREATE_INDEX: {
+    beginner: 'CREATE INDEX adds an index in the temporary preview without changing any table rows.',
+    intermediate: 'The preview supports ordinary, UNIQUE, expression and partial indexes on one main-database table.',
+    advanced: 'IF NOT EXISTS uses SQLite’s real existing object, even when the same-named index belongs to another table.',
+  },
+  INDEX_METADATA: {
+    beginner: 'INDEX METADATA explains whether the index is unique and which columns or expressions it uses.',
+    intermediate: 'PRAGMA index_list distinguishes created, UNIQUE-constraint and PRIMARY KEY indexes; index_xinfo orders the keys.',
+    advanced: 'The preview compares complete before/after row multisets so index creation cannot be mistaken for a data transformation.',
+  },
+  EXISTING_INDEX: {
+    beginner: 'EXISTING INDEX shows the index before DROP INDEX removes it.',
+    intermediate: 'The index and owning table are resolved case-insensitively from the cloned SQLite catalog.',
+    advanced: 'DROP INDEX has a dedicated conservative lexer because the installed SQL parser does not support this SQLite statement.',
+  },
+  DROP_INDEX: {
+    beginner: 'DROP INDEX removes only the index definition; the table and all of its rows remain.',
+    intermediate: 'The statement executes on the isolated clone and the after image confirms the index is gone.',
+    advanced: 'IF EXISTS on a missing index produces an explicit no-op trace rather than a fabricated removed-index row.',
+  },
+  REMAINING_INDEXES: {
+    beginner: 'REMAINING INDEXES lists the indexes still attached to the table.',
+    intermediate: 'Every surviving entry comes from PRAGMA index_list after the isolated drop.',
+    advanced: 'Row preservation is checked across the operation, and the active database’s indexes are never altered.',
+  },
 }
 
 /** Why the stage exists in the pipeline (one line each). */
@@ -173,6 +400,35 @@ const WHY: Record<VisualizedStage, string> = {
   COMPOUND: 'Some questions need rows from more than one independent SELECT.',
   ORDER_BY: 'Users expect results in a meaningful order.',
   LIMIT: 'Top-N results are the most common read pattern.',
+  TARGET: 'A DML statement changes exactly one target table.',
+  INPUT: 'New rows have to come from somewhere.',
+  COLUMN_MAPPING: 'Values must land in the right columns.',
+  INSERT: 'The point of INSERT is to add rows.',
+  MATCHED_ROWS: 'Only some rows should be affected.',
+  SET: 'Updated columns need new values.',
+  CHANGED_ROWS: 'Only genuinely different rows are interesting.',
+  UNCHANGED_ROWS: 'Matched rows may already hold the new values.',
+  DELETE: 'The point of DELETE is to remove rows.',
+  RETAINED_ROWS: 'The table survives with its remaining rows.',
+  FINAL_TABLE: 'The result is the table’s new state.',
+  DATABASE: 'DDL changes a schema, so the starting catalog matters.',
+  TABLE_DEFINITION: 'SQLite stores the authoritative table definition in sqlite_master.',
+  COLUMN_DEFINITIONS: 'Declared types, defaults and key flags explain the table structure.',
+  CONSTRAINTS: 'Constraints and indexes are part of the real schema, not just the CREATE text.',
+  CREATE_TABLE: 'The statement’s purpose is to add a table definition.',
+  ORIGINAL_SCHEMA: 'A schema transformation needs an accurate before image.',
+  ALTER_OPERATION: 'ALTER TABLE performs one explicit structural action.',
+  SCHEMA_TRANSFORMATION: 'The resulting columns reveal exactly what changed.',
+  RESULTING_SCHEMA: 'The after image proves which catalog objects now exist.',
+  DROP_TABLE: 'The statement’s purpose is to remove a table definition.',
+  REMOVED_TABLE: 'The pre-drop definition makes the removal understandable.',
+  REMAINING_SCHEMA: 'Dependent indexes and triggers can disappear with a table.',
+  INDEX_DEFINITION: 'The stored SQL and owning table define the index.',
+  CREATE_INDEX: 'The statement adds an index without changing table rows.',
+  INDEX_METADATA: 'SQLite’s PRAGMA metadata describes how the index is structured.',
+  EXISTING_INDEX: 'Dropping an index requires its real before image.',
+  DROP_INDEX: 'The statement removes an index without changing table rows.',
+  REMAINING_INDEXES: 'Other indexes on the owning table survive independently.',
 }
 
 /** What happened in this stage, derived from the real snapshot. */
@@ -214,6 +470,60 @@ function describeSnapshot(stage: VisualizedStage, snapshot: StageSnapshot): stri
       return removed === 0
         ? `Kept all ${output} row${output === 1 ? '' : 's'} — the limit did not remove anything.`
         : `Skipped ${removed} row${removed === 1 ? '' : 's'} (OFFSET) and kept ${output}.`
+    case 'TARGET':
+      return `The target table holds ${output} row${output === 1 ? '' : 's'} in the isolated copy before the statement runs.`
+    case 'INPUT':
+      return `${output} input row${output === 1 ? '' : 's'} are available to map into the target table.`
+    case 'COLUMN_MAPPING':
+      return `${output} column mapping${output === 1 ? '' : 's'} align input values with target columns.`
+    case 'INSERT':
+      return `${output} row${output === 1 ? '' : 's'} were inserted in the isolated copy.`
+    case 'MATCHED_ROWS':
+      return removed === 0
+        ? `All ${output} row${output === 1 ? '' : 's'} matched the condition.`
+        : `${output} row${output === 1 ? '' : 's'} matched; ${removed} did not and are left untouched.`
+    case 'SET':
+      return `New values were computed for ${output} matched row${output === 1 ? '' : 's'}.`
+    case 'CHANGED_ROWS':
+      return `${output} matched row${output === 1 ? '' : 's'} stored different values.`
+    case 'UNCHANGED_ROWS':
+      return `${output} matched row${output === 1 ? '' : 's'} already held the assigned values.`
+    case 'DELETE':
+      return `${output} row${output === 1 ? '' : 's'} were deleted in the isolated copy.`
+    case 'RETAINED_ROWS':
+      return `${output} row${output === 1 ? '' : 's'} remain after the delete.`
+    case 'FINAL_TABLE':
+      return `The isolated table ends with ${output} row${output === 1 ? '' : 's'}; your active database is unchanged.`
+    case 'DATABASE':
+    case 'RESULTING_SCHEMA':
+    case 'REMAINING_SCHEMA':
+      return `SQLite reports ${output} catalog object${output === 1 ? '' : 's'} at this point in the isolated preview.`
+    case 'TABLE_DEFINITION':
+    case 'REMOVED_TABLE':
+      return output === 0 ? 'No table definition exists at this point.' : 'The real table definition and row count come from sqlite_master and SQLite row reads.'
+    case 'COLUMN_DEFINITIONS':
+    case 'SCHEMA_TRANSFORMATION':
+      return `PRAGMA table_xinfo reports ${output} column${output === 1 ? '' : 's'}.`
+    case 'CONSTRAINTS':
+      return `SQLite reports ${output} index or foreign-key metadata row${output === 1 ? '' : 's'}.`
+    case 'CREATE_TABLE':
+      return 'CREATE TABLE completed in the isolated copy; the active schema is unchanged.'
+    case 'ORIGINAL_SCHEMA':
+    case 'EXISTING_INDEX':
+      return `The before image contains ${output} schema metadata row${output === 1 ? '' : 's'}.`
+    case 'ALTER_OPERATION':
+      return 'One ALTER TABLE action was classified and applied to the isolated copy.'
+    case 'DROP_TABLE':
+      return 'DROP TABLE completed in the isolated copy; dependent catalog entries are visible in the remaining schema.'
+    case 'INDEX_DEFINITION':
+    case 'INDEX_METADATA':
+      return output === 0 ? 'No index metadata exists at this point.' : 'The index definition, uniqueness, origin and keys come from SQLite.'
+    case 'CREATE_INDEX':
+      return 'CREATE INDEX completed without changing table rows in the isolated copy.'
+    case 'DROP_INDEX':
+      return 'DROP INDEX completed without changing table rows in the isolated copy.'
+    case 'REMAINING_INDEXES':
+      return `The owning table retains ${output} index${output === 1 ? '' : 'es'}.`
   }
 }
 

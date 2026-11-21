@@ -64,19 +64,14 @@ function expectRejected(sql: string) {
 
 describe('Visualize read-only enforcement', () => {
   it.each([
-    ['DELETE', 'DELETE FROM items'],
-    ['INSERT', "INSERT INTO items (id, label) VALUES (3, 'three')"],
-    ['UPDATE', "UPDATE items SET label = 'changed' WHERE id = 1"],
     ['REPLACE', "REPLACE INTO items (id, label) VALUES (1, 'replacement')"],
-    ['DROP TABLE', 'DROP TABLE items'],
-    ['CREATE TABLE', 'CREATE TABLE other (id INTEGER)'],
-    ['ALTER TABLE', 'ALTER TABLE items ADD COLUMN extra TEXT'],
+    ['CREATE VIEW', 'CREATE VIEW item_view AS SELECT * FROM items'],
     ['SELECT followed by DELETE', 'SELECT 1; DELETE FROM items'],
     ['multiple SELECT statements', 'SELECT 1; SELECT 2'],
+    ['multiple DML statements', "INSERT INTO items (id, label) VALUES (3, 'three'); DELETE FROM items"],
     ['CTE followed by mutation', 'WITH x AS (SELECT 1) SELECT * FROM x; DELETE FROM items'],
     ['mutating CTE statement', 'WITH x AS (SELECT 1) DELETE FROM items'],
     ['empty input', ''],
-    ['comment-prefixed DELETE', '-- leading comment\nDELETE FROM items'],
     ['BEGIN', 'BEGIN'],
     ['COMMIT', 'COMMIT'],
     ['ATTACH', "ATTACH DATABASE ':memory:' AS other"],
@@ -86,6 +81,53 @@ describe('Visualize read-only enforcement', () => {
     ['missing source table', 'SELECT * FROM missing_table'],
   ])('rejects %s without executing or mutating', (_name, sql) => {
     expectRejected(sql)
+  })
+
+  it.each([
+    ['INSERT', "INSERT INTO items (id, label) VALUES (3, 'three')"],
+    ['UPDATE', "UPDATE items SET label = 'changed' WHERE id = 1"],
+    ['DELETE', 'DELETE FROM items'],
+    ['comment-prefixed DELETE', '-- leading comment\nDELETE FROM items'],
+    ['CREATE TABLE', 'CREATE TABLE other (id INTEGER)'],
+    ['ALTER TABLE', 'ALTER TABLE items ADD COLUMN extra TEXT'],
+    ['DROP TABLE', 'DROP TABLE items'],
+    ['CREATE INDEX', 'CREATE INDEX items_label ON items(label)'],
+    ['DROP INDEX', 'DROP INDEX IF EXISTS missing_index'],
+  ])('previews %s on an isolated copy without mutating the active database', (_name, sql) => {
+    const executeSpy = vi.spyOn(db, 'executeBatch')
+    const beforeRows = rows()
+    const beforeSchema = schema()
+    const outcome = simulateAndValidate(sql, splitStatements(sql), db)
+
+    expect(outcome.simulation.ok).toBe(true)
+    expect(outcome.execution).toBeNull()
+    expect(outcome.validation?.validated).toBe(true)
+    // The active connection's executor is never used for the preview.
+    expect(executeSpy).not.toHaveBeenCalled()
+    expect(rows()).toEqual(beforeRows)
+    expect(schema()).toEqual(beforeSchema)
+  })
+
+  it('rejects DML on a table with a trigger before executing it', () => {
+    db.runRaw(`
+      CREATE TABLE audit (note TEXT);
+      CREATE TRIGGER items_audit AFTER INSERT ON items BEGIN
+        INSERT INTO audit (note) VALUES ('inserted');
+      END;
+    `)
+    const executeSpy = vi.spyOn(db, 'executeBatch')
+    const beforeRows = rows()
+    const outcome = simulateAndValidate(
+      "INSERT INTO items (id, label) VALUES (3, 'three')",
+      ["INSERT INTO items (id, label) VALUES (3, 'three')"],
+      db,
+    )
+
+    expect(outcome.simulation.ok).toBe(false)
+    if (outcome.simulation.ok) throw new Error('Expected trigger-backed DML to be rejected')
+    expect(outcome.simulation.reasons.join(' ')).toMatch(/trigger/i)
+    expect(executeSpy).not.toHaveBeenCalled()
+    expect(rows()).toEqual(beforeRows)
   })
 
   it('executes a valid SELECT and validates it against SQLite', () => {

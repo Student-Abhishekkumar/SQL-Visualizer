@@ -309,7 +309,9 @@ export const useVisualizationStore = create<VisualizationState>()((set, get) => 
       status: 'ready',
       unavailableReasons: [],
       validation: outcome.validation,
-      actualRowCount: outcome.execution?.values.length ?? null,
+      actualRowCount:
+        outcome.simulation.trace.dml?.affectedRowCount ??
+        (outcome.simulation.trace.ddl !== undefined ? 0 : outcome.execution?.values.length ?? null),
       databaseId,
     })
   },

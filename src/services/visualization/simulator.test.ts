@@ -193,6 +193,200 @@ describe('SELECT projection', () => {
   })
 })
 
+describe('wildcard projection expansion', () => {
+  const joined =
+    'FROM employees e JOIN departments d ON e.department_id = d.id'
+
+  it('expands table.* to only that table, not the joined relation', () => {
+    const outcome = run(`SELECT e.* ${joined} WHERE e.id = 1`)
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.trace.finalColumns).toEqual([
+      'id', 'name', 'salary', 'department_id', 'age', 'city',
+    ])
+    expect(outcome.trace.finalRows[0]?.values).toEqual([1, 'Ravi', 62000, 1, 30, 'Delhi'])
+  })
+
+  it('expands a different table.* independently', () => {
+    const outcome = run(`SELECT d.* ${joined} WHERE e.id = 1`)
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.trace.finalColumns).toEqual(['id', 'department_name'])
+    expect(outcome.trace.finalRows[0]?.values).toEqual([1, 'Engineering'])
+  })
+
+  it('expands bare * in FROM/JOIN order with SQLite output names', () => {
+    const outcome = run(`SELECT * ${joined} WHERE e.id = 1`)
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.trace.finalColumns).toEqual([
+      'id', 'name', 'salary', 'department_id', 'age', 'city', 'id', 'department_name',
+    ])
+    expect(outcome.trace.finalRows[0]?.values).toEqual([
+      1, 'Ravi', 62000, 1, 30, 'Delhi', 1, 'Engineering',
+    ])
+  })
+
+  it('expands mixed wildcard lists in projection order', () => {
+    const both = run(`SELECT e.*, d.* ${joined} WHERE e.id = 1`)
+    expect(both.ok).toBe(true)
+    if (both.ok) {
+      expect(both.trace.finalColumns).toEqual([
+        'id', 'name', 'salary', 'department_id', 'age', 'city', 'id', 'department_name',
+      ])
+    }
+
+    const starThenId = run('SELECT *, id FROM employees WHERE id = 1')
+    expect(starThenId.ok).toBe(true)
+    if (starThenId.ok) {
+      expect(starThenId.trace.finalColumns).toEqual([
+        'id', 'name', 'salary', 'department_id', 'age', 'city', 'id',
+      ])
+      expect(starThenId.trace.finalRows[0]?.values).toEqual([
+        1, 'Ravi', 62000, 1, 30, 'Delhi', 1,
+      ])
+    }
+
+    const idThenStar = run('SELECT id, * FROM employees WHERE id = 1')
+    expect(idThenStar.ok).toBe(true)
+    if (idThenStar.ok) {
+      expect(idThenStar.trace.finalColumns).toEqual([
+        'id', 'id', 'name', 'salary', 'department_id', 'age', 'city',
+      ])
+      expect(idThenStar.trace.finalRows[0]?.values).toEqual([
+        1, 1, 'Ravi', 62000, 1, 30, 'Delhi',
+      ])
+    }
+  })
+
+  it('mixes table.* with an explicit joined column', () => {
+    const outcome = run(`SELECT e.*, d.department_name ${joined} WHERE e.id = 1`)
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.trace.finalColumns).toEqual([
+      'id', 'name', 'salary', 'department_id', 'age', 'city', 'department_name',
+    ])
+    expect(outcome.trace.finalRows[0]?.values).toEqual([
+      1, 'Ravi', 62000, 1, 30, 'Delhi', 'Engineering',
+    ])
+  })
+
+  it('keeps qualified resolution labels but exposes SQLite names for CTE self-joins', () => {
+    const outcome = run(
+      `WITH x AS (SELECT id, name FROM employees)
+       SELECT * FROM x a JOIN x b ON a.id = b.id
+       WHERE a.id = 1`,
+    )
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.trace.finalColumns).toEqual(['id', 'name', 'id', 'name'])
+    expect(outcome.trace.finalRows[0]?.values).toEqual([1, 'Ravi', 1, 'Ravi'])
+  })
+})
+
+describe('clause alias resolution', () => {
+  it('resolves a WHERE output alias', () => {
+    const outcome = run('SELECT salary AS pay FROM employees WHERE pay > 70000 ORDER BY pay')
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.trace.finalColumns).toEqual(['pay'])
+    expect(outcome.trace.finalRows.map((row) => row.values)).toEqual([[75000]])
+  })
+
+  it('resolves a GROUP BY output alias', () => {
+    const outcome = run(
+      'SELECT department_id AS d, COUNT(*) AS c FROM employees GROUP BY d ORDER BY d',
+    )
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.trace.finalColumns).toEqual(['d', 'c'])
+    expect(outcome.trace.finalRows.map((row) => row.values)).toEqual([
+      [null, 1],
+      [1, 2],
+      [2, 2],
+      [3, 3],
+    ])
+  })
+
+  it('resolves a HAVING output alias', () => {
+    const outcome = run(
+      `SELECT department_id, COUNT(*) AS c
+       FROM employees GROUP BY department_id HAVING c > 2 ORDER BY department_id`,
+    )
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.trace.finalColumns).toEqual(['department_id', 'c'])
+    expect(outcome.trace.finalRows.map((row) => row.values)).toEqual([[3, 3]])
+  })
+
+  it('resolves a HAVING alias that contains an aggregate expression', () => {
+    const outcome = run(
+      `SELECT department_id, SUM(salary) AS total
+       FROM employees GROUP BY department_id HAVING total > 100000 ORDER BY department_id`,
+    )
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.trace.finalRows.map((row) => row.values)).toEqual([
+      [1, 110000],
+      [2, 130000],
+      [3, 154000],
+    ])
+  })
+
+  it('prefers a source column over an alias in WHERE', () => {
+    const outcome = run('SELECT city AS id FROM employees WHERE id = 1')
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.trace.finalRows.map((row) => row.values)).toEqual([['Delhi']])
+  })
+
+  it('prefers a source column over an alias in GROUP BY', () => {
+    const outcome = run('SELECT city AS id, COUNT(*) AS c FROM employees GROUP BY id')
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    // GROUP BY id resolves the source primary key, not the city alias, so
+    // every employee is its own group.
+    expect(outcome.trace.finalRows.map((row) => row.values)).toEqual([
+      ['Delhi', 1],
+      ['Mumbai', 1],
+      ['Delhi', 1],
+      ['Pune', 1],
+      ['Delhi', 1],
+      ['Pune', 1],
+      [null, 1],
+      ['Delhi', 1],
+    ])
+  })
+
+  it('prefers a source column over an alias in HAVING', () => {
+    const outcome = run("SELECT COUNT(*) AS city FROM employees HAVING city = 'Delhi'")
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.trace.finalRows.map((row) => row.values)).toEqual([[8]])
+  })
+
+  it('reports an ambiguous source column honestly', () => {
+    const outcome = run(
+      `SELECT e.id AS id, d.id AS id
+       FROM employees e JOIN departments d ON e.department_id = d.id
+       WHERE id = 1`,
+    )
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.reasons.join(' ')).toMatch(/ambiguous/i)
+  })
+
+  it('scopes aliases to their own query block', () => {
+    const outcome = run(
+      'WITH q AS (SELECT id AS i FROM employees WHERE i = 1) SELECT * FROM q',
+    )
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    expect(outcome.trace.finalColumns).toEqual(['i'])
+    expect(outcome.trace.finalRows.map((row) => row.values)).toEqual([[1]])
+  })
+})
+
 describe('DISTINCT stage', () => {
   it('removes duplicate projected rows and reports them', () => {
     const outcome = run('SELECT DISTINCT city FROM employees')

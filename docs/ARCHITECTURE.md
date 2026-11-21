@@ -92,18 +92,13 @@ workspace.
 `visualizationStore.visualize()` orchestrates the pipeline without touching the normal query
 execution state:
 
-1. **Parse** the SQL with `node-sql-parser` and confirm it is a supported `SELECT`, including a
-   `UNION` / `UNION ALL` / `INTERSECT` / `EXCEPT` compound select. When the parser cannot handle a
-   compound form, the quote/comment/parenthesis-aware compound splitter preserves branch SQL and root
-   clauses for the interpretation fallback.
-2. **Interpret** the AST into a typed query structure. Unsupported constructs are collected as
+1. **Parse and classify** one statement with `node-sql-parser`. `SELECT` (including compounds) uses the SELECT interpreter; supported `INSERT`, `UPDATE` and `DELETE` use the DML classifier; supported `CREATE TABLE`, `ALTER TABLE`, `DROP TABLE`, `CREATE INDEX` and `DROP INDEX` use the DDL classifier. A dedicated conservative lexer handles SQLite `DROP INDEX`, which the installed parser does not accept.
+2. **Interpret** the AST into a typed query, mutation or schema structure. Unsupported constructs are collected as
    explicit reasons, not silently ignored.
 3. **Analyze capability** to derive the stages that will run, the constructs in use, warnings and
    an estimated visualization cost.
-4. **Simulate** the logical pipeline against live table data, producing immutable stage snapshots
-   and an ordered event trace.
-5. **Execute for real** and compare the simulator's final columns, row count and values with
-   SQLite's result.
+4. **Simulate** SELECT against live table data, or execute supported DML/DDL on an isolated byte-copy clone, producing immutable stage snapshots and an ordered event trace.
+5. **Validate against SQLite.** SELECT compares final columns, rows and values with the active read-only result; DML compares predicted and actual clone rows; DDL reads the actual post-statement catalog and PRAGMA metadata and checks data-preservation invariants.
 6. **Build the flow graph** deterministically from the trace.
 7. **Load the trace** into the playback controller, which folds events into the UI view state.
 
@@ -133,9 +128,70 @@ execution state:
 | `COMPOUND` | Fold independent `SELECT` branches left-to-right with `UNION`, `UNION ALL`, `INTERSECT` or `EXCEPT`, recording each operation's actual inputs, output and removed rows. |
 | `ORDER BY` | Sort rows using the requested keys. |
 | `LIMIT` / `OFFSET` | Keep or skip rows at the end of the pipeline. |
+| `TARGET` | Capture real target rows in the isolated copy before DML. |
+| `INPUT` / `COLUMN_MAPPING` | Show INSERT input rows and their target-column associations. |
+| `INSERT` / `DELETE` | Show rows SQLite actually inserted or deleted in the copy. |
+| `MATCHED_ROWS` | Show matched rows and the untouched unmatched branch. |
+| `SET` / `CHANGED_ROWS` / `UNCHANGED_ROWS` | Show assigned values, actual changes and matched-but-unchanged rows. |
+| `RETAINED_ROWS` / `FINAL_TABLE` | Show retained rows and the authoritative post-statement table. |
+| `DATABASE` / `RESULTING_SCHEMA` / `REMAINING_SCHEMA` | Read real `sqlite_master` catalog rows before or after DDL. |
+| `TABLE_DEFINITION` / `COLUMN_DEFINITIONS` / `CONSTRAINTS` | Show stored CREATE SQL, `PRAGMA table_xinfo` columns, indexes and foreign keys. |
+| `ORIGINAL_SCHEMA` / `ALTER_OPERATION` / `SCHEMA_TRANSFORMATION` | Capture the original object, one ALTER action and the resulting columns. |
+| `DROP_TABLE` / `REMOVED_TABLE` | Show the isolated drop and its real pre-drop definition. |
+| `INDEX_DEFINITION` / `CREATE_INDEX` / `INDEX_METADATA` | Show actual index SQL, isolated creation and PRAGMA key metadata. |
+| `EXISTING_INDEX` / `DROP_INDEX` / `REMAINING_INDEXES` | Show the pre-drop index, isolated removal and surviving table indexes. |
 
 Snapshots carry row roles (`accepted`, `filtered`, `duplicated`, `selected`, `skipped`, `grouped`)
 so every panel can explain not just what survived, but what was removed and why.
+
+### Projection and column naming
+
+Projection items are stored per item, in source order. A wildcard is a `StarExpr` with an optional
+table qualifier, so bare `*`, `table.*` and mixed lists such as `t.*, u.*` or `*, id` stay distinct;
+`selectAll` survives only as a convenience flag for a list that is exactly one unqualified `*`.
+`astInterpreter` checks every wildcard qualifier against the block's FROM/JOIN tables and aliases and
+rejects an unknown qualifier before simulation.
+
+The simulator keeps three aligned label lists per block:
+
+- `columnLabels` — qualified internal resolution names (`e.id`), used to resolve references and
+  disambiguate joined columns.
+- `displayLabels` — intermediate snapshot names, shown while the pipeline runs.
+- `sourceColumnNames` — the SQLite output names for source columns (`id`, not `u.id`).
+
+`projectRows` expands each wildcard against `columnLabels` and emits `displayLabels` for stage
+snapshots but `sourceColumnNames` for the block's final columns. Thus `VisualizationTrace.finalColumns`
+matches SQLite's names for wildcard projections, CTEs and CTE self-joins, while intermediate snapshots
+may keep qualified labels for clarity. Compound output names still come from the first branch.
+
+Output aliases are resolved structurally in `WHERE`, `GROUP BY` and `HAVING` by substituting the
+aliased expression, never by substituting text. A source column with the same name takes precedence,
+aliases are not re-resolved inside other aliased expressions, and aggregate expression text is kept
+intact so per-group evaluation still finds its precomputed value.
+
+### SQLite affinity and collation
+
+`readTableFromDb` combines live rows with comparison metadata: `PRAGMA table_info` supplies declared
+types, and the table's `sqlite_master` DDL supplies column collation declarations. `sqliteAffinity.ts`
+derives INTEGER, TEXT, REAL, NUMERIC or BLOB affinity using SQLite's ordered substring rules. Metadata
+travels alongside columns through joins, projections, CTEs, scalar/`IN` subqueries and compound branches;
+computed expressions and fixtures without schema metadata retain unknown affinity. It is internal
+execution metadata, not part of row identity or the persisted trace format.
+
+Scalar comparisons apply affinity only to the operand required by SQLite's rules. Numeric affinity
+converts well-formed numeric text; TEXT affinity converts numeric literals using their integer/real
+storage class (`10` → `'10'`, `10.0` → `'10.0'`). Two columns that both have affinity do not coerce each
+other. Final comparison uses SQLite storage-class ordering (numbers, text, then blobs), bytewise BLOB
+ordering and the selected collation. Stored values are never rewritten, and existing NULL/three-valued
+logic remains in the evaluator.
+
+The expression tree represents explicit `COLLATE BINARY` and `COLLATE NOCASE`. Comparison precedence is
+explicit left, explicit right, declared left, declared right, then BINARY. NOCASE folds ASCII letters
+only. The same expression metadata drives `GROUP BY`, `DISTINCT`, aggregate `DISTINCT`, `MIN`/`MAX`,
+`ORDER BY` and distinct compound operators; UNION ALL performs no collation-sensitive deduplication.
+An explicit supported collation replaces an unsupported declaration for that expression. Otherwise a
+declared collation such as RTRIM causes the affected operation to abort with a clear reason instead of
+silently claiming BINARY parity.
 
 ### Query blocks and dependencies
 
@@ -190,13 +246,33 @@ and validation refuses to certify an incomplete result. Correlation is detected 
 explicit reason instead of using invented per-row values. This remains an educational logical model,
 not SQLite's physical plan.
 
+## Isolated DML preview (Stage 8D)
+
+`validation.ts` routes INSERT, UPDATE and DELETE to `previewDml` before the read-only SELECT path. `dmlInterpreter.ts` is the centralized conservative gate: it accepts one single-table INSERT VALUES/SELECT/DEFAULT VALUES, UPDATE SET with optional WHERE, or DELETE with optional WHERE. Unsupported conflict clauses, RETURNING, DML subqueries/functions, joins/aliases, multiple statements and other statement types are rejected before preview execution.
+
+`previewDml` reads `activeDb.exportSnapshot()` once and constructs a separate sql.js database with `SQLiteDatabase.createFromSnapshot`. Only that clone receives `executeBatch`. It has foreign keys enabled, is never registered with `databaseManager`, and is closed in `finally` on success, constraint failure, unsupported target or parity failure. No persistence or active-selection API is called. Normal Run continues through the existing writable database store.
+
+The preview captures real target rows before and after execution using stable SQLite rowids. INSERT shows input rows and actual column mappings; UPDATE uses the shared row evaluator to predict matches and assignments, then compares stored before/after values to distinguish changed and matched-but-unchanged rows; DELETE classifies matched, deleted and retained rows. INSERT defaults and generated ids are predicted for the educational intermediate stages, while the inserted/final stages and affected count come from actual SQLite execution. A complete final-table multiset comparison is mandatory: a mismatch discards the trace. Targets above 500 rows, triggers, foreign-key cascade actions, generated columns, WITHOUT ROWID tables and rowid-changing updates are rejected rather than hiding side effects or incomplete state.
+
+DML traces use the same `VisualizationTrace`, snapshots, events, graph builder, inspector, FlowCanvas, Table View and playback store as SELECT. TARGET is a real source-table connection; MATCHED_ROWS exposes an unmatched branch; FINAL_TABLE is the real isolated post-statement table. These stages explain logical mutation flow, not SQLite bytecode or physical planning.
+
+## Isolated DDL schema preview (Stage 8E)
+
+`validation.ts` routes CREATE, ALTER and DROP to `previewDdl`. `ddlInterpreter.ts` admits one main-database `CREATE TABLE` with explicit columns, one ALTER TABLE rename-table/rename-column/add-column/drop-column action, `DROP TABLE`, ordinary/UNIQUE/expression/partial `CREATE INDEX`, or `DROP INDEX`. Temporary tables, CTAS, views, triggers, schema-qualified objects, batches and unrelated DDL are rejected before cloning. `ddlStagesFor` and `analyzeDdlCapability` describe the same operation-specific stages that the trace emits.
+
+The active connection is used only for `exportSnapshot()`. `previewDdl` creates an independent database with `SQLiteDatabase.createFromSnapshot`, runs only there, and closes it in `finally` after success, SQLite errors, guard rejection or trace-building failure. It never registers the clone, changes selection, calls the active executor or persists bytes. Normal Run still uses the writable database store.
+
+`ddlSchema.ts` captures before/after states exclusively from `sqlite_master`, `PRAGMA table_xinfo`, `foreign_key_list`, `index_list`, `index_xinfo` and real `SELECT *` reads. Catalog rows include automatic constraint indexes; expression index keys stay null instead of receiving invented names. CREATE/DROP IF EXISTS variants produce explicit no-op traces. ALTER and index operations compare complete before/after row multisets (all surviving columns for column changes) and discard the trace on unexpected data changes. DROP TABLE rejects incoming foreign-key ON DELETE actions other than NO ACTION so unseen child-table mutations cannot be presented as a target-only preview.
+
+DDL snapshots carry `schema` alongside display-friendly metadata rows. The existing graph builder, node inspector, Table View, explanations and playback consume those snapshots without a separate UI stack. Validation reports zero SQL result rows and describes the real isolated introspection; tests independently execute the same statement on a second reference clone and compare the resulting schema.
+
 ## Simulator guarantees
 
 The simulator is designed to be trustworthy rather than impressive:
 
 - **Live data only.** It reads through an accessor backed by the active SQLite database. Nothing is
   hardcoded or mocked.
-- **Read-only.** Simulation never mutates database state.
+- **Read-only SELECT simulation.** The SELECT pipeline never mutates database state. DML and DDL are handled separately on the isolated copies described above.
 - **Deterministic.** The same database, query and options produce the same snapshots and events.
 - **Stable identities.** Every visualized row has an id that survives filtering, sorting and
   grouping; ids are not derived from array positions.
@@ -227,7 +303,7 @@ skipped and never reported as validated, and an incomplete outer simulation cann
 when the capped result happens to match SQLite.
 
 A mismatch is surfaced in the workspace with detail rather than hidden. The real SQLite result is
-never altered to make validation pass.
+never altered to make validation pass. DML uses a complete final-table comparison on its clone. DDL has no row result set to compare: its authority is the clone's post-execution `sqlite_master` and PRAGMA state, plus mandatory row-preservation checks for ALTER and index operations. Safety tests also compare active and IndexedDB bytes before and after every preview path.
 
 ## Playback and synchronization
 
@@ -366,8 +442,7 @@ The visualization workspace distinguishes:
 - `unsupported` — the query cannot be modeled faithfully; reasons are listed,
 - `unavailable` — no database or no query is available.
 
-DDL and DML still execute normally; they simply cannot be visualized. This separation keeps the SQL
-workspace useful even when the educational model does not apply.
+Unsupported SELECT, DML and DDL forms still execute normally through Run; Visualize reports why no faithful trace is available. Supported DML and DDL use isolated previews, so Visualize never applies their changes to the active workspace. This separation keeps the SQL workspace useful even when the educational model does not apply.
 
 ### Current compound-query limits
 

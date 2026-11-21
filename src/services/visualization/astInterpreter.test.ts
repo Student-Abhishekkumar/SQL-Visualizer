@@ -281,6 +281,45 @@ describe('interpretStatement — scalar subqueries', () => {
   })
 })
 
+describe('interpretStatement — wildcard projection representation', () => {
+  it('keeps bare * as a single unqualified star item', () => {
+    const structure = interpretStatement('SELECT * FROM employees').structure
+    expect(structure?.selectAll).toBe(true)
+    expect(structure?.selectItems).toHaveLength(1)
+    expect(structure?.selectItems[0]?.expression).toMatchObject({ kind: 'star', table: null })
+  })
+
+  it('retains the qualifier on table.* projections', () => {
+    const structure = interpretStatement('SELECT e.* FROM employees e').structure
+    expect(structure?.selectAll).toBe(false)
+    expect(structure?.selectItems[0]?.expression).toMatchObject({ kind: 'star', table: 'e' })
+  })
+
+  it('retains each qualifier and projection order in mixed wildcard lists', () => {
+    const structure = interpretStatement(
+      'SELECT e.*, d.*, e.id FROM employees e JOIN departments d ON e.department_id = d.id',
+    ).structure
+    expect(structure?.selectAll).toBe(false)
+    expect(structure?.selectItems.map((item) => item.expression)).toMatchObject([
+      { kind: 'star', table: 'e' },
+      { kind: 'star', table: 'd' },
+      { kind: 'column', table: 'e', name: 'id' },
+    ])
+  })
+
+  it('rejects a wildcard qualifier that is not in the query scope', () => {
+    const result = interpretStatement('SELECT z.* FROM employees e')
+    expect(result.structure?.selectItems).toEqual([])
+    expect(result.unsupportedReasons.join(' ')).toMatch(/Wildcard "z\.\*"/)
+  })
+
+  it('rejects the original table name once the table is aliased', () => {
+    const result = interpretStatement('SELECT employees.* FROM employees e')
+    expect(result.structure?.selectItems).toEqual([])
+    expect(result.unsupportedReasons.join(' ')).toMatch(/aliased as "e"/)
+  })
+})
+
 describe('interpretQuery — batch handling', () => {
   it('rejects multiple statements with an explanatory reason', () => {
     const result = interpretQuery('SELECT 1; SELECT 2;', ['SELECT 1', 'SELECT 2'])

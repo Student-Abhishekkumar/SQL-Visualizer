@@ -39,6 +39,58 @@ function StageDescription({ snapshot }: { snapshot: StageSnapshot }) {
       return 'Rows of both tables combined by the ON condition.'
     case 'SELECT':
       return 'Each row projected to the selected columns.'
+    case 'TARGET':
+      return 'The real target-table rows loaded into the isolated preview.'
+    case 'INPUT':
+      return 'Input values or source SELECT rows prepared for insertion.'
+    case 'COLUMN_MAPPING':
+      return 'Each input value is associated with its actual target column.'
+    case 'INSERT':
+      return 'Rows actually inserted by SQLite into the isolated copy.'
+    case 'MATCHED_ROWS':
+      return 'Matched rows continue to the mutation; unmatched rows remain untouched.'
+    case 'SET':
+      return 'Matched rows after SQLite evaluated all SET assignments against their original values.'
+    case 'CHANGED_ROWS':
+      return 'Matched rows whose stored values actually changed.'
+    case 'UNCHANGED_ROWS':
+      return 'Matched rows that already held the assigned values.'
+    case 'DELETE':
+      return 'Rows actually deleted by SQLite from the isolated copy.'
+    case 'RETAINED_ROWS':
+      return 'Rows retained after the delete.'
+    case 'FINAL_TABLE':
+      return 'The authoritative final table in the isolated copy; the active database is unchanged.'
+    case 'DATABASE':
+    case 'RESULTING_SCHEMA':
+    case 'REMAINING_SCHEMA':
+      return 'Real catalog objects read from sqlite_master in the isolated database.'
+    case 'TABLE_DEFINITION':
+    case 'REMOVED_TABLE':
+      return 'The actual table name, CREATE SQL and row count reported by SQLite.'
+    case 'COLUMN_DEFINITIONS':
+    case 'SCHEMA_TRANSFORMATION':
+      return 'Real column definitions from PRAGMA table_xinfo.'
+    case 'CONSTRAINTS':
+      return 'Index and foreign-key metadata from SQLite PRAGMA introspection.'
+    case 'CREATE_TABLE':
+      return 'The table created only in the isolated preview; the active database is unchanged.'
+    case 'ORIGINAL_SCHEMA':
+    case 'EXISTING_INDEX':
+      return 'The real object metadata captured before the schema operation.'
+    case 'ALTER_OPERATION':
+      return 'The single ALTER TABLE action applied to the isolated copy.'
+    case 'DROP_TABLE':
+      return 'The table is removed only in the isolated preview.'
+    case 'INDEX_DEFINITION':
+    case 'INDEX_METADATA':
+      return 'Real index definition, uniqueness, origin and key metadata from SQLite.'
+    case 'CREATE_INDEX':
+      return 'The index created only in the isolated preview; table rows are unchanged.'
+    case 'DROP_INDEX':
+      return 'The index is removed only in the isolated preview; table rows are unchanged.'
+    case 'REMAINING_INDEXES':
+      return 'Indexes that SQLite still reports for the owning table.'
   }
 }
 
@@ -68,7 +120,7 @@ export function TransformationPanel({ snapshot, activeStage, inspecting }: Trans
   const isGroupStage = snapshot.groups.length > 0
   const showRemoved =
     snapshot.removedRows.length > 0 &&
-    (snapshot.stage === 'WHERE' || snapshot.stage === 'HAVING' || snapshot.stage === 'DISTINCT' || snapshot.stage === 'COMPOUND' || snapshot.stage === 'LIMIT')
+    (snapshot.stage === 'WHERE' || snapshot.stage === 'HAVING' || snapshot.stage === 'DISTINCT' || snapshot.stage === 'COMPOUND' || snapshot.stage === 'LIMIT' || snapshot.stage === 'MATCHED_ROWS')
 
   return (
     <section

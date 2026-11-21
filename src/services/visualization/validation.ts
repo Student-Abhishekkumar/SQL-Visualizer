@@ -17,6 +17,7 @@
  */
 
 import type { SQLiteDatabase } from '../database/sqliteService'
+import { detectStatementType, parseSql } from '../sql/sqlParser'
 import type {
   NestedBlockValidation,
   NestedQueryTrace,
@@ -27,6 +28,13 @@ import type {
 import { interpretQuery } from './astInterpreter'
 import { rowKey, rowsEqual, rowsMatchUnordered, valuesEqual } from './rowIdentity'
 import { simulateQuery, type SimulationOptions, type SimulationOutcome, type TableData } from './simulator'
+import { previewDml } from './dmlSimulator'
+import { previewDdl } from './ddlSimulator'
+import {
+  deriveAffinity,
+  normalizeCollation,
+  type ColumnMeta,
+} from './sqliteAffinity'
 
 /** SQL NULL-safe, type-aware value equality. */
 export function simulationValuesEqual(a: unknown, b: unknown): boolean {
@@ -127,11 +135,59 @@ export function compareSimulationWithSqlite(
   }
 }
 
-/** Read a table's full contents through the live SQLite connection. */
+interface RawColumnDefinition {
+  column?: { column?: unknown } | string
+  collate?: { collate?: { name?: unknown }; name?: unknown } | null
+}
+
+/** Declared collations keyed case-insensitively by column name. */
+function declaredCollations(ast: unknown): Map<string, string> {
+  const collations = new Map<string, string>()
+  if (ast === null || typeof ast !== 'object') return collations
+  const definitions = (ast as { create_definitions?: unknown }).create_definitions
+  if (!Array.isArray(definitions)) return collations
+  for (const definition of definitions as RawColumnDefinition[]) {
+    const rawName = typeof definition.column === 'string'
+      ? definition.column
+      : definition.column?.column
+    const name = typeof rawName === 'string' ? rawName : null
+    const rawCollation = definition.collate?.collate?.name ?? definition.collate?.name
+    if (name !== null && typeof rawCollation === 'string' && rawCollation !== '') {
+      collations.set(name.toLowerCase(), rawCollation)
+    }
+  }
+  return collations
+}
+
+/** Read a table's full contents and declared comparison metadata from SQLite. */
 export function readTableFromDb(db: SQLiteDatabase, name: string): TableData | null {
   try {
-    const result = db.queryAll(`SELECT * FROM "${name.replace(/"/g, '""')}"`)
-    return { columns: [...result.columns], rows: result.values.map((row) => [...row]) }
+    const quotedName = `"${name.replace(/"/g, '""')}"`
+    const result = db.queryAll(`SELECT * FROM ${quotedName}`)
+    const tableInfo = db.queryAll(`PRAGMA table_info(${quotedName})`)
+    const createSql = db.queryOne(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '${name.replace(/'/g, "''")}'`,
+    )?.row[0]
+    const collations = declaredCollations(typeof createSql === 'string' ? parseSql(createSql) : null)
+    const infoByName = new Map(
+      tableInfo.values.map((row) => [String(row[1] ?? '').toLowerCase(), row] as const),
+    )
+    const columnMeta: Array<ColumnMeta | null> = result.columns.map((column) => {
+      const info = infoByName.get(column.toLowerCase())
+      if (info === undefined) return null
+      const affinity = deriveAffinity(String(info[2] ?? ''))
+      const declared = collations.get(column.toLowerCase())
+      if (declared === undefined) return { affinity, collation: 'BINARY' }
+      const collation = normalizeCollation(declared)
+      return collation === null
+        ? { affinity, collation: 'BINARY', unsupportedCollation: declared }
+        : { affinity, collation }
+    })
+    return {
+      columns: [...result.columns],
+      rows: result.values.map((row) => [...row]),
+      columnMeta,
+    }
   } catch {
     return null
   }
@@ -329,6 +385,19 @@ export function simulateAndValidate(
   db: SQLiteDatabase,
   options: SimulationOptions = {},
 ): SimulateAndValidateOutcome {
+  // DML never executes on the active connection. It is routed to the
+  // isolated-copy preview, which clones the database bytes and runs the
+  // statement on the clone only.
+  const statementType = detectStatementType(statements[0] ?? sql)
+  if (statementType === 'INSERT' || statementType === 'UPDATE' || statementType === 'DELETE') {
+    return previewDml(sql, statements, db, options)
+  }
+  // CREATE/ALTER/DROP use the same clone-only safety boundary. Unsupported
+  // DDL is rejected by its classifier and never reaches the active executor.
+  if (statementType === 'CREATE' || statementType === 'ALTER' || statementType === 'DROP') {
+    return previewDdl(sql, statements, db)
+  }
+
   const simulation = (() => {
     const interpretation = interpretQuery(sql, statements)
     if (interpretation.structure === null || interpretation.unsupportedReasons.length > 0) {

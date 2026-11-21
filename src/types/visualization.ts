@@ -29,6 +29,37 @@ export type VisualizedStage =
   | 'COMPOUND'
   | 'ORDER_BY'
   | 'LIMIT'
+  // Logical DML preview stages (not SQLite physical execution-plan nodes).
+  | 'TARGET'
+  | 'INPUT'
+  | 'COLUMN_MAPPING'
+  | 'INSERT'
+  | 'MATCHED_ROWS'
+  | 'SET'
+  | 'CHANGED_ROWS'
+  | 'UNCHANGED_ROWS'
+  | 'DELETE'
+  | 'RETAINED_ROWS'
+  | 'FINAL_TABLE'
+  // Logical DDL preview stages (schema metadata, not row-data results).
+  | 'DATABASE'
+  | 'TABLE_DEFINITION'
+  | 'COLUMN_DEFINITIONS'
+  | 'CONSTRAINTS'
+  | 'CREATE_TABLE'
+  | 'ORIGINAL_SCHEMA'
+  | 'ALTER_OPERATION'
+  | 'SCHEMA_TRANSFORMATION'
+  | 'RESULTING_SCHEMA'
+  | 'DROP_TABLE'
+  | 'REMOVED_TABLE'
+  | 'REMAINING_SCHEMA'
+  | 'INDEX_DEFINITION'
+  | 'CREATE_INDEX'
+  | 'INDEX_METADATA'
+  | 'EXISTING_INDEX'
+  | 'DROP_INDEX'
+  | 'REMAINING_INDEXES'
 
 export const STAGE_ORDER: readonly VisualizedStage[] = [
   'FROM',
@@ -41,6 +72,35 @@ export const STAGE_ORDER: readonly VisualizedStage[] = [
   'COMPOUND',
   'ORDER_BY',
   'LIMIT',
+  'TARGET',
+  'INPUT',
+  'COLUMN_MAPPING',
+  'INSERT',
+  'MATCHED_ROWS',
+  'SET',
+  'CHANGED_ROWS',
+  'UNCHANGED_ROWS',
+  'DELETE',
+  'RETAINED_ROWS',
+  'FINAL_TABLE',
+  'DATABASE',
+  'TABLE_DEFINITION',
+  'COLUMN_DEFINITIONS',
+  'CONSTRAINTS',
+  'CREATE_TABLE',
+  'ORIGINAL_SCHEMA',
+  'ALTER_OPERATION',
+  'SCHEMA_TRANSFORMATION',
+  'RESULTING_SCHEMA',
+  'DROP_TABLE',
+  'REMOVED_TABLE',
+  'REMAINING_SCHEMA',
+  'INDEX_DEFINITION',
+  'CREATE_INDEX',
+  'INDEX_METADATA',
+  'EXISTING_INDEX',
+  'DROP_INDEX',
+  'REMAINING_INDEXES',
 ]
 
 export type StageStatus = 'pending' | 'active' | 'completed' | 'skipped' | 'unsupported'
@@ -140,7 +200,20 @@ export interface GroupSnapshot {
 }
 
 /** How a specific row participates in the current transformation. */
-export type RowRole = 'unchanged' | 'accepted' | 'filtered' | 'duplicated' | 'selected' | 'skipped' | 'grouped'
+export type RowRole =
+  | 'unchanged'
+  | 'accepted'
+  | 'filtered'
+  | 'duplicated'
+  | 'selected'
+  | 'skipped'
+  | 'grouped'
+  // DML preview roles (isolated copy only).
+  | 'inserted'
+  | 'changed'
+  | 'deleted'
+  | 'retained'
+  | 'mapped'
 
 /** Cell-level emphasis, aligned with the snapshot's columns. */
 export interface HighlightInfo {
@@ -186,6 +259,8 @@ export interface StageSnapshot {
    * own FROM/JOIN cap; `incomplete` includes inherited dependencies.
    */
   incomplete?: boolean
+  /** Real schema metadata for DDL stages; absent for row-oriented SQL. */
+  schema?: DdlSchemaState
   /** Human-readable causes of `incomplete`, including upstream CTEs. */
   incompleteReasons?: string[]
 }
@@ -413,6 +488,88 @@ export interface NestedQueryTrace {
   dependencies?: NestedQueryDependency[]
 }
 
+export interface DmlColumnMapping {
+  /** Zero-based input value index, or null for DEFAULT VALUES. */
+  inputIndex: number | null
+  inputColumn: string | null
+  targetColumn: string
+  targetIndex: number
+}
+
+/** Real row classifications and mapping for an isolated DML preview. */
+export interface DmlTraceInfo {
+  operation: 'INSERT' | 'UPDATE' | 'DELETE'
+  targetTable: string
+  inputKind: 'VALUES' | 'SELECT' | 'DEFAULT VALUES' | 'TABLE'
+  columnMappings: DmlColumnMapping[]
+  matchedRowIds: string[]
+  changedRowIds: string[]
+  unchangedRowIds: string[]
+  insertedRowIds: string[]
+  deletedRowIds: string[]
+  /** Authoritative SQLite RETURNING count (matched rows for UPDATE). */
+  affectedRowCount: number
+  finalRowCount: number
+}
+
+export interface DdlColumnState {
+  name: string
+  declaredType: string
+  affinity: 'INTEGER' | 'TEXT' | 'REAL' | 'NUMERIC' | 'BLOB'
+  notNull: boolean
+  primaryKeyPosition: number
+  defaultSql: string | null
+  unique: boolean
+  foreignKeys: Array<{ targetTable: string; targetColumn: string | null; onUpdate: string; onDelete: string }>
+}
+
+export interface DdlIndexState {
+  name: string
+  tableName: string
+  unique: boolean
+  origin: 'created' | 'unique' | 'primary-key'
+  /** Key columns in index order; null marks a real expression key. */
+  columns: (string | null)[]
+  sql: string | null
+}
+
+export interface DdlTableState {
+  name: string
+  sql: string | null
+  columns: DdlColumnState[]
+  indexes: DdlIndexState[]
+  rowCount: number
+  /** Actual rows used only to prove data-preserving DDL did not change data. */
+  rows: unknown[][]
+}
+
+export interface DdlCatalogObject {
+  type: 'table' | 'index' | 'view' | 'trigger'
+  name: string
+  tableName: string
+  sql: string | null
+}
+
+export interface DdlSchemaState {
+  catalog: DdlCatalogObject[]
+  table: DdlTableState | null
+  index: DdlIndexState | null
+}
+
+export type DdlOperation =
+  | 'CREATE_TABLE' | 'ALTER_TABLE' | 'DROP_TABLE' | 'CREATE_INDEX' | 'DROP_INDEX'
+
+export interface DdlTraceInfo {
+  operation: DdlOperation
+  objectType: 'TABLE' | 'INDEX'
+  objectName: string
+  targetTable: string | null
+  noOp: boolean
+  rowDataChanged: boolean
+  before: DdlSchemaState
+  after: DdlSchemaState
+}
+
 export interface VisualizationTrace {
   query: string
   /** Statement type of the visualized statement. */
@@ -430,6 +587,10 @@ export interface VisualizationTrace {
   nestedQueries?: NestedQueryTrace[]
   /** Compound-query branch metadata (only for set-operation traces). */
   compound?: CompoundTraceInfo
+  /** Isolated INSERT/UPDATE/DELETE preview metadata. */
+  dml?: DmlTraceInfo
+  /** Isolated DDL schema preview metadata; never a row-data result. */
+  ddl?: DdlTraceInfo
   totalSteps: number
   /** Final projected rows of the logical simulation (post LIMIT). */
   finalRows: VisualizedRow[]

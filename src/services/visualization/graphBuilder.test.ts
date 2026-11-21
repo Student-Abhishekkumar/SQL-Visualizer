@@ -116,13 +116,16 @@ describe('buildFlowGraph — basic pipeline', () => {
     expect(source?.detail).toContain('alias e')
   })
 
-  it('creates one operation and one data node per non-FROM stage, plus a final node', () => {
+  it('creates one operation per non-FROM stage and one data node per non-terminal stage', () => {
     const graph = buildFlowGraph(makeTrace())
     const ops = graph.nodes.filter((node) => node.kind === 'operation').map((node) => node.stage)
     const data = graph.nodes.filter((node) => node.kind === 'data').map((node) => node.stage)
     expect(ops).toEqual(['WHERE', 'SELECT'])
-    expect(data).toEqual(['WHERE', 'SELECT'])
-    expect(graph.nodes.some((node) => node.kind === 'final')).toBe(true)
+    // The terminal stage's rows are the result itself, so it feeds the final
+    // node instead of creating a second, identical data node.
+    expect(data).toEqual(['WHERE'])
+    expect(graph.nodes.filter((node) => node.kind === 'final')).toHaveLength(1)
+    expect(graph.nodes.some((node) => node.id === 'data-SELECT')).toBe(false)
   })
 
   it('chains edges along the real data dependency', () => {
@@ -136,7 +139,7 @@ describe('buildFlowGraph — basic pipeline', () => {
     expect(sourceToWhere?.from).toMatch(/^src-/)
     expect(sourceToWhere?.stage).toBe('WHERE')
     const selectToFinal = graph.edges.find((edge) => edge.to === 'final')
-    expect(selectToFinal?.from).toBe('data-SELECT')
+    expect(selectToFinal?.from).toBe('op-SELECT')
   })
 
   it('WHERE creates a rejected branch with the real removed count', () => {
@@ -329,13 +332,17 @@ describe('buildFlowGraph — layout quality', () => {
     expect(where.hint).toContain('condition')
   })
 
-  it('data nodes carry honest stage-specific labels and counts', () => {
+  it('data and final nodes carry honest stage-specific labels and counts', () => {
     const graph = buildFlowGraph(makeTrace())
     const dataWhere = graph.nodes.find((node) => node.id === 'data-WHERE')!
     expect(dataWhere.label).toBe('Filtered rows · 4')
     expect(dataWhere.detail).toBe('8 in → 4 out')
-    const dataSelect = graph.nodes.find((node) => node.id === 'data-SELECT')!
-    expect(dataSelect.label).toBe('Projected rows · 4')
+    // The terminal SELECT is represented by the final node, which carries the
+    // real result rows rather than a duplicate projected-rows node.
+    const final = graph.nodes.find((node) => node.kind === 'final')!
+    expect(final.label).toBe('Final result')
+    expect(final.detail).toBe('1 row')
+    expect(final.rows).toEqual([{ id: 'r1', values: ['A'] }])
   })
 
   it('gives every edge a label point on the routed curve', () => {

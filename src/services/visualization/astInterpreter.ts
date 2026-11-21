@@ -20,6 +20,7 @@ import {
   splitCompoundQuery,
   type CompoundSplitOutcome,
 } from './compoundSplitter'
+import { normalizeCollation } from './sqliteAffinity'
 
 export type { SetOperator }
 
@@ -89,6 +90,12 @@ export interface ArithmeticExpr {
 export interface LiteralExpr {
   kind: 'literal'
   value: unknown
+  /**
+   * SQLite storage class of a numeric literal (`10` is integer, `10.0`
+   * and `1e2` are real). Needed so TEXT affinity formats the value the
+   * way SQLite does (`'10'` vs `'10.0'`).
+   */
+  numberKind?: 'integer' | 'real'
   text: string
 }
 
@@ -103,6 +110,18 @@ export interface ColumnExpr {
 export interface StarExpr {
   kind: 'star'
   table: string | null
+  text: string
+}
+
+/**
+ * `expr COLLATE BINARY|NOCASE`. Only the two collations SQLite's core
+ * provides with deterministic ASCII semantics are representable; any
+ * other name is rejected during interpretation rather than ignored.
+ */
+export interface CollateExpr {
+  kind: 'collate'
+  collation: 'BINARY' | 'NOCASE'
+  operand: Expression
   text: string
 }
 
@@ -169,6 +188,7 @@ export type Expression =
   | LiteralExpr
   | ColumnExpr
   | StarExpr
+  | CollateExpr
   | ListExpr
   | AggregateExpr
   | SubqueryExpr
@@ -416,6 +436,9 @@ function collectQualifiedTables(expr: Expression | null, tables: Set<string>): v
     case 'unary_minus':
       collectQualifiedTables(expr.operand, tables)
       break
+    case 'collate':
+      collectQualifiedTables(expr.operand, tables)
+      break
     case 'aggregate':
       collectQualifiedTables(expr.call.argument, tables)
       break
@@ -494,12 +517,65 @@ export function structureText(structure: QueryStructure): string {
   return text
 }
 
+/** Collation name attached to a raw node (`x COLLATE NOCASE`), or null. */
+function rawCollationOf(raw: Raw): string | null {
+  const direct = raw?.collate?.collate?.name ?? raw?.collate?.name
+  if (typeof direct === 'string' && direct.length > 0) return direct
+  const suffixed =
+    raw?.suffix?.collate?.collate?.name ?? raw?.suffix?.collate?.name
+  if (typeof suffixed === 'string' && suffixed.length > 0) return suffixed
+  return null
+}
+
+/** Copy of a raw node with its COLLATE annotation removed. */
+function withoutCollation(raw: Raw): Raw {
+  const copy: Raw = { ...raw }
+  if (copy.collate != null) copy.collate = null
+  if (copy.suffix != null && copy.suffix.collate != null) {
+    const suffix: Raw = { ...copy.suffix }
+    delete suffix.collate
+    copy.suffix = suffix
+  }
+  return copy
+}
+
+/** Parse a numeric literal's raw text into a value plus storage class. */
+function numericLiteral(rawValue: unknown): { value: number; numberKind: 'integer' | 'real' } {
+  const text = String(rawValue)
+  return {
+    value: Number(text),
+    numberKind: /[.eE]/.test(text) ? 'real' : 'integer',
+  }
+}
+
 /** Convert a raw parser expression into our typed expression tree. */
 export function interpretExpression(
   raw: Raw,
   context: InterpretContext = createInterpretContext(),
 ): Expression | null {
   if (raw == null) return null
+
+  // COLLATE attaches to the node it follows (column_ref.collate for
+  // identifiers, node.suffix.collate for other expressions). Validate the
+  // name now so an unsupported collation is rejected before simulation.
+  const collationName = rawCollationOf(raw)
+  if (collationName !== null) {
+    const collation = normalizeCollation(collationName)
+    if (collation === null) {
+      context.reasons.push(
+        `Collation "${collationName}" is not visualizable yet; only BINARY and NOCASE are supported.`,
+      )
+      return null
+    }
+    const operand = interpretExpression(withoutCollation(raw), context)
+    if (operand === null) return null
+    return {
+      kind: 'collate',
+      collation,
+      operand,
+      text: `${operand.text} COLLATE ${collation}`,
+    }
+  }
 
   // A nested SELECT used as an expression (scalar subquery).
   const subqueryAst = subqueryAstOf(raw)
@@ -542,8 +618,14 @@ export function interpretExpression(
       const table = typeof raw.table === 'string' && raw.table.length > 0 ? raw.table : null
       return { kind: 'star', table, text: table ? `${table}.*` : '*' }
     }
-    case 'number':
-      return { kind: 'literal', value: raw.value, text: String(raw.value) }
+    case 'number': {
+      const { value, numberKind } = numericLiteral(raw.value)
+      return { kind: 'literal', value, numberKind, text: String(raw.value) }
+    }
+    case 'bigint': {
+      const { value, numberKind } = numericLiteral(raw.value)
+      return { kind: 'literal', value, numberKind, text: String(raw.value) }
+    }
     case 'single_quote_string':
       return { kind: 'literal', value: raw.value, text: `'${raw.value}'` }
     case 'double_quote_string':
@@ -692,6 +774,8 @@ function isAggregateExpression(expr: Expression): boolean {
       return isAggregateExpression(expr.left) || isAggregateExpression(expr.right)
     case 'not':
     case 'unary_minus':
+      return isAggregateExpression(expr.operand)
+    case 'collate':
       return isAggregateExpression(expr.operand)
     case 'in_subquery':
       return isAggregateExpression(expr.left)
@@ -1059,13 +1143,53 @@ function interpretSelectAst(
   const columnList: Raw[] = Array.isArray(ast.columns) ? ast.columns : []
   const isStarExpr = (expr: Raw): boolean =>
     expr?.type === 'star' || (expr?.type === 'column_ref' && columnNameOf(expr.column) === '*')
-  if (columnList.length === 1 && isStarExpr(columnList[0]?.expr) && columnList[0]?.as == null) {
+  /** Table qualifier for `table.*`, or null for a bare `*`. */
+  const starQualifierOf = (expr: Raw): string | null => {
+    if (expr?.type === 'star') {
+      return typeof expr.table === 'string' && expr.table.length > 0 ? expr.table : null
+    }
+    if (expr?.type === 'column_ref' && columnNameOf(expr.column) === '*') {
+      return typeof expr.table === 'string' && expr.table.length > 0 ? expr.table : null
+    }
+    return null
+  }
+  if (
+    columnList.length === 1 &&
+    isStarExpr(columnList[0]?.expr) &&
+    columnList[0]?.as == null &&
+    starQualifierOf(columnList[0]?.expr) === null
+  ) {
     selectAll = true
   }
+
+  // SQLite hides a table's original name once it has an alias: only the
+  // alias can qualify its columns. Track the effective name per source.
+  const sourceQualifiers = new Map<string, { name: string; alias: string | null }>()
+  const addSourceQualifier = (name: string, alias: string | null): void => {
+    sourceQualifiers.set((alias ?? name).toLowerCase(), { name, alias })
+  }
+  addSourceQualifier(from.name, from.alias)
+  for (const join of joins) addSourceQualifier(join.table.name, join.table.alias)
+
   for (const item of columnList) {
     const expr = interpretExpression(item.expr, clause('SELECT'))
     if (expr === null) {
       unsupportedReasons.push(`SELECT expression "${textOfRaw(item.expr)}" is not visualizable yet.`)
+      continue
+    }
+    if (
+      expr.kind === 'star' &&
+      expr.table !== null &&
+      !sourceQualifiers.has(expr.table.toLowerCase())
+    ) {
+      const shadowed = [from, ...joins.map((join) => join.table)].find(
+        (table) => table.alias !== null && table.name.toLowerCase() === expr.table?.toLowerCase(),
+      )
+      unsupportedReasons.push(
+        shadowed !== null && shadowed !== undefined
+          ? `Wildcard "${expr.table}.*" cannot use table name "${shadowed.name}" because it is aliased as "${shadowed.alias}". Use "${shadowed.alias}.*".`
+          : `Wildcard "${expr.table}.*" does not match a table or alias in this query block.`,
+      )
       continue
     }
     selectItems.push({
@@ -1121,6 +1245,9 @@ function interpretSelectAst(
         break
       case 'not':
       case 'unary_minus':
+        collectAggregates(expr.operand)
+        break
+      case 'collate':
         collectAggregates(expr.operand)
         break
       case 'in_subquery':

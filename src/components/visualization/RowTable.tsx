@@ -15,6 +15,12 @@ const ROLE_STYLES: Record<RowRole, string> = {
   selected: 'bg-accent-soft',
   skipped: 'opacity-40',
   grouped: 'bg-purple/10',
+  // DML preview roles.
+  inserted: 'bg-success/10',
+  changed: 'bg-warning/10',
+  deleted: 'opacity-40 line-through',
+  retained: '',
+  mapped: 'bg-accent-soft',
 }
 
 /** Small text renderer that keeps NULL visually distinct. */
