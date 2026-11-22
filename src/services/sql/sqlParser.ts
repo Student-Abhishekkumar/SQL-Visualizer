@@ -1,4 +1,6 @@
-import { Parser, type Parser as SqlParser } from 'node-sql-parser'
+// SQLite-only build: same parser and AST for SQLite, without the other
+// dialect grammars. The package's root entry bundles every dialect.
+import { Parser, type Parser as SqlParser } from 'node-sql-parser/build/sqlite'
 import type { StatementType } from '../../types/query'
 
 /**

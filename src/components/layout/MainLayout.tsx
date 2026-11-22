@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { Database, Plus } from 'lucide-react'
 import { Navbar } from './Navbar'
 import { Sidebar } from './Sidebar'
@@ -6,7 +6,6 @@ import { WorkspaceViewToggle } from './WorkspaceViewToggle'
 import { SQLEditor } from '../editor/SQLEditor'
 import { EditorToolbar } from '../editor/EditorToolbar'
 import { ResultsPanel } from '../results/ResultsPanel'
-import { VisualizationWorkspace } from '../visualization/VisualizationWorkspace'
 import { useEditorStore } from '../../store/editorStore'
 import { useDatabaseStore } from '../../store/databaseStore'
 import { useUIStore } from '../../store/uiStore'
@@ -17,6 +16,18 @@ import { splitStatements } from '../../utils/queryHelpers'
 
 const MIN_SPLIT = 20
 const MAX_SPLIT = 80
+
+/**
+ * The Canvas workspace is a secondary feature and brings the animation
+ * and flow-rendering code with it. It is loaded the first time Canvas is
+ * opened, then kept mounted so pan/zoom, selection and playback survive
+ * later switches.
+ */
+const VisualizationWorkspace = lazy(() =>
+  import('../visualization/VisualizationWorkspace').then((module) => ({
+    default: module.VisualizationWorkspace,
+  })),
+)
 
 /**
  * Main workspace shell.
@@ -47,6 +58,7 @@ export function MainLayout() {
   const { execute } = useSQLExecution()
 
   const [editorRatio, setEditorRatio] = useState(52)
+  const [canvasMounted, setCanvasMounted] = useState(false)
   const mainRef = useRef<HTMLDivElement>(null)
   const draggingRef = useRef(false)
 
@@ -103,6 +115,11 @@ export function MainLayout() {
 
   const queryVisible = workspaceView === 'query'
   const canvasVisible = workspaceView === 'canvas'
+
+  // Mount the Canvas workspace on first visit and leave it mounted. This is
+  // a render-phase adjustment (not an effect) so the lazy chunk starts on
+  // the same render that reveals Canvas.
+  if (canvasVisible && !canvasMounted) setCanvasMounted(true)
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-bg text-text-primary">
@@ -179,17 +196,27 @@ export function MainLayout() {
                 canvasVisible ? 'opacity-100' : 'pointer-events-none invisible opacity-0'
               }`}
             >
-              <VisualizationWorkspace
-                queryName={
-                  content.trim() === ''
-                    ? '(empty query)'
-                    : (content.trim().split('\n')[0] ?? '')
-                }
-                activeDatabaseName={activeDatabase?.name ?? null}
-                currentQuery={content}
-                onRevisualize={handleVisualize}
-                onClose={() => setWorkspaceView('query')}
-              />
+              {canvasMounted && (
+                <Suspense
+                  fallback={
+                    <div className="flex h-full items-center justify-center text-sm text-text-muted">
+                      Loading visualization…
+                    </div>
+                  }
+                >
+                  <VisualizationWorkspace
+                    queryName={
+                      content.trim() === ''
+                        ? '(empty query)'
+                        : (content.trim().split('\n')[0] ?? '')
+                    }
+                    activeDatabaseName={activeDatabase?.name ?? null}
+                    currentQuery={content}
+                    onRevisualize={handleVisualize}
+                    onClose={() => setWorkspaceView('query')}
+                  />
+                </Suspense>
+              )}
             </div>
           </div>
         </div>
