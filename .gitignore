@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# Local environment files (this app requires no environment variables)
+.env
+.env.*
+!.env.example
+
 # Browser QA artefacts (screenshots, JSON reports)
 artifacts
 

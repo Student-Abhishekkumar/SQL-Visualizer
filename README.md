@@ -414,6 +414,88 @@ npm run dev
 
 Open <http://localhost:5173>. The University example database is created on first launch.
 
+## Deployment (Vercel)
+
+SQL Visualizer is a static Vite application. It needs no backend, no server-side database and no
+environment variables, so it deploys to Vercel as static files.
+
+### Deployment steps
+
+1. Push the project to GitHub.
+2. Import the repository into Vercel.
+3. Select **Vite** as the framework preset.
+4. Set the build command to `npm run build`.
+5. Set the output directory to `dist`.
+6. Deploy.
+
+The repository ships `vercel.json` (framework, build command, output directory, security headers and
+cache rules), `.nvmrc` and a `package.json` `engines.node` constraint that pin Node 22, as Vite 8
+requires `^20.19.0 || >=22.12.0`.
+
+### Environment variables
+
+**None are required.** There are no API keys, secrets or service URLs to configure.
+
+### Backend
+
+No backend or database server is needed. SQLite runs locally in the browser through SQL.js
+(WebAssembly); every query, DML/DDL preview and validation executes in the tab. Monaco Editor and its
+worker are bundled with the app — no CDN is used at runtime.
+
+### Security configuration
+
+`vercel.json` applies these response headers to every deployment:
+
+| Header | Value |
+|:---|:---|
+| `X-Content-Type-Options` | `nosniff` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `X-Frame-Options` | `DENY` |
+| `Permissions-Policy` | camera, microphone, geolocation, payment and USB disabled; fullscreen limited to self |
+| `Strict-Transport-Security` | `max-age=63072000` (two years; no `includeSubDomains` or `preload`) |
+| `Content-Security-Policy` | enforced, see below |
+
+**Content Security Policy (enforced):**
+
+```text
+default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline';
+img-src 'self' data:; font-src 'self'; connect-src 'self'; worker-src 'self';
+object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+```
+
+- `script-src 'self'` allows only the application's own bundled scripts; no external or inline scripts.
+- `'wasm-unsafe-eval'` is required for SQLite's WebAssembly compilation and is limited to WASM — no
+  `unsafe-eval` and no arbitrary code evaluation.
+- `style-src 'unsafe-inline'` is required by Monaco's runtime style injection and the app's inline
+  style attributes; no external stylesheets are allowed.
+- `worker-src 'self'` covers the bundled Monaco editor worker.
+- `connect-src 'self'` and `font-src 'self'` keep all runtime requests same-origin (no CDN, telemetry
+  or third-party API calls).
+- `frame-ancestors 'none'` plus `X-Frame-Options: DENY` block embedding.
+
+The policy is enforced, not report-only. It was verified against the production build served with
+these exact headers: SQLite initialized, the default query ran, the Canvas rendered, Monaco loaded,
+the editor worker and `sql-wasm` were fetched, and **no CSP violations, console errors or failed
+requests** occurred. Response headers themselves are only confirmed on a real deployment once a
+Vercel preview is created.
+
+### Caching
+
+- `/assets/*` — `Cache-Control: public, max-age=31536000, immutable` (content-hashed filenames).
+- `/index.html` and `/` — `Cache-Control: public, max-age=0, must-revalidate`, so new deployments are
+  picked up immediately.
+
+### Browser storage
+
+Database snapshots, saved queries and query history live in IndexedDB:
+
+- Browser storage belongs to the current **origin**. A Vercel preview URL and the production domain
+  keep separate databases, history and saved queries.
+- Clearing site data (or browsing privately) can remove saved databases and history.
+- The app can export a database as `.sqlite` or as a SQL script. **Export or back up important
+  databases before clearing browser data or changing origins.**
+- Browser storage is not permanent: the browser may evict it under storage pressure.
+
 ## Development commands
 
 | Command | What it does |
