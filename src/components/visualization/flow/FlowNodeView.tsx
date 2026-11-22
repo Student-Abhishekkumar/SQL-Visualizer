@@ -109,18 +109,36 @@ function MiniPreview({
   rows,
   roles,
   limit,
+  emptyLabel = 'no rows',
 }: {
   columns: string[]
   rows: { id: string; values: unknown[] }[]
   roles?: Record<string, RowRole>
   limit: number
+  /** What an empty preview means at this node, e.g. "no rows returned". */
+  emptyLabel?: string
 }) {
   const preview = rows.slice(0, limit)
+  const columnLabel = `${columns.length} column${columns.length === 1 ? '' : 's'}`
+  const rowLabel = `${rows.length} row${rows.length === 1 ? '' : 's'}`
+  const hiddenRows = rows.length - preview.length
+  const summary =
+    rows.length === 0
+      ? `${emptyLabel}${columns.length > 0 ? ` · ${columnLabel}` : ''}`
+      : `${rowLabel}${columns.length > 0 ? ` · ${columnLabel}` : ''}${
+          hiddenRows > 0 ? ` · showing ${preview.length}` : ''
+        }`
   if (preview.length === 0) {
-    return <div className="flow-empty">no rows</div>
+    return (
+      <div className="flow-empty" title={summary}>
+        {emptyLabel}
+      </div>
+    )
   }
   return (
-    <div className="flow-preview">
+    // The full column list stays reachable even when the preview only fits
+    // the first four columns, and long values are readable on hover.
+    <div className="flow-preview" title={`${summary}${columns.length > 0 ? ` · ${columns.join(', ')}` : ''}`}>
       <table className="w-full table-fixed border-collapse text-left">
         <thead>
           <tr>
@@ -137,7 +155,11 @@ function MiniPreview({
             return (
               <tr key={row.id}>
                 {row.values.slice(0, 4).map((value, index) => (
-                  <td key={index} className={`max-w-0 truncate ${ROLE_CELL_CLASSES[role]}`}>
+                  <td
+                    key={index}
+                    className={`max-w-0 truncate ${ROLE_CELL_CLASSES[role]}`}
+                    title={value === null || value === undefined ? 'NULL' : String(value)}
+                  >
                     <Value value={value} />
                   </td>
                 ))}
@@ -150,8 +172,12 @@ function MiniPreview({
   )
 }
 
-function CountBadge({ children }: { children: React.ReactNode }) {
-  return <span className="flow-count-badge">{children}</span>
+function CountBadge({ children, title }: { children: React.ReactNode; title?: string }) {
+  return (
+    <span className="flow-count-badge" title={title} aria-label={title}>
+      {children}
+    </span>
+  )
 }
 
 function StatusOrb({ status }: { status: FlowElementStatus }) {
@@ -460,7 +486,7 @@ export const FlowNodeView = memo(function FlowNodeView({
           </NodeHeader>
           <div className="flow-node-body">
             <div className="flow-meta-row">
-              <CountBadge>
+              <CountBadge title={`${table.rowCount} row${table.rowCount === 1 ? '' : 's'}`}>
                 {table.rowCount} row{table.rowCount === 1 ? '' : 's'}
               </CountBadge>
               <span className="flow-meta-text truncate">
@@ -480,7 +506,7 @@ export const FlowNodeView = memo(function FlowNodeView({
               {extraColumns > 0 && <span className="flow-column-chip">+{extraColumns}</span>}
               {table.columns.length === 0 && <span className="flow-column-chip">no columns</span>}
             </div>
-            <MiniPreview columns={table.columns} rows={table.previewRows} limit={limit} />
+            <MiniPreview columns={table.columns} rows={table.previewRows} limit={limit} emptyLabel="no rows" />
           </div>
         </div>
       </NodeFrame>
@@ -558,7 +584,9 @@ export const FlowNodeView = memo(function FlowNodeView({
             status={status}
             unsupported={node.unsupported}
           >
-            <CountBadge>{snapshot.outputRowCount}</CountBadge>
+            <CountBadge title={`${snapshot.outputRowCount} row${snapshot.outputRowCount === 1 ? '' : 's'} after this stage`}>
+              {snapshot.outputRowCount}
+            </CountBadge>
             {expandable && <ExpandButton expanded={expanded} onClick={toggle} />}
           </NodeHeader>
           <div className="flow-node-body">
@@ -566,12 +594,23 @@ export const FlowNodeView = memo(function FlowNodeView({
               <span className="flow-meta-text tabular-nums">
                 {snapshot.inputRowCount} in → {snapshot.outputRowCount} out
               </span>
+              {snapshot.columns.length > 4 && (
+                <span
+                  className="flow-meta-text"
+                  title={`${snapshot.columns.length - 4} more column${
+                    snapshot.columns.length - 4 === 1 ? '' : 's'
+                  }: ${snapshot.columns.slice(4).join(', ')}`}
+                >
+                  +{snapshot.columns.length - 4} cols
+                </span>
+              )}
             </div>
             <MiniPreview
               columns={snapshot.columns}
               rows={snapshot.rows}
               roles={snapshot.roles}
               limit={limit}
+              emptyLabel="0 rows after this stage"
             />
           </div>
         </div>
@@ -606,7 +645,9 @@ export const FlowNodeView = memo(function FlowNodeView({
             status={status}
             unsupported={node.unsupported}
           >
-            <CountBadge>{node.removedRows?.length ?? 0}</CountBadge>
+            <CountBadge title={`${node.removedRows?.length ?? 0} removed row${(node.removedRows?.length ?? 0) === 1 ? '' : 's'}`}>
+              {node.removedRows?.length ?? 0}
+            </CountBadge>
             {expandable && <ExpandButton expanded={expanded} onClick={toggle} />}
           </NodeHeader>
           <div className="flow-node-body">
@@ -619,6 +660,7 @@ export const FlowNodeView = memo(function FlowNodeView({
                 rows={node.removedRows}
                 roles={snapshot.roles}
                 limit={limit}
+                emptyLabel="no removed rows"
               />
             )}
           </div>
@@ -652,10 +694,18 @@ export const FlowNodeView = memo(function FlowNodeView({
             status={status}
             unsupported={node.unsupported}
           >
-            {node.group !== undefined && <CountBadge>{node.group.rowIds.length}</CountBadge>}
+            {node.group !== undefined && (
+              <CountBadge
+                title={`${node.group.rowIds.length} row${node.group.rowIds.length === 1 ? '' : 's'} in this group`}
+              >
+                {node.group.rowIds.length}
+              </CountBadge>
+            )}
           </NodeHeader>
           <div className="flow-node-body flow-group-body">
-            <span className="flow-hint truncate">{node.detail}</span>
+            <span className="flow-hint truncate" title={node.detail}>
+              {node.detail}
+            </span>
             {aggregates.length > 0 && (
               <span className="flow-group-aggregate truncate" title={aggregates.map(([name, value]) => `${name}=${value === null ? 'NULL' : String(value)}`).join(' ')}>
                 {aggregates
@@ -697,21 +747,44 @@ export const FlowNodeView = memo(function FlowNodeView({
           badge={node.label === 'Final result' ? 'OUTPUT' : 'PREVIEW'}
           status={status}
         >
-          {finished && <CountBadge>{rows.length}</CountBadge>}
+          {finished && (
+            <CountBadge title={`${rows.length} row${rows.length === 1 ? '' : 's'} returned`}>
+              {rows.length}
+            </CountBadge>
+          )}
           {expandable && <ExpandButton expanded={expanded} onClick={toggle} />}
         </NodeHeader>
         <div className="flow-node-body">
           <div className="flow-meta-row">
-            <span className="flow-meta-text truncate">
+            <span
+              className="flow-meta-text truncate"
+              title={
+                finished
+                  ? (node.detail ?? `${rows.length} row${rows.length === 1 ? '' : 's'} returned by the query`)
+                  : 'waiting for playback'
+              }
+            >
               {finished
                 ? (node.detail ?? `${rows.length} row${rows.length === 1 ? '' : 's'} returned by the query`)
                 : 'waiting for playback'}
             </span>
+            {finished && columns.length > 4 && (
+              <span
+                className="flow-meta-text"
+                title={`${columns.length - 4} more column${
+                  columns.length - 4 === 1 ? '' : 's'
+                }: ${columns.slice(4).join(', ')}`}
+              >
+                +{columns.length - 4} cols
+              </span>
+            )}
           </div>
           {finished ? (
-            <MiniPreview columns={columns} rows={rows} limit={limit} />
+            <MiniPreview columns={columns} rows={rows} limit={limit} emptyLabel="no rows returned" />
           ) : (
-            <div className="flow-empty">not produced yet</div>
+            <div className="flow-empty" title="This node fills in as playback produces the result.">
+              not produced yet
+            </div>
           )}
         </div>
       </div>

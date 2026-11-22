@@ -16,6 +16,9 @@ import {
 } from '../../../services/visualization/flowGeometry'
 import {
   fitFlowLayout,
+  fitFlowLayoutWidth,
+  FLOW_FIT_CLEARANCE,
+  initialFlowLayout,
   measureFlowLayout,
   resolveFlowLayout,
 } from '../../../services/visualization/flowLayout'
@@ -230,6 +233,13 @@ export function FlowCanvas({
   // zoom synchronously keeps repeated wheel ticks exact instead of
   // depending on React's batching.
   const zoomRef = useRef(1)
+  /**
+   * Which camera the canvas is following. `initial`, `fit` and `top` are
+   * automatic and may be re-applied when the viewport resizes; `manual`
+   * means the user (or playback following) moved the view, so a resize
+   * must not take it over.
+   */
+  const cameraIntentRef = useRef<'initial' | 'fit' | 'top' | 'manual'>('initial')
   // Stable wrapper so memoized nodes do not re-render when the workspace
   // recreates its selection handler.
   const selectRef = useRef(onSelectNode)
@@ -304,54 +314,77 @@ export function FlowCanvas({
     [graph.bounds, nodeBoxes],
   )
 
-  /** Position the camera: full fit, or width-fit anchored at the top. */
+  /**
+   * Position the camera.
+   *
+   * `fit`      — fit and centre every node (including side-column cards).
+   * `top`      — fit the full node width and anchor the graph at the top.
+   * `initial`  — show the whole graph when it fits at a readable zoom,
+   *              otherwise fall back to the top-anchored width fit.
+   */
   const applyCamera = useCallback(
-    (mode: 'fit' | 'top') => {
+    (mode: 'initial' | 'fit' | 'top') => {
       const container = containerRef.current
       if (container === null) return
       const { clientWidth, clientHeight } = container
       if (clientWidth === 0 || clientHeight === 0) return
-      const padding = 30
-      if (mode === 'fit') {
-        const camera = fitFlowLayout(nodeBoxes, {
-          width: clientWidth,
-          height: clientHeight,
-          padding,
-          minZoom: MIN_ZOOM,
-          maxZoom: MAX_ZOOM,
-        })
-        if (camera === null) return
-        zoomRef.current = camera.zoom
-        setZoom(camera.zoom)
-        setPan({ x: camera.panX, y: camera.panY })
-        return
+      const viewport = {
+        width: clientWidth,
+        height: clientHeight,
+        padding: 30,
+        minZoom: MIN_ZOOM,
+        maxZoom: MAX_ZOOM,
+        clearance: FLOW_FIT_CLEARANCE,
       }
-      const widthScale = (clientWidth - padding * 2) / Math.max(canvasBounds.flowWidth, 1)
-      const nextZoom = clampZoom(Math.min(widthScale, 1))
-      const contentWidth = canvasBounds.flowWidth
-      zoomRef.current = nextZoom
-      setZoom(nextZoom)
-      setPan({
-        x: Math.max((clientWidth - contentWidth * nextZoom) / 2, 8),
-        y: 12,
-      })
+      const camera =
+        mode === 'fit'
+          ? fitFlowLayout(nodeBoxes, viewport)
+          : mode === 'top'
+            ? fitFlowLayoutWidth(nodeBoxes, viewport)
+            : initialFlowLayout(nodeBoxes, viewport)
+      if (camera === null) return
+      cameraIntentRef.current = mode
+      zoomRef.current = camera.zoom
+      setZoom(camera.zoom)
+      setPan({ x: camera.panX, y: camera.panY })
     },
-    [canvasBounds, clampZoom, nodeBoxes],
+    [nodeBoxes],
   )
 
   const fitToScreen = useCallback(() => applyCamera('fit'), [applyCamera])
 
-  // Fit the graph the first time it is measurable (width-fit so labels
-  // stay readable). Keyed to the graph instance, not the live bounds, so
-  // dragging or settling a node never yanks the camera.
+  // Keep the latest camera function reachable from the resize observer
+  // without re-subscribing on every graph or expansion change.
+  const applyCameraRef = useRef(applyCamera)
+  useEffect(() => {
+    applyCameraRef.current = applyCamera
+  }, [applyCamera])
+
+  // Fit the graph the first time it is measurable. Keyed to the graph
+  // instance, not the live bounds, so dragging, settling, expanding a
+  // preview or playback never yanks the camera.
   const fittedGraphRef = useRef<FlowGraph | null>(null)
   useEffect(() => {
     if (fittedGraphRef.current === graph) return
     const container = containerRef.current
     if (container === null || container.clientWidth === 0) return
     fittedGraphRef.current = graph
-    applyCamera('top')
+    applyCamera('initial')
   })
+
+  // A viewport resize keeps automatic cameras accurate without stealing
+  // navigation the user (or playback following) performed.
+  useEffect(() => {
+    const container = containerRef.current
+    if (container === null || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => {
+      const intent = cameraIntentRef.current
+      if (intent === 'manual') return
+      applyCameraRef.current(intent)
+    })
+    observer.observe(container)
+    return () => observer.disconnect()
+  }, [])
 
   // Keep the running stage in view during playback. The camera only moves
   // when the active node is outside the visible band, so manual panning
@@ -379,6 +412,9 @@ export function FlowCanvas({
       const top = current.y + placement.y * zoom
       const bottom = current.y + (placement.y + placement.height) * zoom
       if (top >= margin && bottom <= height - margin) return current
+      // Following the tour counts as intentional camera movement: a resize
+      // must not snap the viewport away from the running stage.
+      cameraIntentRef.current = 'manual'
       if (top < margin) return { ...current, y: margin - placement.y * zoom }
       return { ...current, y: height - margin - (placement.y + placement.height) * zoom }
     })
@@ -408,6 +444,7 @@ export function FlowCanvas({
     setPan((current) => {
       const bottom = current.y + (placement.y + placement.height) * zoom
       if (bottom <= height - 20) return current
+      cameraIntentRef.current = 'manual'
       return { ...current, y: height - 20 - (placement.y + placement.height) * zoom }
     })
   }, [draggingNodeId, finalCompleted, graph.nodes, graph.bounds, placements, zoom])
@@ -437,6 +474,7 @@ export function FlowCanvas({
       const top = current.y + placement.y * zoom
       const bottom = current.y + (placement.y + placement.height) * zoom
       if (top >= margin && bottom <= height - margin) return current
+      cameraIntentRef.current = 'manual'
       if (top < margin) return { ...current, y: margin - placement.y * zoom }
       return { ...current, y: height - margin - (placement.y + placement.height) * zoom }
     })
@@ -456,6 +494,7 @@ export function FlowCanvas({
       }
       zoomRef.current = next
       setZoom(next)
+      cameraIntentRef.current = 'manual'
       if (point === undefined || container === null) return
       const rect = container.getBoundingClientRect()
       const cx = point.x - rect.left
@@ -478,6 +517,13 @@ export function FlowCanvas({
     if (container === null) return
     const handleWheel = (event: WheelEvent): void => {
       if (event.deltaX === 0 && event.deltaY === 0) return
+      // A wheel during a node drag or a pointer pan must not move the
+      // camera: both interactions keep a start-space mapping, so zooming
+      // mid-gesture would make the node or canvas jump under the pointer.
+      if (nodeDragRef.current !== null || panRef.current !== null) {
+        event.preventDefault()
+        return
+      }
       event.preventDefault()
       if (event.ctrlKey || event.metaKey) {
         zoomAt(event.deltaY < 0 ? 1.12 : 1 / 1.12, {
@@ -490,6 +536,7 @@ export function FlowCanvas({
       if (horizontal) {
         const dx = event.shiftKey && event.deltaX === 0 ? event.deltaY : event.deltaX
         const dy = event.shiftKey ? 0 : event.deltaY
+        cameraIntentRef.current = 'manual'
         setPan((current) => ({ x: current.x - dx, y: current.y - dy }))
         return
       }
@@ -585,6 +632,7 @@ export function FlowCanvas({
       }
       const state = panRef.current
       if (state === null || state.pointerId !== event.pointerId) return
+      cameraIntentRef.current = 'manual'
       setPan({
         x: state.panX + (event.clientX - state.startX),
         y: state.panY + (event.clientY - state.startY),

@@ -13,6 +13,7 @@
     "test:watch": "vitest",
     "typecheck": "tsc -b",
     "qa:browser": "node scripts/browser-qa/run.mjs",
+    "qa:canvas": "node scripts/browser-qa/canvas-ux.mjs",
     "qa:production": "node scripts/browser-qa/production-smoke.mjs"
   },
   "dependencies": {

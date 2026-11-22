@@ -897,7 +897,18 @@ async function checkpointD(page, report) {
   await page.click('[aria-label="Reset view"]')
   await sleep(300)
   const resetCamera = await camera(page)
-  check('D', 'reset view restores a known camera', Math.abs(resetCamera.panY - 12) < 2 && resetCamera.zoom <= 1.0001, `panY=${resetCamera.panY} zoom=${resetCamera.zoomLabel}`)
+  const resetNodesForCamera = await canvasSnapshot(page)
+  const topMostResetNode = Math.min(
+    ...resetNodesForCamera.nodes.filter((node) => node.visible).map((node) => node.rect.y),
+  )
+  check(
+    'D',
+    'reset view frames the graph from the top',
+    resetCamera.zoom <= 1.0001 &&
+      topMostResetNode >= resetCamera.canvas.y - 2 &&
+      topMostResetNode <= resetCamera.canvas.y + 64,
+    `zoom=${resetCamera.zoomLabel} top=${Math.round(topMostResetNode - resetCamera.canvas.y)}px`,
+  )
 
   // --- Pan ----------------------------------------------------------------
   const panStart = await camera(page)

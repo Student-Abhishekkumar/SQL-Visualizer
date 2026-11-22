@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildFlowGraph, deriveFlowState } from '../../../services/visualization/graphBuilder'
 import { flowBoxesOverlap } from '../../../services/visualization/flowLayout'
@@ -183,25 +183,47 @@ function renderCanvas(overrides: {
   return renderGraph(graph, state, overrides)
 }
 
+interface RenderGraphOverrides {
+  selectedNodeId?: string | null
+  packetEdgeIds?: string[]
+  following?: boolean
+  focusStageKey?: string | null
+}
+
 function renderGraph(
   targetGraph: FlowGraph,
   state: ReturnType<typeof deriveFlowState>,
-  overrides: { selectedNodeId?: string | null; packetEdgeIds?: string[] } = {},
+  overrides: RenderGraphOverrides = {},
 ) {
   const onSelectNode = vi.fn()
-  render(
+  const tree = (
+    nextGraph: FlowGraph,
+    nextState: ReturnType<typeof deriveFlowState>,
+    nextOverrides: RenderGraphOverrides,
+  ) => (
     <div style={{ width: 900, height: 700 }}>
       <FlowCanvas
-        graph={targetGraph}
-        nodeStatuses={state.nodes}
-        edgeStatuses={state.edges}
-        packetEdgeIds={overrides.packetEdgeIds ?? state.packetEdgeIds}
-        selectedNodeId={overrides.selectedNodeId ?? null}
+        graph={nextGraph}
+        nodeStatuses={nextState.nodes}
+        edgeStatuses={nextState.edges}
+        packetEdgeIds={nextOverrides.packetEdgeIds ?? nextState.packetEdgeIds}
+        selectedNodeId={nextOverrides.selectedNodeId ?? null}
+        following={nextOverrides.following}
+        focusStageKey={nextOverrides.focusStageKey ?? null}
         onSelectNode={onSelectNode}
       />
-    </div>,
+    </div>
   )
-  return { onSelectNode }
+  const view = render(tree(targetGraph, state, overrides))
+  return {
+    onSelectNode,
+    /** Re-render the same mounted canvas with another graph or state. */
+    renderWith: (
+      nextGraph: FlowGraph,
+      nextState: ReturnType<typeof deriveFlowState>,
+      nextOverrides: RenderGraphOverrides = overrides,
+    ) => view.rerender(tree(nextGraph, nextState, nextOverrides)),
+  }
 }
 
 function readPath(edgeId: string): SVGPathElement {
@@ -1573,5 +1595,296 @@ describe('FlowCanvas — nested query source', () => {
     expect(
       screen.getByRole('button', { name: /Nested query result Scalar subquery/ }),
     ).toBeInTheDocument()
+  })
+})
+
+describe('viewport-aware camera', () => {
+  function cameraOf(element: HTMLElement) {
+    const match = /translate\((-?[\d.]+)px, (-?[\d.]+)px\) scale\(([\d.]+)\)/.exec(
+      element.style.transform,
+    )
+    if (match === null) return null
+    return { panX: Number(match[1]), panY: Number(match[2]), zoom: Number(match[3]) }
+  }
+
+  function fitsInside(
+    targetGraph: FlowGraph,
+    camera: { panX: number; panY: number; zoom: number },
+    width: number,
+    height: number,
+    padding: number,
+  ): boolean {
+    return targetGraph.nodes.every((node) => {
+      const left = camera.panX + node.x * camera.zoom
+      const right = camera.panX + (node.x + node.width) * camera.zoom
+      const top = camera.panY + node.y * camera.zoom
+      const bottom = camera.panY + (node.y + node.height) * camera.zoom
+      return left >= padding - 1 && right <= width - padding + 1 && top >= -1 && bottom <= height + 1
+    })
+  }
+
+  function stubSize(width: number, height: number) {
+    const widthSpy = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(width)
+    const heightSpy = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(height)
+    return {
+      set(nextWidth: number, nextHeight: number) {
+        widthSpy.mockReturnValue(nextWidth)
+        heightSpy.mockReturnValue(nextHeight)
+      },
+      restore() {
+        widthSpy.mockRestore()
+        heightSpy.mockRestore()
+      },
+    }
+  }
+
+  function installResizeObserver() {
+    const callbacks: Array<() => void> = []
+    class MockResizeObserver {
+      private readonly callback: ResizeObserverCallback
+      constructor(callback: ResizeObserverCallback) {
+        this.callback = callback
+        callbacks.push(() => this.callback([], this as unknown as ResizeObserver))
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    vi.stubGlobal('ResizeObserver', MockResizeObserver)
+    return {
+      fire() {
+        act(() => {
+          for (const callback of callbacks) callback()
+        })
+      },
+    }
+  }
+
+  const surfaceOf = () => screen.getByRole('application').firstElementChild as HTMLElement
+
+  it('opens a new graph with every node inside the viewport, including side cards', () => {
+    const size = stubSize(768, 700)
+    try {
+      renderGraph(graph, deriveFlowState(graph, new Set(['FROM']), null, false))
+      const camera = cameraOf(surfaceOf())!
+      expect(graph.nodes.some((node) => node.kind === 'branch')).toBe(true)
+      expect(camera.zoom).toBeLessThan(1)
+      expect(fitsInside(graph, camera, 768, 700, 12)).toBe(true)
+    } finally {
+      size.restore()
+    }
+  })
+
+  it('fit to screen includes side cards and the final node', () => {
+    const size = stubSize(520, 520)
+    try {
+      renderGraph(graph, deriveFlowState(graph, new Set(['FROM', 'WHERE', 'SELECT']), null, false))
+      fireEvent.click(screen.getByRole('button', { name: 'Fit to screen' }))
+      const camera = cameraOf(surfaceOf())!
+      expect(fitsInside(graph, camera, 520, 520, 12)).toBe(true)
+      const finalNode = graph.nodes.find((node) => node.id === 'final')!
+      expect(camera.panY + (finalNode.y + finalNode.height) * camera.zoom).toBeLessThanOrEqual(520)
+    } finally {
+      size.restore()
+    }
+  })
+
+  it('re-fits an automatic camera when the viewport resizes', () => {
+    const observer = installResizeObserver()
+    const size = stubSize(768, 700)
+    try {
+      renderGraph(graph, deriveFlowState(graph, new Set(['FROM']), null, false))
+      const before = cameraOf(surfaceOf())!
+      size.set(520, 620)
+      observer.fire()
+      const after = cameraOf(surfaceOf())!
+      expect(after).not.toEqual(before)
+      expect(fitsInside(graph, after, 520, 620, 12)).toBe(true)
+    } finally {
+      size.restore()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('does not overwrite manual navigation on resize', () => {
+    const observer = installResizeObserver()
+    const size = stubSize(768, 700)
+    try {
+      renderGraph(graph, deriveFlowState(graph, new Set(['FROM']), null, false))
+      fireEvent.wheel(screen.getByRole('application'), { deltaY: -100, clientX: 120, clientY: 90 })
+      const manual = surfaceOf().style.transform
+      size.set(520, 620)
+      observer.fire()
+      expect(surfaceOf().style.transform).toBe(manual)
+    } finally {
+      size.restore()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('keeps the zoom level while playback following moves the view', () => {
+    const size = stubSize(768, 700)
+    try {
+      const { renderWith } = renderGraph(
+        graph,
+        deriveFlowState(graph, new Set(['FROM']), 'WHERE', false),
+        { following: true },
+      )
+      fireEvent.wheel(screen.getByRole('application'), { deltaY: -100, clientX: 120, clientY: 90 })
+      const zoomBefore = cameraOf(surfaceOf())!.zoom
+      renderWith(
+        graph,
+        deriveFlowState(graph, new Set(['FROM', 'WHERE']), 'SELECT', false),
+        { following: true },
+      )
+      expect(cameraOf(surfaceOf())!.zoom).toBeCloseTo(zoomBefore, 5)
+    } finally {
+      size.restore()
+    }
+  })
+
+  it('initializes a fresh camera for a newly visualized graph', () => {
+    const size = stubSize(768, 700)
+    try {
+      const { renderWith } = renderGraph(
+        graph,
+        deriveFlowState(graph, new Set(['FROM']), null, false),
+      )
+      const first = cameraOf(surfaceOf())!
+      renderWith(joinGraph, deriveFlowState(joinGraph, new Set(['FROM']), null, false), {})
+      const second = cameraOf(surfaceOf())!
+      expect(second).not.toEqual(first)
+      expect(fitsInside(joinGraph, second, 768, 700, 12)).toBe(true)
+    } finally {
+      size.restore()
+    }
+  })
+  it('exposes full column and value text for truncated previews', () => {
+    renderGraph(graph, deriveFlowState(graph, new Set(['FROM', 'WHERE', 'SELECT']), null, false))
+    const preview = document.querySelector('[data-node-id="data-WHERE"] .flow-preview') as HTMLElement
+    expect(preview).not.toBeNull()
+    const title = preview.getAttribute('title') ?? ''
+    expect(title).toContain('name, salary')
+    expect(title).toContain('showing 3')
+    const firstCell = preview.querySelector('tbody td') as HTMLElement
+    expect(firstCell.getAttribute('title')).toBe('row 1')
+  })
+
+  it('explains empty previews, hidden columns and row counts', () => {
+    const base = makeTrace()
+    const sixColumns = ['a', 'b', 'c', 'd', 'e', 'f']
+    const emptyTrace: VisualizationTrace = {
+      ...base,
+      stageSnapshots: [
+        snapshot('FROM', 0),
+        { ...snapshot('WHERE', 0), columns: sixColumns },
+        snapshot('SELECT', 0),
+      ],
+      finalRows: [],
+    }
+    const emptyGraph = buildFlowGraph(emptyTrace)
+    renderGraph(
+      emptyGraph,
+      deriveFlowState(emptyGraph, new Set(['FROM', 'WHERE', 'SELECT']), null, false),
+    )
+
+    const dataNode = document.querySelector('[data-node-id="data-WHERE"]') as HTMLElement
+    expect(dataNode).not.toBeNull()
+    expect(within(dataNode).getByText('0 rows after this stage')).toBeInTheDocument()
+    const hidden = within(dataNode).getByText('+2 cols')
+    expect(hidden.getAttribute('title')).toContain('e, f')
+    const badge = dataNode.querySelector('.flow-count-badge') as HTMLElement
+    expect(badge.getAttribute('title')).toBe('0 rows after this stage')
+
+    const finalNode = document.querySelector('[data-node-id="final"]') as HTMLElement
+    expect(within(finalNode).getByText('no rows returned')).toBeInTheDocument()
+  })
+})
+
+describe('viewport navigation', () => {
+  function camera() {
+    const surface = screen.getByRole('application').firstElementChild as HTMLElement
+    const match = /translate\((-?[\d.]+)px(?:, (-?[\d.]+)px)?\) scale\(([\d.]+)\)/.exec(
+      surface.style.transform,
+    )
+    expect(match, `unexpected transform: ${surface.style.transform}`).not.toBeNull()
+    return {
+      surface,
+      panX: Number(match![1]),
+      panY: Number(match![2] ?? 0),
+      zoom: Number(match![3]),
+    }
+  }
+
+  it('keeps the anchored graph point stationary when zooming near an edge', () => {
+    renderCanvas()
+    const canvas = screen.getByRole('application')
+    // jsdom reports a zero-sized container rect, so client coordinates are
+    // canvas coordinates and the graph point under the pointer is (x, y).
+    for (const anchor of [
+      { clientX: 2, clientY: 3 },
+      { clientX: 780, clientY: 620 },
+    ]) {
+      const before = camera()
+      const graphX = (anchor.clientX - before.panX) / before.zoom
+      const graphY = (anchor.clientY - before.panY) / before.zoom
+      fireEvent.wheel(canvas, { deltaY: -100, ...anchor })
+      const after = camera()
+      expect(after.zoom).toBeGreaterThan(before.zoom)
+      expect((anchor.clientX - after.panX) / after.zoom).toBeCloseTo(graphX, 5)
+      expect((anchor.clientY - after.panY) / after.zoom).toBeCloseTo(graphY, 5)
+    }
+  })
+
+  it('clamps zoom at the maximum and minimum levels', () => {
+    renderCanvas()
+    const canvas = screen.getByRole('application')
+    for (let step = 0; step < 24; step += 1) {
+      fireEvent.wheel(canvas, { deltaY: -100, clientX: 100, clientY: 100 })
+    }
+    expect(screen.getByText('220%')).toBeTruthy()
+    for (let step = 0; step < 48; step += 1) {
+      fireEvent.wheel(canvas, { deltaY: 100, clientX: 100, clientY: 100 })
+    }
+    expect(screen.getByText('22%')).toBeTruthy()
+  })
+
+  it('ignores wheel zoom during a node drag', () => {
+    renderCanvas()
+    const canvas = screen.getByRole('application')
+    const node = screen.getByRole('button', { name: /Operation WHERE/ })
+    fireEvent.pointerDown(node, { button: 0, pointerId: 21, clientX: 10, clientY: 10 })
+    fireEvent.pointerMove(canvas, { pointerId: 21, clientX: 90, clientY: 80 })
+    const duringDrag = camera().surface.style.transform
+    fireEvent.wheel(canvas, { deltaY: -100, clientX: 50, clientY: 50 })
+    expect(camera().surface.style.transform).toBe(duringDrag)
+    expect(screen.getByText('100%')).toBeTruthy()
+    fireEvent.pointerUp(canvas, { pointerId: 21 })
+  })
+
+  it('ignores wheel navigation during a canvas pan', () => {
+    renderCanvas()
+    const canvas = screen.getByRole('application')
+    fireEvent.pointerDown(canvas, { button: 0, pointerId: 22, clientX: 50, clientY: 50 })
+    fireEvent.pointerMove(canvas, { pointerId: 22, clientX: 80, clientY: 70 })
+    const duringPan = camera().surface.style.transform
+    fireEvent.wheel(canvas, { deltaY: -100, clientX: 60, clientY: 60 })
+    expect(camera().surface.style.transform).toBe(duringPan)
+    fireEvent.pointerUp(canvas, { pointerId: 22 })
+  })
+
+  it('pans by the pointer delta at a non-default zoom', () => {
+    renderCanvas()
+    const canvas = screen.getByRole('application')
+    fireEvent.wheel(canvas, { deltaY: -100, clientX: 0, clientY: 0 })
+    const before = camera()
+    expect(before.zoom).toBeCloseTo(1.2, 5)
+    fireEvent.pointerDown(canvas, { button: 0, pointerId: 23, clientX: 100, clientY: 100 })
+    fireEvent.pointerMove(canvas, { pointerId: 23, clientX: 160, clientY: 140 })
+    const after = camera()
+    expect(after.zoom).toBeCloseTo(before.zoom, 5)
+    expect(after.panX - before.panX).toBeCloseTo(60, 5)
+    expect(after.panY - before.panY).toBeCloseTo(40, 5)
+    fireEvent.pointerUp(canvas, { pointerId: 23 })
   })
 })

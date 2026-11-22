@@ -216,8 +216,12 @@ the visualization is unavailable.
 | Capability | Status | Details |
 |:---|:---:|:---|
 | Pan | ✅ | Drag empty canvas space. |
+| Data previews | ✅ | Up to 4 columns and 3 rows per node (10 when expanded). `+N cols` and tooltips expose hidden columns, full values and exact row/column counts. |
+| Empty states | ✅ | Zero-row stages are labelled in place ("0 rows after this stage"); empty final results say "no rows returned"; pending final nodes explain when they fill in. |
 | Zoom | ✅ | Scroll to zoom around the pointer, with dedicated zoom controls. |
-| Fit / reset | ✅ | Fit the whole graph to the viewport or reset the camera. |
+| Fit / reset | ✅ | Fit the whole graph (every node box, side columns included, negative coordinates) to the viewport, or reset to a top-anchored readable view. |
+| Initial camera | ✅ | A new graph opens fully visible when it fits at a readable zoom; very long pipelines open width-fitted and top-anchored so labels stay legible. |
+| Viewport resizing | ✅ | Automatic cameras re-fit when the canvas resizes; manual pan and zoom are preserved. |
 | Node dragging | ✅ | Drag nodes to reposition them; nearby nodes settle without changing the query or selection. |
 | Hover tracing | ✅ | Hovering a node temporarily emphasizes its branch-aware upstream path. |
 | Click tracing | ✅ | Clicking pins the upstream trace and opens the inspector. |

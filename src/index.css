@@ -919,6 +919,7 @@ body {
   color: var(--text-primary);
   font-family: var(--font-mono);
   font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
   line-height: 15px;
   text-overflow: ellipsis;
   white-space: nowrap;

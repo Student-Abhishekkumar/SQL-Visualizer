@@ -277,6 +277,40 @@ describe('buildFlowGraph — GROUP BY fan-out', () => {
       expect(node.y + node.height).toBeLessThanOrEqual(graph.bounds.height)
     }
   })
+
+  it('keeps every group card inside the graph bounds without overlapping another node', () => {
+    const manyGroups = Array.from({ length: 11 }, (_, index) => groupSnapshot(index + 1, 1))
+    const trace = makeTrace({
+      stages: ['FROM', 'GROUP_BY', 'SELECT'],
+      stageSnapshots: [snapshot('FROM', 11), snapshot('GROUP_BY', 11, 0, manyGroups), snapshot('SELECT', 11)],
+    })
+    const graph = buildFlowGraph(trace)
+
+    for (const node of graph.nodes) {
+      expect(node.x, `${node.id} left`).toBeGreaterThanOrEqual(0)
+      expect(node.y, `${node.id} top`).toBeGreaterThanOrEqual(0)
+      expect(node.x + node.width, `${node.id} right`).toBeLessThanOrEqual(graph.bounds.width)
+      expect(node.y + node.height, `${node.id} bottom`).toBeLessThanOrEqual(graph.bounds.height)
+    }
+
+    for (let i = 0; i < graph.nodes.length; i += 1) {
+      for (let j = i + 1; j < graph.nodes.length; j += 1) {
+        const a = graph.nodes[i]!
+        const b = graph.nodes[j]!
+        const overlaps =
+          a.x < b.x + b.width &&
+          a.x + a.width > b.x &&
+          a.y < b.y + b.height &&
+          a.y + a.height > b.y
+        expect(overlaps, `${a.id} overlaps ${b.id}`).toBe(false)
+      }
+    }
+
+    // The same trace always produces the same positions.
+    expect(buildFlowGraph(trace).nodes.map((node) => [node.id, node.x, node.y])).toEqual(
+      graph.nodes.map((node) => [node.id, node.x, node.y]),
+    )
+  })
 })
 
 describe('buildFlowGraph — layout quality', () => {

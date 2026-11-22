@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
+  fitFlowLayout,
+  fitFlowLayoutWidth,
+  FLOW_FIT_CLEARANCE,
   FLOW_LAYOUT_GAP_X,
   FLOW_LAYOUT_GAP_Y,
-  fitFlowLayout,
   flowBoxesOverlap,
+  INITIAL_FIT_MIN_ZOOM,
+  initialFlowLayout,
   measureFlowFitBounds,
   measureFlowLayout,
   resolveFlowLayout,
@@ -274,6 +278,116 @@ describe('fitFlowLayout', () => {
   })
 })
 
+describe('viewport-aware camera', () => {
+  const viewport = {
+    width: 768,
+    height: 700,
+    padding: 30,
+    minZoom: 0.22,
+    maxZoom: 2.2,
+    clearance: FLOW_FIT_CLEARANCE,
+  }
+
+  /** A three-column graph: source, central spine, and a side card column. */
+  const threeColumnGraph = [
+    { x: 0, y: 16, width: 248, height: 152 },
+    { x: 344, y: 32, width: 260, height: 78 },
+    { x: 344, y: 138, width: 260, height: 128 },
+    { x: 344, y: 302, width: 260, height: 78 },
+    { x: 666, y: 32, width: 236, height: 54 },
+    { x: 666, y: 98, width: 236, height: 54 },
+  ]
+
+  it('width-fits the side column instead of only the main spine', () => {
+    const camera = fitFlowLayoutWidth(threeColumnGraph, viewport)
+    expect(camera).not.toBeNull()
+    if (camera === null) return
+    const bounds = measureFlowFitBounds(threeColumnGraph)!
+    // The rightmost side card must land inside the padded viewport.
+    expect(camera.panX + (bounds.right + FLOW_FIT_CLEARANCE) * camera.zoom).toBeLessThanOrEqual(768 - 30)
+    expect(camera.panX + (bounds.left - FLOW_FIT_CLEARANCE) * camera.zoom).toBeGreaterThanOrEqual(30)
+    // It zooms out because the full three-column width does not fit at 100%.
+    expect(camera.zoom).toBeLessThan(1)
+  })
+
+  it('keeps 100% zoom when the whole graph already fits', () => {
+    const narrow = [
+      { x: 0, y: 16, width: 200, height: 120 },
+      { x: 260, y: 16, width: 200, height: 78 },
+    ]
+    expect(fitFlowLayoutWidth(narrow, viewport)?.zoom).toBe(1)
+  })
+
+  it('anchors the width fit at the top for a tall pipeline', () => {
+    const tall = [{ x: 0, y: 400, width: 300, height: 2000 }]
+    const camera = fitFlowLayoutWidth(tall, viewport)!
+    const top = camera.panY + (400 - FLOW_FIT_CLEARANCE) * camera.zoom
+    expect(top).toBeCloseTo(16)
+    // Height never shrinks the width fit.
+    expect(camera.zoom).toBe(1)
+  })
+
+  it('centres negative coordinates without changing them', () => {
+    const boxes = [
+      { x: -600, y: -200, width: 200, height: 100 },
+      { x: 200, y: 100, width: 200, height: 100 },
+    ]
+    const before = structuredClone(boxes)
+    const camera = fitFlowLayoutWidth(boxes, viewport)!
+    const bounds = measureFlowFitBounds(boxes)!
+    const left = camera.panX + (bounds.left - FLOW_FIT_CLEARANCE) * camera.zoom
+    const right = camera.panX + (bounds.right + FLOW_FIT_CLEARANCE) * camera.zoom
+    expect(left).toBeCloseTo(768 - right, 5)
+    expect(boxes).toEqual(before)
+  })
+
+  it('respects every node box, even when dimensions differ', () => {
+    const boxes = [
+      { x: 0, y: 0, width: 1200, height: 40 },
+      { x: 1220, y: 0, width: 40, height: 1800 },
+    ]
+    const bounds = measureFlowFitBounds(boxes)!
+    expect(bounds).toMatchObject({ width: 1260, height: 1800 })
+    const camera = fitFlowLayoutWidth(boxes, viewport)!
+    // Width decides the zoom; the tall node's height is irrelevant here.
+    expect(camera.zoom).toBeCloseTo((768 - 60) / (1260 + FLOW_FIT_CLEARANCE * 2), 5)
+  })
+
+  it('is deterministic for identical input', () => {
+    const first = initialFlowLayout(threeColumnGraph, viewport)
+    const second = initialFlowLayout(structuredClone(threeColumnGraph), viewport)
+    expect(second).toEqual(first)
+  })
+
+  it('fits a graph that fits at a readable zoom, including its final node', () => {
+    const camera = initialFlowLayout(threeColumnGraph, viewport)!
+    const bounds = measureFlowFitBounds(threeColumnGraph)!
+    expect(camera.zoom).toBeGreaterThanOrEqual(INITIAL_FIT_MIN_ZOOM)
+    // Both vertical extremes (top node and final node) are inside the viewport.
+    expect(camera.panY + (bounds.top - FLOW_FIT_CLEARANCE) * camera.zoom).toBeGreaterThanOrEqual(0)
+    expect(camera.panY + (bounds.bottom + FLOW_FIT_CLEARANCE) * camera.zoom).toBeLessThanOrEqual(700)
+  })
+
+  it('falls back to the readable width fit for a very long pipeline', () => {
+    const longPipeline = Array.from({ length: 14 }, (_, index) => ({
+      x: 344,
+      y: 32 + index * 170,
+      width: 260,
+      height: 128,
+    }))
+    const camera = initialFlowLayout(longPipeline, viewport)!
+    const fittedBothAxes = fitFlowLayout(longPipeline, viewport)!
+    expect(fittedBothAxes.zoom).toBeLessThan(INITIAL_FIT_MIN_ZOOM)
+    expect(camera.zoom).toBe(1)
+    expect(camera.panY).toBeCloseTo(16 - (32 - FLOW_FIT_CLEARANCE), 5)
+  })
+
+  it('never opens a new graph larger than 100%', () => {
+    const tiny = [{ x: 0, y: 0, width: 100, height: 60 }]
+    expect(initialFlowLayout(tiny, viewport)?.zoom).toBe(1)
+  })
+})
+
 describe('measureFlowLayout', () => {
   it('recalculates bounds from live positions without shrinking below the minimum', () => {
     const minimum = { width: 500, height: 400, flowWidth: 450 }
@@ -286,7 +400,9 @@ describe('measureFlowLayout', () => {
     )
     expect(before.width).toBe(548)
     expect(before.height).toBe(400)
-    expect(before.flowWidth).toBe(450)
+    // Side-column cards are part of the content width, so the bounds can
+    // never under-report the graph and clip them.
+    expect(before.flowWidth).toBe(528)
 
     const after = measureFlowLayout(
       [{ x: 600, y: 320, width: 100, height: 50 }],

@@ -249,7 +249,27 @@ export interface FlowFitViewport {
   padding: number
   minZoom: number
   maxZoom: number
+  /**
+   * Extra room around the outermost node rectangles for sockets, socket
+   * labels and arrowheads that sit outside the node box. Symmetric, so it
+   * never changes the graph centre or the final node's visibility.
+   */
+  clearance?: number
 }
+
+/** Extra room the camera keeps around the outermost node boxes. */
+export const FLOW_FIT_CLEARANCE = 36
+
+/**
+ * Readable-overview floor for the first camera on a new graph. When the
+ * whole graph fits at or above this zoom the initial view shows all of it;
+ * long pipelines fall back to a top-anchored width fit instead of shrinking
+ * labels into illegibility.
+ */
+export const INITIAL_FIT_MIN_ZOOM = 0.5
+
+/** Top inset for the width-fit camera, in screen pixels. */
+const WIDTH_FIT_TOP = 16
 
 /** Fit and centre complete node bounds without modifying any node position. */
 export function fitFlowLayout(
@@ -258,18 +278,69 @@ export function fitFlowLayout(
 ): { zoom: number; panX: number; panY: number } | null {
   const bounds = measureFlowFitBounds(boxes)
   if (bounds === null) return null
+  const clearance = viewport.clearance ?? 0
+  const contentWidth = bounds.width + clearance * 2
+  const contentHeight = bounds.height + clearance * 2
+  const left = bounds.left - clearance
+  const top = bounds.top - clearance
   const availableWidth = Math.max(1, viewport.width - viewport.padding * 2)
   const availableHeight = Math.max(1, viewport.height - viewport.padding * 2)
   const scale = Math.min(
-    availableWidth / Math.max(bounds.width, 1),
-    availableHeight / Math.max(bounds.height, 1),
+    availableWidth / Math.max(contentWidth, 1),
+    availableHeight / Math.max(contentHeight, 1),
   )
   const zoom = Math.min(viewport.maxZoom, Math.max(viewport.minZoom, scale))
   return {
     zoom,
-    panX: (viewport.width - bounds.width * zoom) / 2 - bounds.left * zoom,
-    panY: (viewport.height - bounds.height * zoom) / 2 - bounds.top * zoom,
+    panX: (viewport.width - contentWidth * zoom) / 2 - left * zoom,
+    panY: (viewport.height - contentHeight * zoom) / 2 - top * zoom,
   }
+}
+
+/**
+ * Width-fit camera anchored at the top of the graph.
+ *
+ * It measures **every** node box, including branch and group nodes in the
+ * side column, so a graph is never clipped horizontally at 100% just
+ * because its main spine is narrower than the canvas.
+ */
+export function fitFlowLayoutWidth(
+  boxes: readonly FlowLayoutExtentBox[],
+  viewport: FlowFitViewport,
+): { zoom: number; panX: number; panY: number } | null {
+  const bounds = measureFlowFitBounds(boxes)
+  if (bounds === null) return null
+  const clearance = viewport.clearance ?? 0
+  const left = bounds.left - clearance
+  const contentWidth = bounds.width + clearance * 2
+  const availableWidth = Math.max(1, viewport.width - viewport.padding * 2)
+  const scale = availableWidth / Math.max(contentWidth, 1)
+  const zoom = Math.min(viewport.maxZoom, Math.max(viewport.minZoom, Math.min(scale, 1)))
+  return {
+    zoom,
+    panX: (viewport.width - contentWidth * zoom) / 2 - left * zoom,
+    panY: WIDTH_FIT_TOP - (bounds.top - clearance) * zoom,
+  }
+}
+
+/**
+ * Camera for a freshly visualized graph.
+ *
+ * A graph that fits the viewport at a readable zoom opens fully visible,
+ * including its final node. A very long pipeline opens width-fitted and
+ * top-anchored, which keeps labels readable; panning and the playback
+ * controls then move through it.
+ */
+export function initialFlowLayout(
+  boxes: readonly FlowLayoutExtentBox[],
+  viewport: FlowFitViewport,
+): { zoom: number; panX: number; panY: number } | null {
+  const readable = fitFlowLayout(boxes, {
+    ...viewport,
+    maxZoom: Math.min(viewport.maxZoom, 1),
+  })
+  if (readable !== null && readable.zoom >= INITIAL_FIT_MIN_ZOOM) return readable
+  return fitFlowLayoutWidth(boxes, viewport)
 }
 
 export interface FlowLayoutExtentBox {
@@ -302,9 +373,10 @@ export function measureFlowLayout(
   for (const box of boxes) {
     width = Math.max(width, box.x + box.width + BOUNDS_PADDING)
     height = Math.max(height, box.y + box.height + BOUNDS_PADDING)
-    if (box.side !== true) {
-      flowWidth = Math.max(flowWidth, box.x + box.width + FLOW_WIDTH_PADDING)
-    }
+    // Every real node contributes to the content width, including branch and
+    // group cards in the side column. A width that ignored them let earlier
+    // camera code measure the graph too narrowly and clip those cards.
+    flowWidth = Math.max(flowWidth, box.x + box.width + FLOW_WIDTH_PADDING)
   }
   return {
     width,

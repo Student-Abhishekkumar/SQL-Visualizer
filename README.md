@@ -11,7 +11,7 @@
 
 <p align="center">
   <img alt="Status: active development" src="https://img.shields.io/badge/status-active_development-F59E0B?style=flat-square" />
-  <img alt="1065 unit tests passing" src="https://img.shields.io/badge/unit_tests-1065_passing-2EA043?style=flat-square" />
+  <img alt="1081 unit tests passing" src="https://img.shields.io/badge/unit_tests-1081_passing-2EA043?style=flat-square" />
   <img alt="583 browser QA assertions passing" src="https://img.shields.io/badge/browser_QA-583_passing-2EA043?style=flat-square" />
   <img alt="MIT licensed" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" />
 </p>
@@ -355,6 +355,10 @@ The canvas is built from the real trace, not from a fixed template:
   panning, zooming and repeated renders update node *state*, never the graph structure.
 - **No stale graphs:** visualizing a different query replaces the graph entirely, and a refused
   visualization clears it instead of leaving a misleading partial graph.
+- **Viewport-aware camera:** a new graph opens fully visible when it fits at a readable zoom —
+  including side-column branch/group cards and the final node. Very long pipelines open width-fitted
+  and top-anchored so labels stay legible. Fit to Screen frames every node, resizing re-fits automatic
+  cameras, and manual zoom/pan is never overwritten.
 - **Legitimate independent blocks:** nested query blocks and compound branches keep their own nodes
   and playback instead of being merged or duplicated.
 - **Animated connections:** sockets and curved wires connect real data dependencies, with animated
@@ -370,6 +374,9 @@ The canvas is built from the real trace, not from a fixed template:
 - **Click** a node to pin that trace and open the floating inspector.
 - **Inspect** real input and output rows, group keys, join details, accepted/rejected counts and
   final-result rows. The Overview, Input, Output and Details tabs are node-specific.
+- **Read previews at a glance:** nodes show up to four columns and three rows (ten when expanded).
+  `+N cols` and tooltips expose hidden columns, full values and the exact row/column counts; empty
+  stages say "0 rows after this stage" and an empty final result says "no rows returned".
 - **Move and resize** the inspector with its header and eight resize handles. Position and size are
   owned by the workspace, so they survive switching nodes and playback updates.
 - **Collapse** the window to its real 52px header strip. The collapsed window has no hidden expanded
@@ -420,6 +427,7 @@ Open <http://localhost:5173>. The University example database is created on firs
 | `npm run lint` | Lint the project with oxlint. |
 | `npm run typecheck` | Run the TypeScript project build without emitting. |
 | `npm run qa:browser` | Drive a real headless Chrome through the Canvas QA suite. |
+| `npm run qa:canvas` | Verify viewport-aware layout, fit-to-screen, zoom and resize behavior. |
 | `npm run qa:production` | Smoke-test the built bundle without the dev bridge. |
 
 ## Verified results
@@ -428,8 +436,9 @@ Current state of this repository at this commit:
 
 | Check | Result |
 |:---|:---|
-| Unit tests | **70 files, 1,065 tests passed** |
+| Unit tests | **70 files, 1,081 tests passed** |
 | Browser QA | **583/583 assertions passed** (headless Chrome 157) |
+| Canvas UX QA | **66/66 assertions passed** (layout, fit, zoom, resize) |
 | Lint | **0 warnings, 0 errors** |
 | Typecheck | **Passed** |
 | Production build | **Passed** |
@@ -444,6 +453,10 @@ Playwright or Cypress dependency**.
 # Full suite: starts its own dev server, writes screenshots and a JSON report,
 # and exits non-zero if any assertion fails.
 QA_MANAGED_SERVER=1 npm run qa:browser
+
+# Canvas layout/navigation checks: every graph family, fit-to-screen,
+# pointer-centred zoom, playback stability and viewport resizing.
+QA_MANAGED_SERVER=1 npm run qa:canvas
 
 # Production bundle smoke test (no dev bridge is present in the build).
 npm run build
@@ -465,6 +478,11 @@ The suite covers five checkpoints:
 Artifacts (screenshots and `report.json`) are written to `artifacts/browser-qa/` and are gitignored.
 Chrome or Edge must be installed; set `CHROME_PATH` if it is not in a standard location. Run selected
 checkpoints with `QA_ONLY=A,B,C` and target an already-running server with `APP_URL`.
+
+`qa:canvas` covers the Canvas-specific behavior: every graph family opens without horizontal
+clipping, Fit to Screen contains every node (including side-column branch/group cards and the final
+result), pointer-centred zoom stays anchored, playback never resets manual zoom, and a viewport
+resize re-fits automatic cameras without overwriting manual navigation.
 
 ## Architecture overview
 
