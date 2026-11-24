@@ -27,8 +27,8 @@ import {
 } from '../services/database/databaseManager'
 import { getDatabaseSchema } from '../services/database/schemaService'
 import { SqlExecutionError, hasExecutableSql } from '../services/database/sqliteService'
-import { isMutatingStatementType } from '../services/sql/sqlParser'
-import { useVisualizationStore } from './visualizationStore'
+import { isMutatingStatementType } from '../services/sql/statementTypes'
+import { resetVisualizationForDatabaseSwitch } from './visualizationReset'
 
 /**
  * Database application state: workspace lifecycle, the active live
@@ -83,7 +83,7 @@ function applyActiveDatabase(
     lastResult: null,
   })
   // A trace/results from the previous database must never be shown.
-  useVisualizationStore.getState().resetForDatabaseSwitch()
+  resetVisualizationForDatabaseSwitch()
 }
 
 export const useDatabaseStore = create<DatabaseState>()((set, get) => ({
@@ -107,7 +107,7 @@ export const useDatabaseStore = create<DatabaseState>()((set, get) => ({
         databases: result.databases,
         initError: null,
       })
-      useVisualizationStore.getState().resetForDatabaseSwitch()
+      resetVisualizationForDatabaseSwitch()
     } catch (error) {
       set({
         status: 'error',
@@ -325,7 +325,7 @@ export const useDatabaseStore = create<DatabaseState>()((set, get) => ({
       databases: [...getDatabases()],
     })
     // Resetting another database must not clear the active canvas/results.
-    if (isActive) useVisualizationStore.getState().resetForDatabaseSwitch()
+    if (isActive) resetVisualizationForDatabaseSwitch()
     return schema
   },
 

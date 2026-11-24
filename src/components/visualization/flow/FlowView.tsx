@@ -22,6 +22,8 @@ interface FlowViewProps {
    */
   focusStageKey?: string | null
   onSelectNode: (node: FlowGraphNode) => void
+  /** Clear the current selection (tap on empty canvas). */
+  onDeselectNode?: () => void
 }
 
 export const FlowView = memo(function FlowView({
@@ -31,6 +33,7 @@ export const FlowView = memo(function FlowView({
   playing,
   focusStageKey = null,
   onSelectNode,
+  onDeselectNode,
 }: FlowViewProps) {
   // Live playback animates the edges of the running stage. When the user
   // parks on a completed stage, its real connections keep animating so
@@ -58,6 +61,7 @@ export const FlowView = memo(function FlowView({
       following={playing}
       focusStageKey={focusStageKey}
       onSelectNode={onSelectNode}
+      onDeselectNode={onDeselectNode}
     />
   )
 })

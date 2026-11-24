@@ -1,3 +1,4 @@
+import { EditorLoadingFallback } from './EditorLoadingFallback'
 import { useEffect, useRef } from 'react'
 import Editor, { type OnMount } from '@monaco-editor/react'
 import { setSchemaAccessor, setupMonaco, monaco } from '../../app/monacoSetup'
@@ -87,7 +88,13 @@ export function SQLEditorSurface({ value, onChange, onRun }: SQLEditorSurfacePro
         range,
         options: {
           className: 'clause-highlight-monaco',
-          overviewRuler: { color: '#2563eb', position: monaco.editor.OverviewRulerLane.Right },
+          overviewRuler: {
+            color:
+              getComputedStyle(document.documentElement)
+                .getPropertyValue('--accent')
+                .trim() || '#2563eb',
+            position: monaco.editor.OverviewRulerLane.Right,
+          },
         },
       },
     ])
@@ -99,13 +106,13 @@ export function SQLEditorSurface({ value, onChange, onRun }: SQLEditorSurfacePro
   // silently ignored rather than decorating wrong text.
   useEffect(() => {
     applyHighlight(stageHighlight)
-  }, [stageHighlight, value])
+  }, [stageHighlight, value, theme])
 
   return (
     <div className="h-full min-h-0 w-full">
       <Editor
         language="sql"
-        theme={theme === 'dark' ? 'sqlviz-dark' : 'sqlviz-light'}
+        theme={`sqlviz-${theme}`}
         value={value}
         onChange={(next) => onChange(next ?? '')}
         onMount={handleMount}
@@ -128,11 +135,7 @@ export function SQLEditorSurface({ value, onChange, onRun }: SQLEditorSurfacePro
           suggestOnTriggerCharacters: true,
           scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
         }}
-        loading={
-          <div className="flex h-full items-center justify-center text-sm text-text-muted">
-            Loading editor…
-          </div>
-        }
+        loading={<EditorLoadingFallback />}
       />
     </div>
   )

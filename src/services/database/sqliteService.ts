@@ -1,6 +1,6 @@
 import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js'
 import type { StatementResult } from '../../types/query'
-import { detectStatementType, isMutatingStatementType } from '../sql/sqlParser'
+import { classifyStatementType, isMutatingStatementType } from '../sql/statementTypes'
 import { hasExecutableContent, splitStatements } from '../../utils/queryHelpers'
 
 /**
@@ -169,7 +169,7 @@ export class SQLiteDatabase {
           stmt.free()
         }
         const executionTime = performance.now() - startedAt
-        const type = detectStatementType(statement)
+        const type = classifyStatementType(statement)
 
         const rows = values.map((row) => {
           const record: Record<string, unknown> = {}

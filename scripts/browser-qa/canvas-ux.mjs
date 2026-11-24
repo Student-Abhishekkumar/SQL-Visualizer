@@ -118,6 +118,13 @@ try {
       })()`,
       { label: 'new graph' },
     )
+    // The workspace chunk and the visualization store now load on demand,
+    // so the canvas can legitimately still be a skeleton after the trace
+    // exists. Wait for the real surface before measuring.
+    await page.waitFor(
+      `Boolean(document.querySelector('[role="application"]')) && document.querySelectorAll('[data-node-id]').length > 0`,
+      { label: 'canvas surface', timeout: 60_000 },
+    )
     await sleep(500)
   }
 

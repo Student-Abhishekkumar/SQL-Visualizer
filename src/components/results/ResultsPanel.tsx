@@ -1,10 +1,18 @@
-import { useState } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { CircleAlert, Table2 } from 'lucide-react'
 import { Tabs } from '../common/Tabs'
 import { ResultsTable } from './ResultsTable'
 import { MessagesPanel } from './MessagesPanel'
-import { QueryInfo } from './QueryInfo'
 import type { QueryExecutionResult } from '../../types/query'
+
+/**
+ * Query Information needs the SQL AST to list referenced tables, so it is
+ * split out: the parser (~250 kB) then loads only when the user opens this
+ * tab instead of on every app start.
+ */
+const QueryInfo = lazy(() =>
+  import('./QueryInfo').then((module) => ({ default: module.QueryInfo })),
+)
 
 interface ResultsPanelProps {
   result: QueryExecutionResult | null
@@ -40,10 +48,11 @@ export function ResultsPanel({ result, isExecuting }: ResultsPanelProps) {
     result && !result.success ? 1 : 0
 
   return (
-    <section className="flex h-full min-h-0 flex-col overflow-hidden bg-surface">
-      <div className="flex items-center justify-between gap-2 border-b border-border px-2 py-1.5">
+    <section className="glass-surface flex h-full min-h-0 flex-col overflow-hidden bg-surface">
+      <div className="flex min-w-0 items-center justify-between gap-2 border-b border-border px-2 py-1.5">
         <Tabs
           active={activeTab}
+          ariaLabel="Results views"
           onChange={(tab) => setSelection({ result, tab })}
           tabs={[
             {
@@ -72,7 +81,7 @@ export function ResultsPanel({ result, isExecuting }: ResultsPanelProps) {
             { id: TAB_INFO, label: 'Query Information' },
           ]}
         />
-        <div className="pr-1 text-[11px] text-text-muted">
+        <div className="hidden shrink-0 pl-1 text-[11px] text-text-muted sm:block">
           {isExecuting
             ? 'Executing…'
             : result
@@ -95,7 +104,15 @@ export function ResultsPanel({ result, isExecuting }: ResultsPanelProps) {
         {activeTab === TAB_MESSAGES && (
           <MessagesPanel result={result} />
         )}
-        {activeTab === TAB_INFO && <QueryInfo result={result} />}
+        {activeTab === TAB_INFO && (
+          <Suspense
+            fallback={
+              <div className="p-4 text-sm text-text-muted">Loading query information…</div>
+            }
+          >
+            <QueryInfo result={result} />
+          </Suspense>
+        )}
       </div>
     </section>
   )

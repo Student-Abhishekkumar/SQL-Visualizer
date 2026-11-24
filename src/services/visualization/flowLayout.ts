@@ -330,17 +330,27 @@ export function fitFlowLayoutWidth(
  * including its final node. A very long pipeline opens width-fitted and
  * top-anchored, which keeps labels readable; panning and the playback
  * controls then move through it.
+ *
+ * `minReadableZoom` raises the floor used by the width fit. Narrow
+ * viewports pass a higher value so a phone opens at a legible scale
+ * (panning reveals the rest) instead of shrinking the whole pipeline into
+ * unreadable text.
  */
 export function initialFlowLayout(
   boxes: readonly FlowLayoutExtentBox[],
   viewport: FlowFitViewport,
+  options: { minReadableZoom?: number } = {},
 ): { zoom: number; panX: number; panY: number } | null {
   const readable = fitFlowLayout(boxes, {
     ...viewport,
     maxZoom: Math.min(viewport.maxZoom, 1),
   })
   if (readable !== null && readable.zoom >= INITIAL_FIT_MIN_ZOOM) return readable
-  return fitFlowLayoutWidth(boxes, viewport)
+  const floor = options.minReadableZoom ?? viewport.minZoom
+  return fitFlowLayoutWidth(boxes, {
+    ...viewport,
+    minZoom: Math.max(viewport.minZoom, floor),
+  })
 }
 
 export interface FlowLayoutExtentBox {

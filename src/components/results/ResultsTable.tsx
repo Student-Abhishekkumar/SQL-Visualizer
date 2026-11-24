@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import { Inbox } from 'lucide-react'
+import { EmptyState } from '../common/EmptyState'
 import type { StatementResult } from '../../types/query'
 
 interface ResultsTableProps {
@@ -46,7 +47,7 @@ export function ResultsTable({ result, executedWithoutResultSet = false }: Resul
       <EmptyState
         icon={<Inbox className="size-8" />}
         title={executedWithoutResultSet ? 'Statement executed' : 'No results yet'}
-        detail={
+        description={
           executedWithoutResultSet
             ? undefined
             : 'Run a query to see its output here, or pick an example from the toolbar.'
@@ -60,7 +61,7 @@ export function ResultsTable({ result, executedWithoutResultSet = false }: Resul
       <EmptyState
         icon={<Inbox className="size-8" />}
         title="Statement executed successfully"
-        detail="This statement does not return rows."
+        description="This statement does not return rows."
       />
     )
   }
@@ -70,7 +71,7 @@ export function ResultsTable({ result, executedWithoutResultSet = false }: Resul
       <EmptyState
         icon={<Inbox className="size-8" />}
         title="Query returned no rows"
-        detail="The statement is valid, but no rows matched the conditions."
+        description="The statement is valid, but no rows matched the conditions."
       />
     )
   }
@@ -126,24 +127,6 @@ export function ResultsTable({ result, executedWithoutResultSet = false }: Resul
           ))}
         </tbody>
       </table>
-    </div>
-  )
-}
-
-function EmptyState({
-  icon,
-  title,
-  detail,
-}: {
-  icon: React.ReactNode
-  title: string
-  detail?: string
-}) {
-  return (
-    <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center">
-      <div className="text-text-muted/50">{icon}</div>
-      <p className="text-sm font-medium text-text-secondary">{title}</p>
-      {detail && <p className="max-w-sm text-xs text-text-muted">{detail}</p>}
     </div>
   )
 }

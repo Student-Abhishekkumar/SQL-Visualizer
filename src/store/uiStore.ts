@@ -1,16 +1,32 @@
 import { create } from 'zustand'
+import {
+  DEFAULT_THEME,
+  REDUCED_EFFECTS_STORAGE_KEY,
+  THEME_STORAGE_KEY,
+  isThemeId,
+  themeMode,
+  type ThemeId,
+} from '../theme/themes'
 
-export type Theme = 'dark' | 'light'
+export type Theme = ThemeId
 export type WorkspaceView = 'query' | 'canvas'
 
-const THEME_STORAGE_KEY = 'sql-visualizer-theme'
-
 function readStoredTheme(): Theme {
-  if (typeof localStorage === 'undefined') return 'dark'
+  if (typeof localStorage === 'undefined') return DEFAULT_THEME
   try {
-    return localStorage.getItem(THEME_STORAGE_KEY) === 'light' ? 'light' : 'dark'
+    const stored = localStorage.getItem(THEME_STORAGE_KEY)
+    return isThemeId(stored) ? stored : DEFAULT_THEME
   } catch {
-    return 'dark'
+    return DEFAULT_THEME
+  }
+}
+
+function readStoredReducedEffects(): boolean {
+  if (typeof localStorage === 'undefined') return false
+  try {
+    return localStorage.getItem(REDUCED_EFFECTS_STORAGE_KEY) === 'true'
+  } catch {
+    return false
   }
 }
 
@@ -23,13 +39,20 @@ function persist(key: string, value: string): void {
 }
 
 /**
- * Application UI state: theme, workspace view, modal/drawer visibility.
- * Theme is persisted to localStorage. Workspace view is session-only and
- * always starts on Query; an old persisted Canvas choice is ignored.
+ * Application UI state: theme, reduced effects, workspace view and
+ * modal/drawer visibility. The theme and reduced-effects choice are
+ * persisted to localStorage. Workspace view is session-only and always
+ * starts on Query; an old persisted Canvas choice is ignored.
  */
 interface UIState {
   theme: Theme
+  setTheme: (theme: Theme) => void
+  /** Quick light/dark switch used by the navbar; keeps the current mode family. */
   toggleTheme: () => void
+
+  /** Minimise blur/glow/grid effects (Glassy, Cyberpunk). */
+  reducedEffects: boolean
+  toggleReducedEffects: () => void
 
   /**
    * Which workspace is visible. Both views stay mounted in the DOM so
@@ -56,10 +79,22 @@ interface UIState {
 
 export const useUIStore = create<UIState>()((set, get) => ({
   theme: readStoredTheme(),
+  setTheme: (theme) => {
+    if (get().theme === theme) return
+    set({ theme })
+    persist(THEME_STORAGE_KEY, theme)
+  },
   toggleTheme: () => {
-    const next = get().theme === 'dark' ? 'light' : 'dark'
+    const next: Theme = themeMode(get().theme) === 'dark' ? 'light' : 'dark'
     set({ theme: next })
     persist(THEME_STORAGE_KEY, next)
+  },
+
+  reducedEffects: readStoredReducedEffects(),
+  toggleReducedEffects: () => {
+    const next = !get().reducedEffects
+    set({ reducedEffects: next })
+    persist(REDUCED_EFFECTS_STORAGE_KEY, String(next))
   },
 
   workspaceView: 'query',

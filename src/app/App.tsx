@@ -1,15 +1,18 @@
 import { useEffect } from 'react'
-import { DatabaseZap, RefreshCw } from 'lucide-react'
+import { DatabaseZap } from 'lucide-react'
 import { ThemeProvider } from './providers/ThemeProvider'
 import { MainLayout } from '../components/layout/MainLayout'
+import { ErrorState } from '../components/common/ErrorState'
+import { AppLoadingScreen } from '../components/common/AppLoadingScreen'
 import { useDatabaseStore } from '../store/databaseStore'
 import { useHistoryStore } from '../store/historyStore'
 import { browserSqlJsConfig } from '../services/database/wasmConfig'
-import { Button } from '../components/common/Button'
 
 /**
- * Application root. Bootstraps the SQLite WASM engine and history
- * persistence, shows splash/error states, then renders the workspace.
+ * Application root. Shows the branded startup experience while SQLite
+ * initializes, the existing error state on failure, and the workspace once
+ * the engine is ready. ThemeProvider wraps every state so the loader, error
+ * screen and app all follow the selected theme.
  */
 export function App() {
   const status = useDatabaseStore((state) => state.status)
@@ -21,34 +24,23 @@ export function App() {
     void useHistoryStore.getState().loadFromStorage()
   }, [initialize])
 
-  if (status === 'error') {
-    return (
-      <div className="flex h-screen flex-col items-center justify-center gap-4 bg-bg p-6 text-center">
-        <div className="flex size-12 items-center justify-center rounded-xl bg-danger-soft text-danger">
-          <DatabaseZap className="size-6" />
-        </div>
-        <div>
-          <h1 className="text-lg font-semibold text-text-primary">
-            Failed to initialize the database
-          </h1>
-          <p className="mt-1 max-w-md text-sm text-text-secondary">
-            {initError}
-          </p>
-        </div>
-        <Button
-          variant="primary"
-          icon={<RefreshCw className="size-3.5" />}
-          onClick={() => void initialize(browserSqlJsConfig)}
-        >
-          Retry
-        </Button>
-      </div>
-    )
-  }
-
   return (
     <ThemeProvider>
-      <MainLayout />
+      {status === 'error' ? (
+        <div className="h-full bg-bg">
+          <ErrorState
+            icon={<DatabaseZap className="size-6" />}
+            title="Failed to initialize the database"
+            headingLevel={1}
+            description={initError ?? 'The database engine could not be started.'}
+            onRetry={() => void initialize(browserSqlJsConfig)}
+          />
+        </div>
+      ) : status === 'ready' ? (
+        <MainLayout />
+      ) : (
+        <AppLoadingScreen status={status} />
+      )}
     </ThemeProvider>
   )
 }

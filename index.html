@@ -9,31 +9,172 @@
       content="SQL Visualizer — an interactive SQL playground that shows you how databases really work."
     />
     <title>SQL Visualizer</title>
+    <!-- Same-origin classic script: applies the saved theme before paint and
+         remains compatible with the deployed script-src 'self' CSP. -->
+    <script src="/theme-init.js"></script>
     <style>
-      /* Prevent flash of unstyled content before the bundle loads */
+      /* Branded pre-bundle splash. Mirrors the React AppLoadingScreen so the
+         hand-off is seamless; the bundle replaces #root as soon as it mounts. */
       html,
       body {
         margin: 0;
-        background: #0a0f1e;
+        background: #080d17;
+      }
+      :root[data-theme='light'] body {
+        background: #f6f8fc;
       }
       #boot-splash {
         position: fixed;
         inset: 0;
         display: flex;
+        flex-direction: column;
         align-items: center;
         justify-content: center;
-        color: #7c8db5;
-        font-family: system-ui, sans-serif;
-        font-size: 14px;
-        letter-spacing: 0.05em;
+        gap: 22px;
+        overflow: hidden;
+        color: #8796b1;
+        font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+        text-align: center;
       }
-      #boot-splash[data-theme='light'] {
-        background: #f7f9fc;
+      .boot-glow {
+        position: absolute;
+        width: 320px;
+        height: 320px;
+        border-radius: 9999px;
+        background: radial-gradient(circle, rgba(114, 160, 255, 0.26), transparent 65%);
+        filter: blur(8px);
+        animation: boot-glow 3.2s ease-in-out infinite;
+      }
+      .boot-mark {
+        position: relative;
+        display: grid;
+        place-items: center;
+        width: 56px;
+        height: 56px;
+        border-radius: 16px;
+        color: #08111f;
+        background: linear-gradient(135deg, #72a0ff, #a78bfa, #22d3ee);
+        box-shadow: 0 12px 32px -12px rgba(114, 160, 255, 0.6);
+        animation: boot-float 2.8s ease-in-out infinite;
+      }
+      .boot-title {
+        color: #f1f5fc;
+        font-size: 18px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+      .boot-detail {
+        margin-top: 4px;
+        font-size: 13px;
+        letter-spacing: 0.01em;
+      }
+      :root[data-theme='light'] .boot-title {
+        color: #101828;
+      }
+      :root[data-theme='light'] .boot-detail {
+        color: #5f6b7a;
+      }
+      .boot-lines {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        width: 180px;
+      }
+      .boot-line {
+        height: 4px;
+        border-radius: 9999px;
+        background: linear-gradient(90deg, #72a0ff, #a78bfa, #22d3ee);
+        transform-origin: left;
+        animation: boot-line 1.8s ease-in-out infinite;
+      }
+      .boot-line:nth-child(2) {
+        width: 78%;
+        animation-delay: 0.18s;
+      }
+      .boot-line:nth-child(3) {
+        width: 56%;
+        animation-delay: 0.36s;
+      }
+      .boot-bar {
+        width: 180px;
+        height: 3px;
+        overflow: hidden;
+        border-radius: 9999px;
+        background: #27364f;
+      }
+      :root[data-theme='light'] .boot-bar {
+        background: #d8e0ec;
+      }
+      .boot-bar span {
+        display: block;
+        width: 40%;
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, transparent, #72a0ff, transparent);
+        animation: boot-bar 1.4s ease-in-out infinite;
+      }
+      @keyframes boot-glow {
+        0%, 100% { opacity: 0.55; transform: scale(0.96); }
+        50% { opacity: 0.95; transform: scale(1.04); }
+      }
+      @keyframes boot-float {
+        0%, 100% { transform: translateY(0); }
+        50% { transform: translateY(-5px); }
+      }
+      @keyframes boot-line {
+        0%, 100% { transform: scaleX(0.35); opacity: 0.45; }
+        50% { transform: scaleX(1); opacity: 1; }
+      }
+      @keyframes boot-bar {
+        0% { transform: translateX(-120%); }
+        100% { transform: translateX(320%); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .boot-glow,
+        .boot-mark,
+        .boot-line,
+        .boot-bar span {
+          animation: none !important;
+        }
+        .boot-line {
+          transform: none;
+          opacity: 0.8;
+        }
+        .boot-bar span {
+          transform: translateX(60%);
+        }
+      }
+      .reduce-effects .boot-glow {
+        display: none;
+      }
+      .reduce-effects .boot-mark {
+        box-shadow: none;
       }
     </style>
   </head>
   <body>
-    <div id="root"><div id="boot-splash">Loading SQL Visualizer…</div></div>
+    <div id="root">
+      <div id="boot-splash" role="status" aria-live="polite" aria-atomic="true">
+        <div class="boot-glow" aria-hidden="true"></div>
+        <div class="boot-mark" aria-hidden="true">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+            <path d="M3 5v14a9 3 0 0 0 18 0V5"></path>
+            <path d="M3 12a9 3 0 0 0 18 0"></path>
+          </svg>
+        </div>
+        <div>
+          <div class="boot-title">SQL Visualizer</div>
+          <div class="boot-detail">Preparing your local workspace…</div>
+        </div>
+        <div class="boot-lines" aria-hidden="true">
+          <span class="boot-line"></span>
+          <span class="boot-line"></span>
+          <span class="boot-line"></span>
+        </div>
+        <div class="boot-bar" aria-hidden="true"><span></span></div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

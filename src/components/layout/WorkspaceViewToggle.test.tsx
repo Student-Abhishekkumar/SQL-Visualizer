@@ -58,6 +58,56 @@ describe('workspace startup view', () => {
   })
 })
 
+describe('WorkspaceViewToggle accessibility', () => {
+  it('uses a roving tabindex so only the active tab is a Tab stop', () => {
+    render(<WorkspaceViewToggle />)
+    expect(screen.getByRole('tab', { name: 'Query' })).toHaveAttribute('tabindex', '0')
+    expect(screen.getByRole('tab', { name: 'Canvas' })).toHaveAttribute('tabindex', '-1')
+  })
+
+  it('wires each tab to its workspace panel', () => {
+    render(<WorkspaceViewToggle />)
+    expect(screen.getByRole('tab', { name: 'Query' })).toHaveAttribute(
+      'aria-controls',
+      'workspace-panel-query',
+    )
+    expect(screen.getByRole('tab', { name: 'Canvas' })).toHaveAttribute(
+      'aria-controls',
+      'workspace-panel-canvas',
+    )
+  })
+
+  it('moves selection and focus with the arrow keys', () => {
+    render(<WorkspaceViewToggle />)
+    const query = screen.getByRole('tab', { name: 'Query' })
+    const canvas = screen.getByRole('tab', { name: 'Canvas' })
+
+    query.focus()
+    fireEvent.keyDown(query, { key: 'ArrowRight' })
+    expect(canvas).toHaveAttribute('aria-selected', 'true')
+    expect(canvas).toHaveFocus()
+    expect(useUIStore.getState().workspaceView).toBe('canvas')
+
+    fireEvent.keyDown(canvas, { key: 'ArrowLeft' })
+    expect(query).toHaveAttribute('aria-selected', 'true')
+    expect(query).toHaveFocus()
+  })
+
+  it('wraps with Home and End', () => {
+    render(<WorkspaceViewToggle />)
+    const query = screen.getByRole('tab', { name: 'Query' })
+    const canvas = screen.getByRole('tab', { name: 'Canvas' })
+
+    fireEvent.keyDown(query, { key: 'End' })
+    expect(canvas).toHaveAttribute('aria-selected', 'true')
+    expect(canvas).toHaveFocus()
+
+    fireEvent.keyDown(canvas, { key: 'Home' })
+    expect(query).toHaveAttribute('aria-selected', 'true')
+    expect(query).toHaveFocus()
+  })
+})
+
 describe('WorkspaceViewToggle', () => {
   it('opens on Query and switches freely between Canvas and Query', () => {
     render(<WorkspaceViewToggle />)

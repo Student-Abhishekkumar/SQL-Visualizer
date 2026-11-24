@@ -7,6 +7,7 @@ import type {
   ValidationResult,
 } from '../types/visualization'
 import { getActiveDatabaseId, getLiveDatabase } from '../services/database/databaseManager'
+import { registerVisualizationReset } from './visualizationReset'
 import { simulateAndValidate } from '../services/visualization/validation'
 import {
   ROOT_BLOCK_ID,
@@ -521,3 +522,10 @@ export const useVisualizationStore = create<VisualizationState>()((set, get) => 
     scheduleNextTick(get, set, state.sessionId)
   },
 }))
+
+// The database store clears traces on a database switch through a small
+// bridge so it does not have to import this lazily-loaded store (and with
+// it the whole visualization engine) at startup.
+registerVisualizationReset(() => {
+  useVisualizationStore.getState().resetForDatabaseSwitch()
+})

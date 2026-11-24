@@ -1,21 +1,18 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { Database, Plus } from 'lucide-react'
+import { CanvasLoadingFallback } from '../visualization/CanvasLoadingFallback'
 import { Navbar } from './Navbar'
 import { Sidebar } from './Sidebar'
 import { WorkspaceViewToggle } from './WorkspaceViewToggle'
+import { EditorResultsSeparator } from './EditorResultsSeparator'
 import { SQLEditor } from '../editor/SQLEditor'
 import { EditorToolbar } from '../editor/EditorToolbar'
 import { ResultsPanel } from '../results/ResultsPanel'
 import { useEditorStore } from '../../store/editorStore'
 import { useDatabaseStore } from '../../store/databaseStore'
 import { useUIStore } from '../../store/uiStore'
-import { useVisualizationStore } from '../../store/visualizationStore'
 import { useSQLExecution } from '../../hooks/useSQLExecution'
-import { formatSQL } from '../../services/sql/sqlFormatter'
 import { splitStatements } from '../../utils/queryHelpers'
-
-const MIN_SPLIT = 20
-const MAX_SPLIT = 80
 
 /**
  * The Canvas workspace is a secondary feature and brings the animation
@@ -50,7 +47,6 @@ export function MainLayout() {
   const activeDatabaseId = useDatabaseStore((state) => state.activeDatabaseId)
   const databases = useDatabaseStore((state) => state.databases)
   const reset = useDatabaseStore((state) => state.resetDatabase)
-  const visualize = useVisualizationStore((state) => state.visualize)
   const workspaceView = useUIStore((state) => state.workspaceView)
   const setWorkspaceView = useUIStore((state) => state.setWorkspaceView)
   const toggleWorkspaceView = useUIStore((state) => state.toggleWorkspaceView)
@@ -60,7 +56,6 @@ export function MainLayout() {
   const [editorRatio, setEditorRatio] = useState(52)
   const [canvasMounted, setCanvasMounted] = useState(false)
   const mainRef = useRef<HTMLDivElement>(null)
-  const draggingRef = useRef(false)
 
   const activeDatabase = databases.find((database) => database.id === activeDatabaseId) ?? null
 
@@ -81,10 +76,24 @@ export function MainLayout() {
     void execute(content)
   }, [execute, content])
 
+  // Visualization is heavy and on demand: the store (and the whole
+  // simulation engine behind it) loads only when the user asks for it.
   const handleVisualize = useCallback(() => {
-    visualize(content, splitStatements(content))
+    const query = content
+    // Mount the workspace first so its lazy chunk starts downloading while
+    // the store module resolves.
     setWorkspaceView('canvas')
-  }, [visualize, content, setWorkspaceView])
+    void import('../../store/visualizationStore').then(({ useVisualizationStore }) => {
+      useVisualizationStore.getState().visualize(query, splitStatements(query))
+    })
+  }, [content, setWorkspaceView])
+
+  // The formatter is small but only needed on demand.
+  const handleFormat = useCallback(() => {
+    void import('../../services/sql/sqlFormatter').then(({ formatSQL }) => {
+      setContent(formatSQL(content))
+    })
+  }, [content, setContent])
 
   const handleReset = useCallback(async () => {
     try {
@@ -95,24 +104,6 @@ export function MainLayout() {
     }
   }, [reset])
 
-  const startDrag = (event: React.PointerEvent) => {
-    draggingRef.current = true
-    event.currentTarget.setPointerCapture(event.pointerId)
-  }
-
-  const onDrag = (event: React.PointerEvent) => {
-    if (!draggingRef.current || !mainRef.current) return
-    const bounds = mainRef.current.getBoundingClientRect()
-    if (bounds.height === 0) return
-    const ratio = ((event.clientY - bounds.top) / bounds.height) * 100
-    setEditorRatio(Math.min(MAX_SPLIT, Math.max(MIN_SPLIT, ratio)))
-  }
-
-  const endDrag = (event: React.PointerEvent) => {
-    draggingRef.current = false
-    event.currentTarget.releasePointerCapture(event.pointerId)
-  }
-
   const queryVisible = workspaceView === 'query'
   const canvasVisible = workspaceView === 'canvas'
 
@@ -122,9 +113,15 @@ export function MainLayout() {
   if (canvasVisible && !canvasMounted) setCanvasMounted(true)
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-bg text-text-primary">
+    <div className="app-shell flex h-full flex-col overflow-hidden bg-bg text-text-primary">
+      <a
+        href="#main-workspace"
+        className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:rounded-md focus:bg-accent focus:px-3 focus:py-1.5 focus:text-[13px] focus:font-medium focus:text-accent-ink"
+      >
+        Skip to workspace
+      </a>
       <Navbar />
-      <div className="flex min-h-0 flex-1">
+      <div id="main-workspace" tabIndex={-1} className="flex min-h-0 flex-1 outline-none">
         <Sidebar />
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <WorkspaceViewToggle />
@@ -149,18 +146,22 @@ export function MainLayout() {
           <div ref={mainRef} className="relative min-h-0 flex-1 overflow-hidden">
             {/* Query workspace — kept mounted so editor/results state survives. */}
             <div
+              id="workspace-panel-query"
+              role="tabpanel"
+              aria-labelledby="workspace-tab-query"
               aria-hidden={!queryVisible}
-              className={`absolute inset-0 flex min-h-0 flex-col overflow-hidden transition-opacity duration-200 ${
+              className={`absolute inset-0 flex min-h-0 flex-col overflow-hidden transition-opacity duration-200 motion-reduce:transition-none ${
                 queryVisible ? 'opacity-100' : 'pointer-events-none invisible opacity-0'
               }`}
             >
               <div
-                className="flex min-h-0 flex-col overflow-hidden"
+                id="query-editor-region"
+                className="flex min-h-0 flex-col"
                 style={{ height: `${editorRatio}%` }}
               >
                 <EditorToolbar
                   onRun={runQuery}
-                  onFormat={() => setContent(formatSQL(content))}
+                  onFormat={handleFormat}
                   onClear={clear}
                   onReset={handleReset}
                   onLoadExample={loadQuery}
@@ -172,17 +173,11 @@ export function MainLayout() {
                 </div>
               </div>
 
-              <div
-                role="separator"
-                aria-orientation="horizontal"
-                aria-label="Resize editor and results"
-                onPointerDown={startDrag}
-                onPointerMove={onDrag}
-                onPointerUp={endDrag}
-                className="group h-1.5 shrink-0 cursor-row-resize touch-none bg-bg transition-colors hover:bg-accent/50"
-              >
-                <div className="mx-auto h-full w-10 rounded-full" />
-              </div>
+              <EditorResultsSeparator
+                value={editorRatio}
+                onChange={setEditorRatio}
+                boundsRef={mainRef}
+              />
 
               <div className="min-h-0 flex-1 overflow-hidden">
                 <ResultsPanel result={lastResult} isExecuting={isExecuting} />
@@ -191,19 +186,16 @@ export function MainLayout() {
 
             {/* Canvas workspace — also kept mounted for pan/zoom/playback. */}
             <div
+              id="workspace-panel-canvas"
+              role="tabpanel"
+              aria-labelledby="workspace-tab-canvas"
               aria-hidden={!canvasVisible}
-              className={`absolute inset-0 flex min-h-0 flex-col overflow-hidden bg-surface transition-opacity duration-200 ${
+              className={`absolute inset-0 flex min-h-0 flex-col overflow-hidden bg-surface transition-opacity duration-200 motion-reduce:transition-none ${
                 canvasVisible ? 'opacity-100' : 'pointer-events-none invisible opacity-0'
               }`}
             >
               {canvasMounted && (
-                <Suspense
-                  fallback={
-                    <div className="flex h-full items-center justify-center text-sm text-text-muted">
-                      Loading visualization…
-                    </div>
-                  }
-                >
+                <Suspense fallback={<CanvasLoadingFallback />}>
                   <VisualizationWorkspace
                     queryName={
                       content.trim() === ''

@@ -1,4 +1,5 @@
 import { lazy, Suspense } from 'react'
+import { EditorLoadingFallback } from './EditorLoadingFallback'
 
 interface SQLEditorProps {
   value: string
@@ -16,13 +17,7 @@ const SQLEditorSurface = lazy(() => import('./SQLEditorSurface'))
 
 export function SQLEditor(props: SQLEditorProps) {
   return (
-    <Suspense
-      fallback={
-        <div className="flex h-full min-h-0 w-full items-center justify-center text-sm text-text-muted">
-          Loading editor…
-        </div>
-      }
-    >
+    <Suspense fallback={<EditorLoadingFallback />}>
       <SQLEditorSurface {...props} />
     </Suspense>
   )

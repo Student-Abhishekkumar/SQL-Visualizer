@@ -27,7 +27,7 @@ export function DatabaseExplorer() {
           Database Explorer
         </span>
         <div className="flex items-center gap-0.5">
-          <Tooltip label="Manage databases">
+          <Tooltip label="Manage databases" align="end">
             <button
               onClick={() => setManagerOpen(true)}
               aria-label="Manage databases"
@@ -36,7 +36,7 @@ export function DatabaseExplorer() {
               <Settings2 className="size-3.5" />
             </button>
           </Tooltip>
-          <Tooltip label="Refresh schema">
+          <Tooltip label="Refresh schema" align="end">
             <button
               onClick={refreshSchema}
               aria-label="Refresh database schema"

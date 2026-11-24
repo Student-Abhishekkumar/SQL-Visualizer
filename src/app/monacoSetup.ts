@@ -84,6 +84,7 @@ import 'monaco-editor/languages/definitions/sql/register.js'
 
 import { loader } from '@monaco-editor/react'
 import type { TableSchema } from '../types/database'
+import { MONACO_THEMES } from '../theme/monacoThemes'
 
 /**
  * Monaco configuration, executed once per page load.
@@ -152,64 +153,9 @@ export function setupMonaco(): void {
   if (initialized) return
   initialized = true
 
-  monaco.editor.defineTheme('sqlviz-dark', {
-    base: 'vs-dark',
-    inherit: true,
-    rules: [
-      { token: 'comment', foreground: '5b6b8f', fontStyle: 'italic' },
-      { token: 'keyword', foreground: '6ea8ff' },
-      { token: 'string', foreground: '9be2b3' },
-      { token: 'number', foreground: 'f0b269' },
-      { token: 'operator', foreground: '9fb6df' },
-      { token: 'type', foreground: 'c792ea' },
-    ],
-    colors: {
-      'editor.background': '#0d1322',
-      'editor.foreground': '#e6ebf5',
-      'editorLineNumber.foreground': '#3d4c6b',
-      'editorLineNumber.activeForeground': '#8fa8d8',
-      'editor.selectionBackground': '#24406e',
-      'editor.lineHighlightBackground': '#111a30',
-      'editorCursor.foreground': '#6ea8ff',
-      'editorIndentGuide.background': '#1b2743',
-      'editorGutter.background': '#0d1322',
-      'scrollbarSlider.background': '#22304f80',
-      'scrollbarSlider.hoverBackground': '#2c3a5c80',
-      'editorWidget.background': '#131c33',
-      'editorWidget.border': '#2c3a5c',
-      'editorSuggestWidget.background': '#131c33',
-      'editorSuggestWidget.border': '#2c3a5c',
-      'editorSuggestWidget.selectedBackground': '#22304f',
-      'editorHoverWidget.background': '#131c33',
-      'editorHoverWidget.border': '#2c3a5c',
-      'editorBracketMatch.background': '#22304f',
-      'editorBracketMatch.border': '#3d5a91',
-    },
-  })
-
-  monaco.editor.defineTheme('sqlviz-light', {
-    base: 'vs',
-    inherit: true,
-    rules: [
-      { token: 'comment', foreground: '7c8db5', fontStyle: 'italic' },
-      { token: 'keyword', foreground: '1d4ed8' },
-      { token: 'string', foreground: '047857' },
-      { token: 'number', foreground: 'b45309' },
-      { token: 'operator', foreground: '475467' },
-      { token: 'type', foreground: '7c3aed' },
-    ],
-    colors: {
-      'editor.background': '#ffffff',
-      'editor.foreground': '#101828',
-      'editorLineNumber.foreground': '#98a2b3',
-      'editorLineNumber.activeForeground': '#475467',
-      'editor.selectionBackground': '#dbe7ff',
-      'editor.lineHighlightBackground': '#f4f7fc',
-      'editorCursor.foreground': '#2563eb',
-      'editorIndentGuide.background': '#e7ecf4',
-      'editorGutter.background': '#ffffff',
-    },
-  })
+  for (const [id, definition] of Object.entries(MONACO_THEMES)) {
+    monaco.editor.defineTheme(`sqlviz-${id}`, definition)
+  }
 
   monaco.languages.registerCompletionItemProvider('sql', {
     triggerCharacters: ['.', ' '],

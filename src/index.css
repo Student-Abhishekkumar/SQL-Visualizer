@@ -1,34 +1,44 @@
-@import 'tailwindcss';
+﻿@import 'tailwindcss';
 
 @custom-variant dark (&:where(.dark, .dark *));
 
 /*
-  Design tokens — deep navy / charcoal dark theme by default with a
+  Design tokens â€” deep navy / charcoal dark theme by default with a
   light counterpart. Components reference semantic colors only.
 */
 :root {
-  --bg: #f7f9fc;
+  /* Semantic surfaces and content. */
+  --bg: #f6f8fc;
   --bg-elevated: #ffffff;
   --surface: #ffffff;
   --surface-2: #f1f4f9;
-  --surface-3: #e7ecf4;
-  --border: #dbe2ee;
-  --border-strong: #c4cfe0;
-  /* Wires need their own token: --border-strong is a hairline divider and
-     vanishes against the canvas at the fit zoom. */
-  --flow-wire: #64748b;
+  --surface-3: #e7edf6;
+  --border: #d8e0ec;
+  --border-strong: #bcc9db;
+  --separator: #e7edf5;
+  --control-border: #74839a;
   --text-primary: #101828;
   --text-secondary: #475467;
-  --text-muted: #98a2b3;
-  --accent: #2563eb;
-  --accent-hover: #1d4ed8;
+  --text-muted: #5f6b7a;
+
+  /* Brand, action and status accents. */
+  --accent: #1d4ed8;
+  --accent-hover: #1e40af;
+  --accent-ink: #ffffff;
   --accent-soft: rgba(37, 99, 235, 0.1);
-  --purple: #7c3aed;
-  --success: #059669;
-  --warning: #d97706;
-  --danger: #dc2626;
-  --danger-soft: rgba(220, 38, 38, 0.1);
-  /* Per-operation node accents (light theme): strong hue, tinted header, readable ink. */
+  --violet: #7c3aed;
+  --purple: var(--violet);
+  --cyan: #0e7490;
+  --success: #047857;
+  --warning: #92400e;
+  --danger: #b91c1c;
+  --danger-soft: rgba(185, 28, 28, 0.1);
+  --focus-ring: #2563eb;
+
+  /* Wires need more contrast than decorative panel separators. */
+  --flow-wire: #64748b;
+
+  /* Per-operation node accents (light theme). */
   --node-source: #2563eb;
   --node-source-soft: #dbeafe;
   --node-source-fg: #1e3a8a;
@@ -56,43 +66,79 @@
   --node-limit: #dc2626;
   --node-limit-soft: #fee2e2;
   --node-limit-fg: #7f1d1d;
-  --node-final: #059669;
+  --node-final: #047857;
   --node-final-soft: #d1fae5;
   --node-final-fg: #064e3b;
   --node-rejected: #dc2626;
   --node-rejected-soft: #fee2e2;
   --node-rejected-fg: #7f1d1d;
-  --scrollbar-thumb: #c4cfe0;
-  --shadow-panel: 0 1px 3px rgba(16, 24, 40, 0.08);
+
+  /* Typography and a 4px spacing rhythm. */
+  --font-app-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-app-mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+  --type-caption: 0.6875rem;
+  --type-label: 0.75rem;
+  --type-body: 0.8125rem;
+  --type-body-lg: 0.875rem;
+  --type-title: 0.9375rem;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+
+  /* Shape, elevation and motion. */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-pill: 999px;
+  --shadow-xs: 0 1px 2px rgba(16, 24, 40, 0.08);
+  --shadow-panel: 0 4px 16px -8px rgba(16, 24, 40, 0.24);
   --shadow-window:
-    0 24px 60px -18px rgba(16, 24, 40, 0.4),
-    0 4px 14px -4px rgba(16, 24, 40, 0.16);
-  --canvas-dot: rgba(100, 116, 139, 0.22);
+    0 24px 64px -20px rgba(16, 24, 40, 0.42),
+    0 4px 16px -6px rgba(16, 24, 40, 0.16);
+  --shadow-focus: 0 0 0 3px rgba(37, 99, 235, 0.22);
+  --duration-fast: 120ms;
+  --duration-normal: 160ms;
+  --duration-panel: 200ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  --scrollbar-thumb: #bcc9db;
+  --canvas-dot: rgba(100, 116, 139, 0.18);
   color-scheme: light;
 }
 
 .dark {
-  --bg: #0a0f1e;
-  --bg-elevated: #0f1629;
-  --surface: #0f1629;
-  --surface-2: #131c33;
-  --surface-3: #1a2440;
-  --border: #1e2a45;
-  --border-strong: #2c3a5c;
-  /* Dark-theme wires: brighter than the border token so every connection
-     reads as a real curve even while its stage is still pending. */
-  --flow-wire: #6f82a1;
-  --text-primary: #e6ebf5;
-  --text-secondary: #a3b1cc;
-  --text-muted: #6b7a9c;
-  --accent: #4f8cff;
-  --accent-hover: #6da2ff;
-  --accent-soft: rgba(79, 140, 255, 0.12);
-  --purple: #a78bfa;
+  --bg: #080d17;
+  --bg-elevated: #0d1422;
+  --surface: #111a2a;
+  --surface-2: #162136;
+  --surface-3: #1c2940;
+  --border: #27364f;
+  --border-strong: #3a4c6b;
+  --separator: #1b273b;
+  --control-border: #62779c;
+  --text-primary: #f1f5fc;
+  --text-secondary: #b3c0d6;
+  --text-muted: #8796b1;
+  --accent: #72a0ff;
+  --accent-hover: #8ab2ff;
+  --accent-ink: #08111f;
+  --accent-soft: rgba(114, 160, 255, 0.14);
+  --violet: #a78bfa;
+  --purple: var(--violet);
+  --cyan: #22d3ee;
   --success: #34d399;
   --warning: #fbbf24;
-  --danger: #f87171;
-  --danger-soft: rgba(248, 113, 113, 0.12);
+  --danger: #fb7185;
+  --danger-soft: rgba(251, 113, 133, 0.12);
+  --focus-ring: #7dd3fc;
+  --flow-wire: #7183a3;
   /* Per-operation node accents (dark theme): brighter hues, translucent headers. */
   --node-source: #60a5fa;
   --node-source-soft: rgba(96, 165, 250, 0.16);
@@ -127,13 +173,516 @@
   --node-rejected: #f87171;
   --node-rejected-soft: rgba(248, 113, 113, 0.15);
   --node-rejected-fg: #fecaca;
-  --scrollbar-thumb: #2c3a5c;
-  --shadow-panel: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --scrollbar-thumb: #3a4c6b;
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-panel: 0 4px 16px -8px rgba(0, 0, 0, 0.45);
   --shadow-window:
-    0 28px 70px -20px rgba(0, 0, 0, 0.8),
-    0 6px 18px -6px rgba(0, 0, 0, 0.55);
-  --canvas-dot: rgba(111, 130, 161, 0.2);
+    0 24px 64px -20px rgba(0, 0, 0, 0.75),
+    0 4px 16px -6px rgba(0, 0, 0, 0.45);
+  --shadow-focus: 0 0 0 3px rgba(125, 211, 252, 0.28);
+  --canvas-dot: rgba(113, 131, 163, 0.18);
   color-scheme: dark;
+}
+
+
+[data-theme='midnight'] {
+  --bg: #070d1a;
+  --bg-elevated: #0b1426;
+  --surface: #101b30;
+  --surface-2: #16233d;
+  --surface-3: #1d2d4a;
+  --border: #26385a;
+  --border-strong: #3a527d;
+  --separator: #1a2842;
+  --control-border: #5f7ba8;
+  --text-primary: #e8eefb;
+  --text-secondary: #b6c6e2;
+  --text-muted: #93a6c8;
+  --accent: #5eb0ff;
+  --accent-hover: #7cc0ff;
+  --accent-ink: #04101f;
+  --accent-soft: rgba(94, 176, 255, 0.14);
+  --violet: #a78bfa;
+  --purple: var(--violet);
+  --cyan: #38d6f5;
+  --success: #4ade80;
+  --warning: #fbbf24;
+  --danger: #fb7185;
+  --danger-soft: rgba(251, 113, 133, 0.12);
+  --focus-ring: #7dd3fc;
+  --flow-wire: #6f86ad;
+  --node-source: #5eb0ff;
+  --node-source-soft: rgba(94, 176, 255, 0.15);
+  --node-source-fg: #b7dbff;
+  --node-join: #a78bfa;
+  --node-join-soft: rgba(167, 139, 250, 0.15);
+  --node-join-fg: #d7cbfd;
+  --node-where: #fb923c;
+  --node-where-soft: rgba(251, 146, 60, 0.15);
+  --node-where-fg: #fdcea7;
+  --node-group: #2dd4bf;
+  --node-group-soft: rgba(45, 212, 191, 0.15);
+  --node-group-fg: #a1ece2;
+  --node-having: #fbbf24;
+  --node-having-soft: rgba(251, 191, 36, 0.15);
+  --node-having-fg: #fde29c;
+  --node-select: #4ade80;
+  --node-select-soft: rgba(74, 222, 128, 0.15);
+  --node-select-fg: #aef0c6;
+  --node-distinct: #f472b6;
+  --node-distinct-soft: rgba(244, 114, 182, 0.15);
+  --node-distinct-fg: #fac0de;
+  --node-order: #38d6f5;
+  --node-order-soft: rgba(56, 214, 245, 0.15);
+  --node-order-fg: #a5edfb;
+  --node-limit: #f87171;
+  --node-limit-soft: rgba(248, 113, 113, 0.15);
+  --node-limit-fg: #fcbfbf;
+  --node-final: #34d399;
+  --node-final-soft: rgba(52, 211, 153, 0.15);
+  --node-final-fg: #a4ebd1;
+  --node-rejected: #f87171;
+  --node-rejected-soft: rgba(248, 113, 113, 0.15);
+  --node-rejected-fg: #fcbfbf;
+  --scrollbar-thumb: #3a527d;
+  --canvas-dot: rgba(111,134,173,0.2);
+  color-scheme: dark;
+}
+
+[data-theme='dracula'] {
+  --bg: #282a36;
+  --bg-elevated: #2f313d;
+  --surface: #343746;
+  --surface-2: #3d4051;
+  --surface-3: #44475a;
+  --border: #565a75;
+  --border-strong: #6272a4;
+  --separator: #3d4051;
+  --control-border: #9aa3c7;
+  --text-primary: #f8f8f2;
+  --text-secondary: #d6d6e0;
+  --text-muted: #c9d0e6;
+  --accent: #d8b4fe;
+  --accent-hover: #e6ccff;
+  --accent-ink: #1d1330;
+  --accent-soft: rgba(216, 180, 254, 0.14);
+  --violet: #d8b4fe;
+  --purple: var(--violet);
+  --cyan: #8be9fd;
+  --success: #7cf5a0;
+  --warning: #f1fa8c;
+  --danger: #ff9b9b;
+  --danger-soft: rgba(255, 155, 155, 0.12);
+  --focus-ring: #8be9fd;
+  --flow-wire: #8b93b8;
+  --node-source: #8be9fd;
+  --node-source-soft: rgba(139, 233, 253, 0.15);
+  --node-source-fg: #cbf5fe;
+  --node-join: #bd93f9;
+  --node-join-soft: rgba(189, 147, 249, 0.15);
+  --node-join-fg: #e1cefc;
+  --node-where: #ffb86c;
+  --node-where-soft: rgba(255, 184, 108, 0.15);
+  --node-where-fg: #ffdfbd;
+  --node-group: #50fa7b;
+  --node-group-soft: rgba(80, 250, 123, 0.15);
+  --node-group-fg: #b0fdc4;
+  --node-having: #f1fa8c;
+  --node-having-soft: rgba(241, 250, 140, 0.15);
+  --node-having-fg: #f9fdcb;
+  --node-select: #50fa7b;
+  --node-select-soft: rgba(80, 250, 123, 0.15);
+  --node-select-fg: #b0fdc4;
+  --node-distinct: #ff79c6;
+  --node-distinct-soft: rgba(255, 121, 198, 0.15);
+  --node-distinct-fg: #ffc3e5;
+  --node-order: #8be9fd;
+  --node-order-soft: rgba(139, 233, 253, 0.15);
+  --node-order-fg: #cbf5fe;
+  --node-limit: #ff6b6b;
+  --node-limit-soft: rgba(255, 107, 107, 0.15);
+  --node-limit-fg: #ffbcbc;
+  --node-final: #50fa7b;
+  --node-final-soft: rgba(80, 250, 123, 0.15);
+  --node-final-fg: #b0fdc4;
+  --node-rejected: #ff6b6b;
+  --node-rejected-soft: rgba(255, 107, 107, 0.15);
+  --node-rejected-fg: #ffbcbc;
+  --scrollbar-thumb: #6272a4;
+  --canvas-dot: rgba(139,147,184,0.22);
+  color-scheme: dark;
+}
+
+[data-theme='nord'] {
+  --bg: #2e3440;
+  --bg-elevated: #333b49;
+  --surface: #343b49;
+  --surface-2: #3b4252;
+  --surface-3: #434c5e;
+  --border: #5b667d;
+  --border-strong: #748099;
+  --separator: #434c5e;
+  --control-border: #9aa7bf;
+  --text-primary: #eceff4;
+  --text-secondary: #d8dee9;
+  --text-muted: #c9d2e2;
+  --accent: #a3d3e0;
+  --accent-hover: #c0e4ee;
+  --accent-ink: #16222a;
+  --accent-soft: rgba(163, 211, 224, 0.14);
+  --violet: #d8b4d0;
+  --purple: var(--violet);
+  --cyan: #a8d8d6;
+  --success: #c8e6b0;
+  --warning: #f5e0a8;
+  --danger: #f5b0b8;
+  --danger-soft: rgba(245, 176, 184, 0.12);
+  --focus-ring: #a3d3e0;
+  --flow-wire: #9aa7bf;
+  --node-source: #81a1c1;
+  --node-source-soft: rgba(129, 161, 193, 0.15);
+  --node-source-fg: #c6d5e3;
+  --node-join: #b48ead;
+  --node-join-soft: rgba(180, 142, 173, 0.15);
+  --node-join-fg: #ddccda;
+  --node-where: #d08770;
+  --node-where-soft: rgba(208, 135, 112, 0.15);
+  --node-where-fg: #eac9bf;
+  --node-group: #8fbcbb;
+  --node-group-soft: rgba(143, 188, 187, 0.15);
+  --node-group-fg: #cde1e0;
+  --node-having: #ebcb8b;
+  --node-having-soft: rgba(235, 203, 139, 0.15);
+  --node-having-fg: #f6e8cb;
+  --node-select: #a3be8c;
+  --node-select-soft: rgba(163, 190, 140, 0.15);
+  --node-select-fg: #d6e2cb;
+  --node-distinct: #d08770;
+  --node-distinct-soft: rgba(208, 135, 112, 0.15);
+  --node-distinct-fg: #eac9bf;
+  --node-order: #88c0d0;
+  --node-order-soft: rgba(136, 192, 208, 0.15);
+  --node-order-fg: #c9e3ea;
+  --node-limit: #e06c75;
+  --node-limit-soft: rgba(224, 108, 117, 0.15);
+  --node-limit-fg: #f1bdc1;
+  --node-final: #a3be8c;
+  --node-final-soft: rgba(163, 190, 140, 0.15);
+  --node-final-fg: #d6e2cb;
+  --node-rejected: #e06c75;
+  --node-rejected-soft: rgba(224, 108, 117, 0.15);
+  --node-rejected-fg: #f1bdc1;
+  --scrollbar-thumb: #748099;
+  --canvas-dot: rgba(139,152,179,0.22);
+  color-scheme: dark;
+}
+
+[data-theme='solarized-dark'] {
+  --bg: #002b36;
+  --bg-elevated: #043039;
+  --surface: #073642;
+  --surface-2: #0a404d;
+  --surface-3: #0d4a59;
+  --border: #155e6e;
+  --border-strong: #2a7f90;
+  --separator: #0a404d;
+  --control-border: #6fb0be;
+  --text-primary: #eee8d5;
+  --text-secondary: #d6d2c2;
+  --text-muted: #c0c8c5;
+  --accent: #7cc4f0;
+  --accent-hover: #9ad4f5;
+  --accent-ink: #00212a;
+  --accent-soft: rgba(124, 196, 240, 0.14);
+  --violet: #b0b2f5;
+  --purple: var(--violet);
+  --cyan: #6fd0c7;
+  --success: #b8d45a;
+  --warning: #f0c860;
+  --danger: #f0a0a8;
+  --danger-soft: rgba(240, 160, 168, 0.12);
+  --focus-ring: #7cc4f0;
+  --flow-wire: #6fb0be;
+  --node-source: #4aa8e0;
+  --node-source-soft: rgba(74, 168, 224, 0.15);
+  --node-source-fg: #aed8f1;
+  --node-join: #8a8fe0;
+  --node-join-soft: rgba(138, 143, 224, 0.15);
+  --node-join-fg: #cacdf1;
+  --node-where: #e08a4a;
+  --node-where-soft: rgba(224, 138, 74, 0.15);
+  --node-where-fg: #f1caae;
+  --node-group: #3fb8af;
+  --node-group-soft: rgba(63, 184, 175, 0.15);
+  --node-group-fg: #a9dfdb;
+  --node-having: #d9a72e;
+  --node-having-soft: rgba(217, 167, 46, 0.15);
+  --node-having-fg: #eed7a1;
+  --node-select: #8caa3a;
+  --node-select-soft: rgba(140, 170, 58, 0.15);
+  --node-select-fg: #cbd9a6;
+  --node-distinct: #d96a9a;
+  --node-distinct-soft: rgba(217, 106, 154, 0.15);
+  --node-distinct-fg: #eebcd2;
+  --node-order: #3fb8af;
+  --node-order-soft: rgba(63, 184, 175, 0.15);
+  --node-order-fg: #a9dfdb;
+  --node-limit: #e06c75;
+  --node-limit-soft: rgba(224, 108, 117, 0.15);
+  --node-limit-fg: #f1bdc1;
+  --node-final: #8caa3a;
+  --node-final-soft: rgba(140, 170, 58, 0.15);
+  --node-final-fg: #cbd9a6;
+  --node-rejected: #e06c75;
+  --node-rejected-soft: rgba(224, 108, 117, 0.15);
+  --node-rejected-fg: #f1bdc1;
+  --scrollbar-thumb: #2a7f90;
+  --canvas-dot: rgba(79,154,168,0.24);
+  color-scheme: dark;
+}
+
+[data-theme='glassy'] {
+  --bg: rgba(9, 14, 26, 0.62);
+  --bg-elevated: rgba(18, 27, 45, 0.66);
+  --surface: rgba(255, 255, 255, 0.07);
+  --surface-2: rgba(255, 255, 255, 0.1);
+  --surface-3: rgba(255, 255, 255, 0.14);
+  --border: rgba(255, 255, 255, 0.16);
+  --border-strong: rgba(255, 255, 255, 0.28);
+  --separator: rgba(255, 255, 255, 0.1);
+  --control-border: rgba(255, 255, 255, 0.55);
+  --text-primary: #f4f8ff;
+  --text-secondary: #cfdaea;
+  --text-muted: #aab9cf;
+  --accent: #67e8f9;
+  --accent-hover: #9cf0fb;
+  --accent-ink: #04141a;
+  --accent-soft: rgba(103, 232, 249, 0.14);
+  --violet: #c4b5fd;
+  --purple: var(--violet);
+  --cyan: #67e8f9;
+  --success: #6ee7b7;
+  --warning: #fcd34d;
+  --danger: #fda4af;
+  --danger-soft: rgba(253, 164, 175, 0.12);
+  --focus-ring: #a5f3fc;
+  --flow-wire: #9fb3cc;
+  --node-source: #7dd3fc;
+  --node-source-soft: rgba(125, 211, 252, 0.15);
+  --node-source-fg: #c5ebfe;
+  --node-join: #c4b5fd;
+  --node-join-soft: rgba(196, 181, 253, 0.15);
+  --node-join-fg: #e4defe;
+  --node-where: #fdba74;
+  --node-where-soft: rgba(253, 186, 116, 0.15);
+  --node-where-fg: #fee0c0;
+  --node-group: #5eead4;
+  --node-group-soft: rgba(94, 234, 212, 0.15);
+  --node-group-fg: #b7f6ec;
+  --node-having: #fcd34d;
+  --node-having-soft: rgba(252, 211, 77, 0.15);
+  --node-having-fg: #feebaf;
+  --node-select: #86efac;
+  --node-select-soft: rgba(134, 239, 172, 0.15);
+  --node-select-fg: #c9f8da;
+  --node-distinct: #f9a8d4;
+  --node-distinct-soft: rgba(249, 168, 212, 0.15);
+  --node-distinct-fg: #fcd8ec;
+  --node-order: #67e8f9;
+  --node-order-soft: rgba(103, 232, 249, 0.15);
+  --node-order-fg: #bbf5fc;
+  --node-limit: #fda4af;
+  --node-limit-soft: rgba(253, 164, 175, 0.15);
+  --node-limit-fg: #fed6db;
+  --node-final: #6ee7b7;
+  --node-final-soft: rgba(110, 231, 183, 0.15);
+  --node-final-fg: #bef4df;
+  --node-rejected: #fda4af;
+  --node-rejected-soft: rgba(253, 164, 175, 0.15);
+  --node-rejected-fg: #fed6db;
+  --scrollbar-thumb: rgba(255, 255, 255, 0.28);
+  --canvas-dot: rgba(159,179,204,0.22);
+  color-scheme: dark;
+}
+
+[data-theme='bloody'] {
+  --bg: #0a0505;
+  --bg-elevated: #120808;
+  --surface: #180b0b;
+  --surface-2: #200e0e;
+  --surface-3: #2a1212;
+  --border: #3f1a1a;
+  --border-strong: #5e2626;
+  --separator: #200e0e;
+  --control-border: #b06a6a;
+  --text-primary: #f7e9e9;
+  --text-secondary: #d9bfbf;
+  --text-muted: #c9a9a9;
+  --accent: #ef4444;
+  --accent-hover: #f87171;
+  --accent-ink: #1a0404;
+  --accent-soft: rgba(239, 68, 68, 0.14);
+  --violet: #f87171;
+  --purple: var(--violet);
+  --cyan: #f87171;
+  --success: #f0a0a0;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  --danger-soft: rgba(239, 68, 68, 0.12);
+  --focus-ring: #fca5a5;
+  --flow-wire: #b06a6a;
+  --node-source: #ef4444;
+  --node-source-soft: rgba(239, 68, 68, 0.15);
+  --node-source-fg: #f8abab;
+  --node-join: #b91c1c;
+  --node-join-soft: rgba(185, 28, 28, 0.15);
+  --node-join-fg: #e09999;
+  --node-where: #f97316;
+  --node-where-soft: rgba(249, 115, 22, 0.15);
+  --node-where-fg: #fcc096;
+  --node-group: #991b1b;
+  --node-group-soft: rgba(153, 27, 27, 0.15);
+  --node-group-fg: #d19898;
+  --node-having: #f59e0b;
+  --node-having-soft: rgba(245, 158, 11, 0.15);
+  --node-having-fg: #fbd391;
+  --node-select: #e11d48;
+  --node-select-soft: rgba(225, 29, 72, 0.15);
+  --node-select-fg: #f299ad;
+  --node-distinct: #fb7185;
+  --node-distinct-soft: rgba(251, 113, 133, 0.15);
+  --node-distinct-fg: #fdbfc8;
+  --node-order: #f87171;
+  --node-order-soft: rgba(248, 113, 113, 0.15);
+  --node-order-fg: #fcbfbf;
+  --node-limit: #991b1b;
+  --node-limit-soft: rgba(153, 27, 27, 0.15);
+  --node-limit-fg: #d19898;
+  --node-final: #dc2626;
+  --node-final-soft: rgba(220, 38, 38, 0.15);
+  --node-final-fg: #ef9d9d;
+  --node-rejected: #7f1d1d;
+  --node-rejected-soft: rgba(127, 29, 29, 0.15);
+  --node-rejected-fg: #c59999;
+  --scrollbar-thumb: #5e2626;
+  --canvas-dot: rgba(138,74,74,0.22);
+  color-scheme: dark;
+}
+
+[data-theme='cyberpunk'] {
+  --bg: #05010f;
+  --bg-elevated: #0a0518;
+  --surface: #0e0720;
+  --surface-2: #140b2a;
+  --surface-3: #1b0f36;
+  --border: #2c1454;
+  --border-strong: #4a2385;
+  --separator: #140b2a;
+  --control-border: #7c4dbb;
+  --text-primary: #f3ecff;
+  --text-secondary: #d3c6ea;
+  --text-muted: #ad9bcc;
+  --accent: #22d3ee;
+  --accent-hover: #67e8f9;
+  --accent-ink: #041016;
+  --accent-soft: rgba(34, 211, 238, 0.14);
+  --violet: #a855f7;
+  --purple: var(--violet);
+  --cyan: #22d3ee;
+  --success: #39ff88;
+  --warning: #fbbf24;
+  --danger: #ff2d95;
+  --danger-soft: rgba(255, 45, 149, 0.12);
+  --focus-ring: #67e8f9;
+  --flow-wire: #7c4dbb;
+  --node-source: #22d3ee;
+  --node-source-soft: rgba(34, 211, 238, 0.15);
+  --node-source-fg: #9cebf7;
+  --node-join: #a855f7;
+  --node-join-soft: rgba(168, 85, 247, 0.15);
+  --node-join-fg: #d8b3fb;
+  --node-where: #ff2d95;
+  --node-where-soft: rgba(255, 45, 149, 0.15);
+  --node-where-fg: #ffa1cf;
+  --node-group: #39ff88;
+  --node-group-soft: rgba(57, 255, 136, 0.15);
+  --node-group-fg: #a6ffc9;
+  --node-having: #fbbf24;
+  --node-having-soft: rgba(251, 191, 36, 0.15);
+  --node-having-fg: #fde29c;
+  --node-select: #39ff88;
+  --node-select-soft: rgba(57, 255, 136, 0.15);
+  --node-select-fg: #a6ffc9;
+  --node-distinct: #ff2d95;
+  --node-distinct-soft: rgba(255, 45, 149, 0.15);
+  --node-distinct-fg: #ffa1cf;
+  --node-order: #22d3ee;
+  --node-order-soft: rgba(34, 211, 238, 0.15);
+  --node-order-fg: #9cebf7;
+  --node-limit: #ff2d95;
+  --node-limit-soft: rgba(255, 45, 149, 0.15);
+  --node-limit-fg: #ffa1cf;
+  --node-final: #39ff88;
+  --node-final-soft: rgba(57, 255, 136, 0.15);
+  --node-final-fg: #a6ffc9;
+  --node-rejected: #ff2d95;
+  --node-rejected-soft: rgba(255, 45, 149, 0.15);
+  --node-rejected-fg: #ffa1cf;
+  --scrollbar-thumb: #4a2385;
+  --canvas-dot: rgba(124,77,187,0.26);
+  color-scheme: dark;
+}
+
+
+/*
+  Theme-specific surfaces. Kept deliberately restrained: Glassy layers
+  translucent panels over a gradient, Cyberpunk adds a faint grid and a
+  static glow on active controls. Both honour the reduced-effects switch.
+*/
+[data-theme='glassy'] body {
+  background:
+    radial-gradient(1100px 560px at 12% -8%, rgba(56, 189, 248, 0.16), transparent 60%),
+    radial-gradient(900px 520px at 108% 8%, rgba(168, 85, 247, 0.14), transparent 55%),
+    linear-gradient(160deg, #0b1220 0%, #0a1020 48%, #0b1426 100%);
+  background-attachment: fixed;
+}
+
+[data-theme='glassy'] .glass-surface {
+  backdrop-filter: blur(16px) saturate(1.12);
+  -webkit-backdrop-filter: blur(16px) saturate(1.12);
+}
+
+[data-theme='cyberpunk'] .app-shell {
+  background-color: #05010f;
+  background-image:
+    linear-gradient(rgba(34, 211, 238, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 211, 238, 0.055) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+[data-theme='cyberpunk'] .bg-accent {
+  box-shadow: 0 0 14px rgba(34, 211, 238, 0.32);
+}
+
+[data-theme='cyberpunk'] .flow-node[data-selected='true'] {
+  box-shadow:
+    0 0 0 2px rgba(34, 211, 238, 0.55),
+    0 0 22px rgba(34, 211, 238, 0.42);
+}
+
+/* Reduced-effects switch: disable blur, grid and glow without changing colours. */
+[data-theme='glassy'].reduce-effects .glass-surface {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+[data-theme='cyberpunk'].reduce-effects .app-shell {
+  background-image: none;
+}
+
+[data-theme='cyberpunk'].reduce-effects .bg-accent,
+[data-theme='cyberpunk'].reduce-effects .flow-node[data-selected='true'] {
+box-shadow: none;
 }
 
 @theme inline {
@@ -149,33 +698,80 @@
   --color-text-muted: var(--text-muted);
   --color-accent: var(--accent);
   --color-accent-hover: var(--accent-hover);
+  --color-accent-ink: var(--accent-ink);
   --color-accent-soft: var(--accent-soft);
+  --color-violet: var(--violet);
   --color-purple: var(--purple);
+  --color-cyan: var(--cyan);
+  --color-focus-ring: var(--focus-ring);
+  --color-separator: var(--separator);
+  --color-control-border: var(--control-border);
   --color-success: var(--success);
   --color-warning: var(--warning);
   --color-danger: var(--danger);
   --color-danger-soft: var(--danger-soft);
-  --font-mono:
-    ui-monospace, 'Cascadia Code', 'JetBrains Mono', Menlo, Consolas, monospace;
+  --font-sans: var(--font-app-sans);
+  --font-mono: var(--font-app-mono);
+  --shadow-xs: var(--shadow-xs);
   --shadow-panel: var(--shadow-panel);
+  --shadow-window: var(--shadow-window);
 }
 
-html,
-body,
+html {
+  height: 100%;
+}
+
+/*
+  Use the dynamic viewport height where supported so a mobile browser's
+  address bar expanding or collapsing never hides the workspace. The 100vh
+  declaration above 100dvh is the fallback for older browsers.
+*/
+body {
+  height: 100vh;
+  height: 100dvh;
+  margin: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: var(--font-app-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
 #root {
   height: 100%;
 }
 
-body {
-  background: var(--bg);
+/* Dialogs stay inside the visible viewport on mobile browsers. */
+.modal-panel {
+  max-height: 85vh;
+  max-height: 85dvh;
+}
+
+::selection {
+  background: var(--accent-soft);
   color: var(--text-primary);
-  font-family:
-    system-ui,
-    -apple-system,
-    'Segoe UI',
-    Roboto,
-    sans-serif;
-  -webkit-font-smoothing: antialiased;
+}
+
+:where(button, a[href], input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Keep status changes immediate and non-decorative for reduced-motion users. */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 /* Slim, theme-aware scrollbars */
@@ -216,8 +812,8 @@ body {
   The panel stays mounted while closed to preserve scroll/learning state.
 
   `overflow: clip` (not `hidden`) is deliberate: a hidden-overflow box is
-  still a scroll container, so the browser could scroll it — for example
-  to reveal an absolutely-positioned tooltip label or a focused control —
+  still a scroll container, so the browser could scroll it â€” for example
+  to reveal an absolutely-positioned tooltip label or a focused control â€”
   and leave the whole panel permanently shifted with its left edge
   clipped. Clipping makes the shell unscrollable; only the content area
   scrolls.
@@ -263,6 +859,80 @@ body {
     width: 20rem;
     border-left-width: 1px;
     opacity: 1;
+  }
+}
+
+/*
+  Mobile navigation drawer. The panel and backdrop animate on both open and
+  close; the element stays mounted for the exit duration so the transition
+  is visible. Reduced-motion users get the end state immediately.
+*/
+.drawer-panel-open {
+  animation: drawer-panel-in 200ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.drawer-panel-closed {
+  animation: drawer-panel-out 180ms ease-in forwards;
+}
+
+.drawer-backdrop-open {
+  animation: drawer-backdrop-in 180ms ease-out;
+}
+
+.drawer-backdrop-closed {
+  animation: drawer-backdrop-out 180ms ease-in forwards;
+}
+
+@keyframes drawer-panel-in {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes drawer-panel-out {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-100%);
+  }
+}
+
+@keyframes drawer-backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes drawer-backdrop-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer-panel-open,
+  .drawer-panel-closed,
+  .drawer-backdrop-open,
+  .drawer-backdrop-closed {
+    animation: none !important;
+  }
+
+  .drawer-panel-closed {
+    transform: translateX(-100%);
+  }
+
+  .drawer-backdrop-closed {
+    opacity: 0;
   }
 }
 
@@ -359,7 +1029,7 @@ body {
 }
 
 /*
-  Flow-canvas node design — compact, tactile modules inspired by visual
+  Flow-canvas node design â€” compact, tactile modules inspired by visual
   programming editors. Every colour comes from the per-operation tokens
   above, so light/dark contrast is handled in one place.
 */
@@ -388,7 +1058,11 @@ body {
     top 180ms ease,
     height 180ms ease;
   animation: flow-node-in 220ms ease-out;
-  will-change: transform;
+  /* No permanent `will-change: transform` here. Promoting every node to
+     its own compositor layer makes the browser rasterise it once at its
+     layout size and then scale that texture, which visibly softens node
+     text at any zoom other than 100%. Promotion is enabled only while a
+     node is actually being dragged (below). */
 }
 
 .dark .flow-node {
@@ -1034,6 +1708,8 @@ body {
   cursor: grabbing;
   transform: none;
   transition: none;
+  /* Promote only the node under the pointer while it moves. */
+  will-change: transform;
   border-color: var(--flow-accent);
   box-shadow:
     inset 0 1px 0 color-mix(in srgb, #fff 55%, transparent),
@@ -1144,7 +1820,230 @@ body {
   .flow-edge-active {
     animation: none;
   }
-  .flow-edge > path {
+.flow-edge > path {
     transition: none;
+  }
+}
+
+/*
+  Application loading experience. Shared visual language for the React
+  startup screen; colours come from semantic tokens so every theme works.
+*/
+.app-loader {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.app-loader__glow {
+  position: absolute;
+  width: 320px;
+  height: 320px;
+  border-radius: 9999px;
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--accent) 26%, transparent),
+    transparent 65%
+  );
+  filter: blur(8px);
+  animation: app-loader-glow 3.2s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.app-loader__mark {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  color: var(--accent-ink);
+  background: linear-gradient(135deg, var(--accent), var(--violet), var(--cyan));
+  box-shadow: 0 12px 32px -12px color-mix(in srgb, var(--accent) 60%, transparent);
+  animation: app-loader-float 2.8s ease-in-out infinite;
+}
+
+.app-loader__lines {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 180px;
+}
+
+.app-loader__line {
+  height: 4px;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, var(--accent), var(--violet), var(--cyan));
+  transform-origin: left;
+  animation: app-loader-line 1.8s ease-in-out infinite;
+}
+
+.app-loader__line:nth-child(2) {
+  width: 78%;
+  animation-delay: 0.18s;
+}
+
+.app-loader__line:nth-child(3) {
+  width: 56%;
+  animation-delay: 0.36s;
+}
+
+.app-loader__bar {
+  width: 180px;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 9999px;
+  background: var(--surface-3);
+}
+
+.app-loader__bar span {
+  display: block;
+  width: 40%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: app-loader-bar 1.4s ease-in-out infinite;
+}
+
+@keyframes app-loader-glow {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(0.96);
+  }
+  50% {
+    opacity: 0.95;
+    transform: scale(1.04);
+  }
+}
+
+@keyframes app-loader-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-5px);
+  }
+}
+
+@keyframes app-loader-line {
+  0%,
+  100% {
+    transform: scaleX(0.35);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+}
+
+@keyframes app-loader-bar {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
+}
+
+/* Lazy boundaries stay invisible for a beat so fast loads never flash. */
+.lazy-fade {
+  animation: lazy-fade 180ms 120ms both;
+}
+
+@keyframes lazy-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* The real workspace eases in after the loading screen. Opacity only, so
+   fixed-position descendants (drawer, dialogs, dropdowns) keep working. */
+.app-shell {
+  animation: app-shell-in 220ms ease-out;
+}
+
+@keyframes app-shell-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+[data-theme='cyberpunk'] .app-loader {
+  background-image:
+    linear-gradient(rgba(34, 211, 238, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 211, 238, 0.05) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+[data-theme='cyberpunk'] .app-loader__mark {
+  box-shadow: 0 0 24px rgba(34, 211, 238, 0.45);
+}
+
+[data-theme='bloody'] .app-loader__mark {
+  box-shadow: 0 12px 32px -12px rgba(239, 68, 68, 0.5);
+}
+
+[data-theme='glassy'] .app-loader__mark {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 72%, transparent),
+    color-mix(in srgb, var(--violet) 72%, transparent),
+    color-mix(in srgb, var(--cyan) 72%, transparent)
+  );
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+[data-theme='cyberpunk'].reduce-effects .app-loader {
+  background-image: none;
+}
+
+[data-theme='cyberpunk'].reduce-effects .app-loader__mark {
+  box-shadow: none;
+}
+
+[data-theme='glassy'].reduce-effects .app-loader__mark {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.reduce-effects .app-loader__glow {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-loader__glow,
+  .app-loader__mark,
+  .app-loader__line,
+  .app-loader__bar span,
+  .app-shell,
+  .lazy-fade {
+    animation: none !important;
+  }
+
+  .app-loader__glow {
+    opacity: 0.7;
+  }
+
+  .app-loader__line {
+    transform: none;
+    opacity: 0.8;
+  }
+
+  .app-loader__bar span {
+    transform: translateX(60%);
+  }
+
+  .lazy-fade {
+    opacity: 1;
   }
 }

@@ -58,14 +58,14 @@ export function DatabaseSelector() {
   }
 
   return (
-    <div className="relative min-w-0" ref={containerRef}>
+    <div className="relative w-full min-w-0 sm:w-auto" ref={containerRef}>
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label="Select database"
-        className="flex max-w-[190px] items-center gap-2 rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 text-left transition-colors hover:border-border-strong sm:max-w-[260px]"
+        className="flex min-h-11 w-full min-w-0 items-center gap-2 rounded-lg border border-border bg-surface-2 px-2.5 py-2 text-left transition-colors hover:border-control-border sm:min-h-0 sm:max-w-[260px] sm:py-1.5"
       >
         <Database className="size-3.5 shrink-0 text-accent" aria-hidden />
         <span className="min-w-0 flex-1">
@@ -83,7 +83,7 @@ export function DatabaseSelector() {
       </button>
 
       {open && (
-        <div className="absolute left-0 top-full z-50 mt-1 w-80 max-w-[calc(100vw-2rem)] overflow-hidden rounded-lg border border-border bg-bg-elevated shadow-2xl">
+        <div className="fixed inset-x-2 top-15 z-50 mt-1 overflow-hidden rounded-lg border border-border bg-bg-elevated shadow-window sm:absolute sm:inset-auto sm:left-0 sm:top-full sm:w-80 sm:max-w-[calc(100vw-2rem)]">
           <div className="flex items-center justify-between border-b border-border px-3 py-2">
             <span className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">
               Databases
@@ -116,7 +116,7 @@ export function DatabaseSelector() {
                   >
                     <span
                       className={`flex size-5 shrink-0 items-center justify-center rounded ${
-                        isActive ? 'bg-accent text-white' : 'bg-surface-3 text-text-muted'
+                        isActive ? 'bg-accent text-accent-ink' : 'bg-surface-3 text-text-muted'
                       }`}
                       aria-hidden
                     >

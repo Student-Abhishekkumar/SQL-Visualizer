@@ -69,13 +69,7 @@ function normalizeTypeKeyword(keyword: string): StatementType {
 }
 
 /** Statement types that change data or schema (relevant for persistence). */
-const MUTATING_TYPES: ReadonlySet<StatementType> = new Set([
-  'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'DROP', 'ALTER', 'REPLACE', 'VACUUM',
-])
-
-export function isMutatingStatementType(type: StatementType): boolean {
-  return MUTATING_TYPES.has(type)
-}
+export { isMutatingStatementType } from './statementTypes'
 
 /**
  * Table names referenced in a statement via FROM/JOIN clauses.

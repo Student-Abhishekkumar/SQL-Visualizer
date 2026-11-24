@@ -266,8 +266,18 @@ async function checkpointA(page, report) {
   check('A', 'sidebar renders table names', ['employees', 'departments', 'projects'].every((name) => sidebarText.includes(name)))
 
   // Editor accepts real keyboard input (not just store injection).
+  // Monaco is lazy-loaded behind Suspense. Wait for the real editor rather
+  // than assuming the database-ready state also means its chunk has loaded.
   await page.evaluate(`window.__sqlviz.setView('query')`)
-  await sleep(200)
+  await page.waitFor(
+    `(() => {
+      const editor = document.querySelector('.monaco-editor .view-lines, textarea.ime-text-area, textarea.inputarea')
+      if (editor === null) return false
+      const rect = editor.getBoundingClientRect()
+      return rect.width > 0 && rect.height > 0
+    })()`,
+    { label: 'Monaco editor ready', timeout: 60_000 },
+  )
   const editor = (await page.rect('.monaco-editor .view-lines')) ?? (await page.rect('textarea.ime-text-area')) ?? (await page.rect('textarea.inputarea'))
   if (editor !== null) {
     await page.evaluate(`window.__sqlviz.setEditor('')`)
@@ -979,7 +989,11 @@ async function checkpointD(page, report) {
   )
 
   // A tiny movement is still a click, not a drag.
-  const clickTarget = afterNodeDrag.nodes.find((node) => node.kind === 'operation' && node.id !== dragTarget.id) ?? moved
+  // Re-read the target after the negative-coordinate drag and camera reset;
+  // its earlier screen rectangle is no longer a valid hit target.
+  const clickTargetId = (afterNodeDrag.nodes.find((node) => node.kind === 'operation' && node.id !== dragTarget.id) ?? moved).id
+  const clickTarget = findNode(resetNodes, clickTargetId)
+  if (clickTarget === undefined) throw new Error(`Click target disappeared: ${clickTargetId}`)
   const beforeClickPosition = centerOf(clickTarget)
   await page.drag(beforeClickPosition, { x: beforeClickPosition.x + 2, y: beforeClickPosition.y + 1 }, { steps: 2 })
   await sleep(250)
@@ -1079,11 +1093,13 @@ async function checkpointD(page, report) {
     check('D', 'inspector can be resized from its corner', false, 'resize handle missing')
   }
 
-  // Dragging back down must also follow the pointer.
+  // Dragging back down must follow the pointer vertically. Horizontal travel
+  // depends on the actual space remaining before the workspace's right bound.
   const headerAgain = await page.rect('[data-testid="node-inspector-header"]')
   const beforeDownDrag = await page.evaluate(`(() => {
     const rect = document.querySelector('[role="dialog"][aria-label="Node inspector"]').getBoundingClientRect()
-    return { x: rect.x, y: rect.y }
+    const layer = document.querySelector('[data-inspector-layer]').getBoundingClientRect()
+    return { x: rect.x, y: rect.y, availableRight: Math.max(0, layer.right - rect.right) }
   })()`)
   await page.drag({ x: headerAgain.x, y: headerAgain.y }, { x: headerAgain.x + 60, y: headerAgain.y + 50 })
   await sleep(250)
@@ -1091,11 +1107,12 @@ async function checkpointD(page, report) {
     const rect = document.querySelector('[role="dialog"][aria-label="Node inspector"]').getBoundingClientRect()
     return { x: rect.x, y: rect.y }
   })()`)
+  const expectedRightTravel = Math.min(60, beforeDownDrag.availableRight)
   check(
     'D',
     'inspector follows the pointer within its bounds',
-    Math.abs(afterDownDrag.x - beforeDownDrag.x - 60) < 14 && Math.abs(afterDownDrag.y - beforeDownDrag.y - 50) < 14,
-    `Δ(${Math.round(afterDownDrag.x - beforeDownDrag.x)}, ${Math.round(afterDownDrag.y - beforeDownDrag.y)})`,
+    Math.abs(afterDownDrag.x - beforeDownDrag.x - expectedRightTravel) < 2 && Math.abs(afterDownDrag.y - beforeDownDrag.y - 50) < 14,
+    `Δ(${Math.round(afterDownDrag.x - beforeDownDrag.x)}, ${Math.round(afterDownDrag.y - beforeDownDrag.y)}) expected Δx=${Math.round(expectedRightTravel)}`,
   )
 
   // The inspector must not follow Canvas panning.

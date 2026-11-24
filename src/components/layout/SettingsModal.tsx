@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Modal } from '../common/Modal'
 import { Button } from '../common/Button'
+import { ThemeSelector } from './ThemeSelector'
 import { TriangleAlert } from 'lucide-react'
 import { useUIStore } from '../../store/uiStore'
 import { useDatabaseStore } from '../../store/databaseStore'
@@ -13,8 +14,8 @@ interface SettingsModalProps {
 
 /** Settings: theme, database reset, history maintenance, engine info. */
 export function SettingsModal({ open }: SettingsModalProps) {
-  const theme = useUIStore((state) => state.theme)
-  const toggleTheme = useUIStore((state) => state.toggleTheme)
+  const reducedEffects = useUIStore((state) => state.reducedEffects)
+  const toggleReducedEffects = useUIStore((state) => state.toggleReducedEffects)
   const setSettingsOpen = useUIStore((state) => state.setSettingsOpen)
   const [confirmReset, setConfirmReset] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
@@ -64,22 +65,24 @@ export function SettingsModal({ open }: SettingsModalProps) {
           <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
             Appearance
           </h3>
-          <div className="flex gap-2">
-            {(['dark', 'light'] as const).map((option) => (
-              <button
-                key={option}
-                onClick={() => {
-                  if (theme !== option) toggleTheme()
-                }}
-                className={`flex-1 rounded-lg border px-3 py-2 text-sm capitalize transition-colors ${
-                  theme === option
-                    ? 'border-accent bg-accent-soft text-text-primary'
-                    : 'border-border text-text-secondary hover:border-border-strong'
-                }`}
-              >
-                {option}
-              </button>
-            ))}
+          <div>
+            <ThemeSelector />
+            <label className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-border bg-surface-2 px-3 py-2">
+              <span className="min-w-0">
+                <span className="block text-[13px] font-medium text-text-primary">
+                  Reduced effects
+                </span>
+                <span className="block text-[11px] text-text-muted">
+                  Minimise blur, grid and glow (Glassy, Cyberpunk).
+                </span>
+              </span>
+              <input
+                type="checkbox"
+                checked={reducedEffects}
+                onChange={toggleReducedEffects}
+                className="size-4 shrink-0 accent-[var(--accent)]"
+              />
+            </label>
           </div>
         </section>
 

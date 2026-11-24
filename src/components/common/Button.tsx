@@ -9,11 +9,13 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   size?: ButtonSize
   icon?: ReactNode
   loading?: boolean
+  /** Screen-reader announcement while the operation is pending. */
+  loadingLabel?: string
 }
 
 const variantClasses: Record<ButtonVariant, string> = {
   primary:
-    'bg-accent text-white hover:bg-accent-hover shadow-sm disabled:hover:bg-accent',
+    'bg-accent text-accent-ink hover:bg-accent-hover shadow-xs disabled:hover:bg-accent',
   secondary:
     'bg-surface-3 text-text-primary border border-border hover:border-border-strong hover:bg-surface-2',
   ghost:
@@ -33,6 +35,7 @@ export function Button({
   size = 'md',
   icon,
   loading = false,
+  loadingLabel = 'Loading',
   disabled,
   className = '',
   children,
@@ -40,16 +43,18 @@ export function Button({
 }: ButtonProps) {
   return (
     <button
-      className={`inline-flex select-none items-center justify-center whitespace-nowrap font-medium transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50 ${variantClasses[variant]} ${sizeClasses[size]} ${className}`}
-      disabled={disabled || loading}
       {...rest}
+      className={`inline-flex select-none items-center justify-center whitespace-nowrap font-medium transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-50 ${variantClasses[variant]} ${sizeClasses[size]} ${className}`}
+      disabled={disabled || loading}
+      aria-busy={loading || undefined}
     >
       {loading ? (
-        <Loader2 className="size-3.5 animate-spin" aria-hidden />
+        <Loader2 className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
       ) : (
         icon
       )}
       {children}
+      {loading && <span className="sr-only" role="status">{loadingLabel}</span>}
     </button>
   )
 }

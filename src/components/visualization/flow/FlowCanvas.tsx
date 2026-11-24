@@ -42,6 +42,20 @@ import {
 const MIN_ZOOM = 0.22
 const MAX_ZOOM = 2.2
 const ZOOM_STEP = 1.2
+/**
+ * Floor for the first camera on a narrow (phone) viewport. A whole wide
+ * pipeline fitted into 320-430 px shrinks node labels below legibility, so
+ * the initial mobile view opens at a readable scale and the user pans.
+ */
+const MOBILE_INITIAL_MIN_ZOOM = 0.62
+/** Viewport width below which the mobile camera floor applies. */
+const MOBILE_VIEWPORT_MAX = 640
+/**
+ * A resize into this width also re-applies the readable floor. Kept below
+ * MOBILE_VIEWPORT_MAX so a small desktop window still refits to show the
+ * whole graph, while a real phone gets a legible view.
+ */
+const MOBILE_RESIZE_FLOOR_MAX = 480
 const PACKETS_PER_EDGE = 3
 /**
  * Pointer travel (px) that still counts as a click rather than a drag.
@@ -166,6 +180,8 @@ interface FlowCanvasProps {
    */
   focusStageKey?: string | null
   onSelectNode: (node: FlowGraphNode) => void
+  /** Clear the current selection (tap on empty canvas, Escape). */
+  onDeselectNode?: () => void
 }
 
 export function FlowCanvas({
@@ -177,6 +193,7 @@ export function FlowCanvas({
   following = false,
   focusStageKey = null,
   onSelectNode,
+  onDeselectNode,
 }: FlowCanvasProps) {
   const reducedMotion = useReducedMotion()
   const containerRef = useRef<HTMLDivElement>(null)
@@ -225,6 +242,23 @@ export function FlowCanvas({
     panX: number
     panY: number
   } | null>(null)
+  /**
+   * Active touch pointers, keyed by pointer id. Two or more pointers mean
+   * a gesture (pinch zoom + two-finger pan) owns the camera until every
+   * finger lifts. Kept in a ref so gesture maths never re-renders.
+   */
+  const pointersRef = useRef(new Map<number, { x: number; y: number }>())
+  const gestureRef = useRef<{
+    startDistance: number
+    startZoom: number
+    /** Graph-space point under the gesture's initial midpoint. */
+    anchorX: number
+    anchorY: number
+  } | null>(null)
+  /** A gesture consumed the pointers; remaining fingers must not pan. */
+  const gestureEndedRef = useRef(false)
+  /** Pointer travel tracked for tap-to-deselect on empty canvas. */
+  const panMovedRef = useRef(false)
   // A drag ends with a compatibility `click`; swallow exactly that click
   // so dragging a node never selects or toggles it. The flag is reset on
   // the next pointerdown, so the following intentional click works.
@@ -247,6 +281,11 @@ export function FlowCanvas({
     selectRef.current = onSelectNode
   }, [onSelectNode])
   const selectNode = useCallback((node: FlowGraphNode) => selectRef.current(node), [])
+  const deselectRef = useRef(onDeselectNode)
+  useEffect(() => {
+    deselectRef.current = onDeselectNode
+  }, [onDeselectNode])
+  const deselectNode = useCallback(() => deselectRef.current?.(), [])
   const hoverNode = useCallback((nodeId: string | null) => {
     // A node drag keeps its own hovered path stable. Pointer-enter events
     // for nodes passed under the cursor must not swap the inspected route
@@ -323,7 +362,10 @@ export function FlowCanvas({
    *              otherwise fall back to the top-anchored width fit.
    */
   const applyCamera = useCallback(
-    (mode: 'initial' | 'fit' | 'top') => {
+    (
+      mode: 'initial' | 'fit' | 'top',
+      options: { readableFloor?: boolean } = {},
+    ) => {
       const container = containerRef.current
       if (container === null) return
       const { clientWidth, clientHeight } = container
@@ -336,12 +378,19 @@ export function FlowCanvas({
         maxZoom: MAX_ZOOM,
         clearance: FLOW_FIT_CLEARANCE,
       }
+      // The phone-sized readable floor applies to the first view of a graph
+      // only. A later resize still honours the fit contract (everything
+      // visible), so resizing never produces an unreadable half-panned view.
+      const readableFloor =
+        options.readableFloor === true && clientWidth < MOBILE_VIEWPORT_MAX
       const camera =
         mode === 'fit'
           ? fitFlowLayout(nodeBoxes, viewport)
           : mode === 'top'
             ? fitFlowLayoutWidth(nodeBoxes, viewport)
-            : initialFlowLayout(nodeBoxes, viewport)
+            : initialFlowLayout(nodeBoxes, viewport, {
+                minReadableZoom: readableFloor ? MOBILE_INITIAL_MIN_ZOOM : viewport.minZoom,
+              })
       if (camera === null) return
       cameraIntentRef.current = mode
       zoomRef.current = camera.zoom
@@ -369,7 +418,7 @@ export function FlowCanvas({
     const container = containerRef.current
     if (container === null || container.clientWidth === 0) return
     fittedGraphRef.current = graph
-    applyCamera('initial')
+    applyCamera('initial', { readableFloor: true })
   })
 
   // A viewport resize keeps automatic cameras accurate without stealing
@@ -380,7 +429,11 @@ export function FlowCanvas({
     const observer = new ResizeObserver(() => {
       const intent = cameraIntentRef.current
       if (intent === 'manual') return
-      applyCameraRef.current(intent)
+      // Resizing into phone width keeps the view legible; a small desktop
+      // window still refits to show the whole graph.
+      const width = container.clientWidth
+      const readableFloor = intent === 'initial' && width < MOBILE_RESIZE_FLOOR_MAX
+      applyCameraRef.current(intent, { readableFloor })
     })
     observer.observe(container)
     return () => observer.disconnect()
@@ -551,6 +604,50 @@ export function FlowCanvas({
     return () => container.removeEventListener('wheel', handleWheel)
   }, [zoomAt])
 
+  /** Distance and midpoint of the first two active pointers. */
+  const readGesture = useCallback((): {
+    distance: number
+    midX: number
+    midY: number
+  } | null => {
+    const [first, second] = [...pointersRef.current.values()]
+    if (first === undefined || second === undefined) return null
+    return {
+      distance: Math.hypot(second.x - first.x, second.y - first.y),
+      midX: (first.x + second.x) / 2,
+      midY: (first.y + second.y) / 2,
+    }
+  }, [])
+
+  /**
+   * Begin a two-finger gesture. The graph point under the initial midpoint
+   * becomes the anchor, so pinch zoom and two-finger pan both keep the
+   * content under the fingers instead of drifting.
+   */
+  const beginGesture = useCallback(() => {
+    const gesture = readGesture()
+    const container = containerRef.current
+    if (gesture === null || container === null) return
+    const rect = container.getBoundingClientRect()
+    const current = panRef.current
+    const panX = current?.panX ?? pan.x
+    const panY = current?.panY ?? pan.y
+    const zoom = zoomRef.current
+    gestureRef.current = {
+      startDistance: Math.max(gesture.distance, 1),
+      startZoom: zoom,
+      anchorX: (gesture.midX - rect.left - panX) / zoom,
+      anchorY: (gesture.midY - rect.top - panY) / zoom,
+    }
+    // A gesture takes over from any in-flight node drag or pan.
+    nodeDragRef.current = null
+    panRef.current = null
+    panMovedRef.current = true
+    gestureEndedRef.current = false
+    setPanning(true)
+    setDraggingNodeId(null)
+  }, [pan.x, pan.y, readGesture])
+
   const handlePointerDown = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
       if (event.button !== 0) return
@@ -559,6 +656,15 @@ export function FlowCanvas({
       // Preview controls are real buttons and must keep their click.
       if (event.target instanceof Element && event.target.closest('button') !== null) {
         return
+      }
+      if (event.pointerType === 'touch') {
+        pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY })
+        event.currentTarget.setPointerCapture?.(event.pointerId)
+        if (pointersRef.current.size >= 2) {
+          if (gestureRef.current === null) beginGesture()
+          return
+        }
+        gestureEndedRef.current = false
       }
       // A drag that starts on a node moves that node; empty canvas pans.
       const nodeElement =
@@ -592,6 +698,7 @@ export function FlowCanvas({
         return
       }
       event.preventDefault()
+      panMovedRef.current = false
       panRef.current = {
         pointerId: event.pointerId,
         startX: event.clientX,
@@ -602,11 +709,36 @@ export function FlowCanvas({
       setPanning(true)
       event.currentTarget.setPointerCapture?.(event.pointerId)
     },
-    [graph, pan],
+    [beginGesture, graph, pan],
   )
 
   const handlePointerMove = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
+      if (pointersRef.current.has(event.pointerId)) {
+        pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY })
+      }
+      // Two-finger gesture: pinch zoom around the moving midpoint while
+      // translating by the midpoint delta (two-finger pan).
+      if (gestureRef.current !== null) {
+        const gesture = gestureRef.current
+        const current = readGesture()
+        const container = containerRef.current
+        if (current === null || container === null) return
+        const rect = container.getBoundingClientRect()
+        const nextZoom = clampZoom(
+          gesture.startZoom * (current.distance / gesture.startDistance),
+        )
+        cameraIntentRef.current = 'manual'
+        zoomRef.current = nextZoom
+        setZoom(nextZoom)
+        setPan({
+          x: current.midX - rect.left - gesture.anchorX * nextZoom,
+          y: current.midY - rect.top - gesture.anchorY * nextZoom,
+        })
+        return
+      }
+      // Fingers left over after a gesture must not pan or drag.
+      if (gestureEndedRef.current && event.pointerType === 'touch') return
       const drag = nodeDragRef.current
       if (drag !== null) {
         if (drag.pointerId !== event.pointerId) return
@@ -632,13 +764,18 @@ export function FlowCanvas({
       }
       const state = panRef.current
       if (state === null || state.pointerId !== event.pointerId) return
+      const dx = event.clientX - state.startX
+      const dy = event.clientY - state.startY
+      if (!panMovedRef.current && Math.abs(dx) + Math.abs(dy) >= CLICK_MOVE_THRESHOLD) {
+        panMovedRef.current = true
+      }
       cameraIntentRef.current = 'manual'
       setPan({
-        x: state.panX + (event.clientX - state.startX),
-        y: state.panY + (event.clientY - state.startY),
+        x: state.panX + dx,
+        y: state.panY + dy,
       })
     },
-    [moveNode],
+    [clampZoom, moveNode, readGesture],
   )
 
   /**
@@ -698,9 +835,32 @@ export function FlowCanvas({
 
   const stopInteraction = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
+      const cancelled = event.type === 'pointercancel'
+      pointersRef.current.delete(event.pointerId)
+
+      // A pinch/pan gesture owns the camera until every finger lifts. The
+      // compatibility click that follows a touch must not select a node.
+      if (gestureRef.current !== null) {
+        gestureRef.current = null
+        gestureEndedRef.current = pointersRef.current.size > 0
+        if (!cancelled) suppressClickRef.current = true
+        nodeDragRef.current = null
+        panRef.current = null
+        panMovedRef.current = true
+        setPanning(false)
+        setDraggingNodeId(null)
+        releasePointerCapture(event.currentTarget, event.pointerId)
+        return
+      }
+      // Fingers left over from a finished gesture are inert.
+      if (gestureEndedRef.current && event.pointerType === 'touch') {
+        if (pointersRef.current.size === 0) gestureEndedRef.current = false
+        releasePointerCapture(event.currentTarget, event.pointerId)
+        return
+      }
+
       const drag = nodeDragRef.current
       // A cancelled pointer never produces a click, so it must not select.
-      const cancelled = event.type === 'pointercancel'
       if (drag !== null) {
         if (drag.moved) {
           settleNodeDrag(drag.nodeId)
@@ -715,14 +875,23 @@ export function FlowCanvas({
         // Swallow the compatibility click that follows this interaction so it
         // cannot toggle the selection a second time. The next press clears it.
         if (!cancelled) suppressClickRef.current = true
+      } else {
+        // A tap (not a drag) on empty canvas clears the inspection, matching
+        // the click-a-node-again behaviour on desktop.
+        const panned = panRef.current
+        if (panned !== null && panned.pointerId === event.pointerId) {
+          if (!cancelled && !panMovedRef.current) deselectNode()
+          if (!cancelled) suppressClickRef.current = true
+        }
       }
       nodeDragRef.current = null
       panRef.current = null
+      panMovedRef.current = false
       setPanning(false)
       setDraggingNodeId(null)
       releasePointerCapture(event.currentTarget, event.pointerId)
     },
-    [graph.nodes, selectNode, settleNodeDrag],
+    [deselectNode, graph.nodes, selectNode, settleNodeDrag],
   )
 
   const handleClickCapture = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
@@ -945,7 +1114,7 @@ export function FlowCanvas({
             aria-label="Zoom out"
             title="Zoom out"
             onClick={() => zoomAt(1 / ZOOM_STEP)}
-            className="rounded-md p-1 text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
+            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md p-1 text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none lg:min-h-0 lg:min-w-0"
           >
             <Minus className="size-3.5" aria-hidden />
           </button>
@@ -957,7 +1126,7 @@ export function FlowCanvas({
             aria-label="Zoom in"
             title="Zoom in"
             onClick={() => zoomAt(ZOOM_STEP)}
-            className="rounded-md p-1 text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
+            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md p-1 text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none lg:min-h-0 lg:min-w-0"
           >
             <Plus className="size-3.5" aria-hidden />
           </button>
@@ -967,7 +1136,7 @@ export function FlowCanvas({
             aria-label="Fit to screen"
             title="Fit to screen"
             onClick={fitToScreen}
-            className="rounded-md p-1 text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
+            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md p-1 text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none lg:min-h-0 lg:min-w-0"
           >
             <Maximize2 className="size-3.5" aria-hidden />
           </button>
@@ -976,7 +1145,7 @@ export function FlowCanvas({
             aria-label="Reset view"
             title="Reset view"
             onClick={() => applyCamera('top')}
-            className="rounded-md p-1 text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
+            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md p-1 text-text-secondary transition-colors hover:bg-surface-2 hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none lg:min-h-0 lg:min-w-0"
           >
             <Crosshair className="size-3.5" aria-hidden />
           </button>

@@ -48,7 +48,10 @@ try {
   await page.setArtifactDir(OUT)
   await page.waitFor(`document.querySelectorAll('.monaco-editor').length > 0`, { label: 'editor mounted', timeout: 60_000 })
   await page.waitFor(
-    `(document.body.innerText ?? '').includes('employees') && (document.body.innerText ?? '').includes('SQLite WASM')`,
+    `(() => {
+      const text = (document.body.innerText ?? '').toLowerCase()
+      return text.includes('employees') && text.includes('sqlite wasm')
+    })()`,
     { label: 'database connected', timeout: 60_000 },
   )
   const readyMs = Date.now() - started

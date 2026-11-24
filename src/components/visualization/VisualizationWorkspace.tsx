@@ -44,6 +44,8 @@ import {
   clampPosition,
   clampRect,
   defaultRect,
+  MIN_WINDOW_HEIGHT,
+  MIN_WINDOW_WIDTH,
   rectNearAnchor,
   type WindowBounds,
   type WindowRect,
@@ -77,6 +79,11 @@ const STATUS_LABELS = {
   unsupported: 'Cannot visualize this query',
   unavailable: 'Database not ready',
 } as const
+
+/** Workspace width below which the inspector docks instead of floating. */
+const NARROW_WORKSPACE_MAX = 480
+/** Gap kept between the docked inspector and the workspace edge. */
+const EDGE_MARGIN = 16
 
 export function VisualizationWorkspace({
   queryName,
@@ -345,7 +352,27 @@ export function VisualizationWorkspace({
       const empty = { width: 0, height: 0 }
       return rectNearAnchor(null, defaultRect(empty), empty)
     }
+    // clientWidth is 0 in jsdom and can lag a resize; prefer the measured
+    // rect and fall back to the viewport so the narrow check is reliable.
+    const measured = layerBox.width > 0 ? layerBox.width : layer.clientWidth
+    const narrow = (measured > 0 ? measured : window.innerWidth) < NARROW_WORKSPACE_MAX
     const bounds: WindowBounds = { width: layerBox.width, height: layerBox.height }
+    // Narrow (phone) workspaces cannot fit a 380 px floating window beside a
+    // node without covering the graph. Dock the inspector to the bottom edge
+    // and open it collapsed, so the canvas stays visible and another node can
+    // be tapped to change the selection.
+    if (narrow) {
+      const width = Math.max(MIN_WINDOW_WIDTH, layerBox.width - EDGE_MARGIN * 2)
+      return {
+        x: Math.max(0, (layerBox.width - width) / 2),
+        y: Math.max(0, layerBox.height - INSPECTOR_HEADER_HEIGHT),
+        width,
+        height: Math.min(
+          Math.max(MIN_WINDOW_HEIGHT, Math.round(layerBox.height * 0.6)),
+          Math.max(MIN_WINDOW_HEIGHT, layerBox.height - EDGE_MARGIN),
+        ),
+      }
+    }
     const base = defaultRect(bounds)
     const selector = `.flow-node[data-node-id="${nodeId.replace(/["\\]/g, '\\$&')}"]`
     const nodeElement = layer.querySelector<HTMLElement>(selector)
@@ -382,6 +409,14 @@ export function VisualizationWorkspace({
       if (inspectorRect === null) {
         setInspectorRect(initialRectFor(node.id))
       }
+      // On a phone the inspector docks to the bottom as a header; expanding
+      // it would cover the graph, so it starts collapsed and the Details
+      // toggle opens the full panel when the user asks for it.
+      const layer = workspaceLayerRef.current
+      const layerWidth = layer?.getBoundingClientRect().width ?? 0
+      const effectiveWidth =
+        (layerWidth > 0 ? layerWidth : (layer?.clientWidth ?? 0)) || window.innerWidth
+      if (effectiveWidth < NARROW_WORKSPACE_MAX) setInspectorMode('collapsed')
       // Do not force the details panel open: on narrow layouts it replaces
       // the canvas, which would hide the very upstream trace the click just
       // started. The Details toggle still opens the inspector for this node.
@@ -587,6 +622,7 @@ export function VisualizationWorkspace({
               playing={playing}
               focusStageKey={inspecting ? inspectedKey : null}
               onSelectNode={handleNodeSelect}
+              onDeselectNode={closeInspector}
             />
           ) : (
             <TransformationPanel
@@ -708,9 +744,9 @@ function WorkspaceHeader({
   onToggleDocs,
 }: WorkspaceHeaderProps) {
   return (
-    <header className="flex flex-wrap items-center gap-2 border-b border-border bg-surface px-3 py-2">
-      <Eye className="size-4 text-accent" aria-hidden />
-      <h2 className="max-w-72 truncate font-mono text-[13px] font-semibold text-text-primary">
+    <header className="glass-surface flex flex-wrap items-center gap-2 border-b border-border bg-surface px-2 py-1.5 sm:px-3 sm:py-2">
+      <Eye className="size-4 shrink-0 text-accent" aria-hidden />
+      <h2 className="max-w-72 min-w-0 truncate font-mono text-[13px] font-semibold text-text-primary">
         {queryName}
       </h2>
       {databaseName !== null && databaseName !== undefined && (
@@ -744,13 +780,14 @@ function WorkspaceHeader({
         <div
           role="tablist"
           aria-label="Visualization mode"
-          className="flex rounded-lg border border-border bg-surface-2 p-0.5"
+          className="flex shrink-0 rounded-lg border border-border bg-surface-2 p-0.5"
         >
           <button
+            type="button"
             role="tab"
             aria-selected={viewMode === 'flow'}
             onClick={() => onViewModeChange('flow')}
-            className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
+            className={`inline-flex min-h-11 shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors lg:min-h-0 ${
               viewMode === 'flow'
                 ? 'bg-surface-3 text-text-primary'
                 : 'text-text-muted hover:text-text-secondary'
@@ -760,10 +797,11 @@ function WorkspaceHeader({
             Flow
           </button>
           <button
+            type="button"
             role="tab"
             aria-selected={viewMode === 'table'}
             onClick={() => onViewModeChange('table')}
-            className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
+            className={`inline-flex min-h-11 shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors lg:min-h-0 ${
               viewMode === 'table'
                 ? 'bg-surface-3 text-text-primary'
                 : 'text-text-muted hover:text-text-secondary'
@@ -783,7 +821,7 @@ function WorkspaceHeader({
             aria-pressed={docsOpen === true}
             aria-controls="documentation-sidebar"
             onClick={onToggleDocs}
-            className={`inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none ${
+            className={`inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none lg:min-h-0 ${
               docsOpen === true
                 ? 'border-accent/40 bg-accent-soft text-text-primary'
                 : 'border-border bg-surface-2 text-text-secondary hover:border-border-strong hover:text-text-primary'
@@ -798,20 +836,21 @@ function WorkspaceHeader({
           </button>
         </Tooltip>
       )}
-      <div className="flex-1" />
-      {actualRowCount != null && (
-        <span className="hidden text-[11px] text-text-muted sm:inline">
-          SQLite returned {actualRowCount} row{actualRowCount === 1 ? '' : 's'}
-        </span>
-      )}
-      <motion.button
-        type="button"
-        onClick={onClose}
-        className="rounded-lg border border-border px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-border-strong hover:text-text-primary"
-        whileTap={{ scale: 0.97 }}
-      >
-        Back to query
-      </motion.button>
+      <div className="ml-auto flex items-center gap-2">
+        {actualRowCount != null && (
+          <span className="hidden text-[11px] text-text-muted sm:inline">
+            SQLite returned {actualRowCount} row{actualRowCount === 1 ? '' : 's'}
+          </span>
+        )}
+        <motion.button
+          type="button"
+          onClick={onClose}
+          className="min-h-11 shrink-0 rounded-lg border border-border px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-border-strong hover:text-text-primary focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none lg:min-h-0"
+          whileTap={{ scale: 0.97 }}
+        >
+          Back to query
+        </motion.button>
+      </div>
     </header>
   )
 }
