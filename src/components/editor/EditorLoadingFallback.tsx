@@ -1,9 +1,11 @@
-import { LoadingState } from '../common/LoadingState'
+import { CanvasLoadingMark } from '../common/CanvasLoadingMark'
 import { Skeleton } from '../common/Skeleton'
 
 /**
  * Editor-shaped placeholder shown while the lazy Monaco bundle loads.
  * `.lazy-fade` keeps it invisible for very fast loads so it never flashes.
+ * The compact canvas mark carries the startup screen's visual language at
+ * micro scale instead of a generic spinner.
  */
 export function EditorLoadingFallback() {
   return (
@@ -19,7 +21,7 @@ export function EditorLoadingFallback() {
         <Skeleton className="h-3 w-2/5" />
         <Skeleton className="h-3 w-1/2" />
       </div>
-      <LoadingState label="Loading editor…" size="sm" className="justify-start" />
+      <CanvasLoadingMark label="Loading editor…" />
     </div>
   )
 }
