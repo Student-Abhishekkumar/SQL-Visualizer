@@ -19,7 +19,7 @@ export function TableNode({ table, onOpenSchema }: TableNodeProps) {
           onClick={() => setExpanded((value) => !value)}
           aria-expanded={expanded}
           aria-label={`${expanded ? 'Collapse' : 'Expand'} table ${table.name}`}
-          className="rounded p-0.5 text-text-muted transition-colors hover:text-text-primary"
+          className="-ml-0.5 flex size-6 shrink-0 items-center justify-center rounded text-text-muted transition-colors hover:text-text-primary"
         >
           <ChevronRight
             className={`size-3.5 transition-transform ${expanded ? 'rotate-90' : ''}`}

@@ -191,10 +191,13 @@ export const MONACO_THEMES: Record<ThemeId, MonacoThemeDefinition> = {
     foreground: '#eef4ff',
     lineNumber: '#7f93b3',
     activeLine: '#a5f3fc',
-    selection: 'rgba(103, 232, 249, 0.2)',
-    lineHighlight: 'rgba(255, 255, 255, 0.05)',
+    // Monaco's standalone theme service expects hex colours; rgba() values
+    // are rejected and fall back to opaque red for the active-line overlay.
+    // 8-digit hex keeps the intended translucent glass effect.
+    selection: '#67e8f933',
+    lineHighlight: '#ffffff0d',
     cursor: '#67e8f9',
-    indent: 'rgba(255, 255, 255, 0.14)',
+    indent: '#ffffff24',
     widget: '#131d31',
     border: '#2a3a55',
     comment: '#93a7c4',

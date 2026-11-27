@@ -74,7 +74,28 @@ describe('ResultsTable', () => {
     })
     const { container } = render(<ResultsTable result={joined} />)
     const headers = container.querySelectorAll('thead th')
-    expect(headers.length).toBe(4) // row number + 3 columns
+    expect(headers.length).toBe(5) // row number + 3 columns + width spacer
+  })
+
+  it('adds no spacer column for wide result sets', () => {
+    const wide = makeStatement({
+      columns: ['id', 'name', 'salary', 'department'],
+      values: [[1, 'Rahul', 45000, 'Engineering']],
+    })
+    const { container } = render(<ResultsTable result={wide} />)
+    const headers = container.querySelectorAll('thead th')
+    expect(headers.length).toBe(5) // row number + 4 columns
+    expect(container.querySelector('thead th[aria-hidden="true"]')).toBeNull()
+  })
+
+  it('exposes full values as tooltips for long cells', () => {
+    const longValue = 'x'.repeat(64)
+    const long = makeStatement({
+      columns: ['notes'],
+      values: [[longValue]],
+    })
+    render(<ResultsTable result={long} />)
+    expect(screen.getByText(longValue)).toHaveAttribute('title', longValue)
   })
 
   it('formats blob values', () => {

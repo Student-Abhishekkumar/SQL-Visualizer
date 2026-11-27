@@ -823,7 +823,9 @@ body {
   top: 0;
   right: 0;
   bottom: 0;
-  z-index: 40;
+  /* Above the floating node inspector (z-50): the narrow-screen docs panel
+     is an overlay, so it must not open behind an already-selected node. */
+  z-index: 60;
   width: min(22rem, 92%);
   max-width: 100%;
   overflow: clip;

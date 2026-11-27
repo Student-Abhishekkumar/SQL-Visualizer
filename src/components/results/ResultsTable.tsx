@@ -35,6 +35,16 @@ function formatCell(value: unknown): { text: string; isNull: boolean } {
   return { text: String(value), isNull: false }
 }
 
+/**
+ * Narrow result sets read better when columns keep their content width and a
+ * trailing spacer absorbs the leftover space. Wider sets still distribute
+ * across the full table so every column stays legible.
+ */
+const COMPACT_LAYOUT_MAX_COLUMNS = 3
+
+/** Cells at least this long may be clipped by `max-w-72`, so expose the value. */
+const CELL_TITLE_MIN_LENGTH = 32
+
 /** Renders one real SQLite result set as a scrollable data grid. */
 export function ResultsTable({ result, executedWithoutResultSet = false }: ResultsTableProps) {
   const columnTypes = useMemo(() => {
@@ -76,6 +86,8 @@ export function ResultsTable({ result, executedWithoutResultSet = false }: Resul
     )
   }
 
+  const compactLayout = result.columns.length <= COMPACT_LAYOUT_MAX_COLUMNS
+
   return (
     <div className="h-full min-h-0 overflow-auto">
       <table className="w-max min-w-full border-collapse text-[13px]">
@@ -87,7 +99,9 @@ export function ResultsTable({ result, executedWithoutResultSet = false }: Resul
             {result.columns.map((column, index) => (
               <th
                 key={`${column}-${index}`}
-                className="border-b border-border px-3 py-1.5 text-left font-semibold text-text-primary"
+                className={`border-b border-border px-3 py-1.5 text-left font-semibold text-text-primary ${
+                  compactLayout ? 'min-w-28' : ''
+                }`}
               >
                 <span className="mr-1.5">{column}</span>
                 {columnTypes[index] && (
@@ -97,6 +111,7 @@ export function ResultsTable({ result, executedWithoutResultSet = false }: Resul
                 )}
               </th>
             ))}
+            {compactLayout && <th aria-hidden="true" className="w-full border-b border-border" />}
           </tr>
         </thead>
         <tbody>
@@ -111,7 +126,10 @@ export function ResultsTable({ result, executedWithoutResultSet = false }: Resul
                 return (
                   <td
                     key={columnIndex}
+                    title={text.length >= CELL_TITLE_MIN_LENGTH ? text : undefined}
                     className={`max-w-72 truncate border-b border-border px-3 py-1.5 font-mono text-[12.5px] ${
+                      compactLayout ? 'min-w-28' : ''
+                    } ${
                       isNull
                         ? 'italic text-text-muted/70'
                         : isNumber
@@ -123,6 +141,7 @@ export function ResultsTable({ result, executedWithoutResultSet = false }: Resul
                   </td>
                 )
               })}
+              {compactLayout && <td aria-hidden="true" className="border-b border-border" />}
             </tr>
           ))}
         </tbody>

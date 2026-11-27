@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState } from 'react'
-import { CircleAlert, Table2 } from 'lucide-react'
+import { CircleAlert, Info, Table2 } from 'lucide-react'
 import { Tabs } from '../common/Tabs'
 import { ResultsTable } from './ResultsTable'
 import { MessagesPanel } from './MessagesPanel'
@@ -78,7 +78,16 @@ export function ResultsPanel({ result, isExecuting }: ResultsPanelProps) {
               ),
               badge: errorCount > 0 ? <Badge variant="error">{errorCount}</Badge> : null,
             },
-            { id: TAB_INFO, label: 'Query Information' },
+            {
+              id: TAB_INFO,
+              label: (
+                <span className="inline-flex items-center gap-1.5">
+                  <Info className="size-3.5" />
+                  <span className="sm:hidden">Info</span>
+                  <span className="hidden sm:inline">Query Information</span>
+                </span>
+              ),
+            },
           ]}
         />
         <div className="hidden shrink-0 pl-1 text-[11px] text-text-muted sm:block">

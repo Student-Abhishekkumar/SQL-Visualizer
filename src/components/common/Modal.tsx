@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 
 interface ModalProps {
@@ -108,9 +109,12 @@ export function Modal({
 
   if (!open) return null
 
-  return (
+  // Portalled to the document root so dialogs always paint above canvas
+  // overlays (for example the floating node inspector) regardless of where
+  // the trigger lives in the component tree.
+  return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px] motion-reduce:backdrop-blur-none"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px] motion-reduce:backdrop-blur-none"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose()
       }}
@@ -122,11 +126,11 @@ export function Modal({
         aria-labelledby={titleId}
         aria-describedby={description !== undefined ? descriptionId : undefined}
         tabIndex={-1}
-        className={`modal-panel glass-surface flex w-full flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-window ${
+        className={`modal-panel glass-surface flex max-h-[calc(100dvh-2rem)] w-full flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-window ${
           extraWide ? 'max-w-4xl' : wide ? 'max-w-2xl' : 'max-w-md'
         }`}
       >
-        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+        <div className="flex shrink-0 items-center justify-between border-b border-border px-4 py-3">
           <h2 id={titleId} className="text-sm font-semibold text-text-primary">
             {title}
           </h2>
@@ -148,6 +152,7 @@ export function Modal({
           {children}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

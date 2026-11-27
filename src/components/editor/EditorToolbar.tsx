@@ -308,9 +308,11 @@ export function EditorToolbar({
           variant="danger"
           icon={<RotateCcw className="size-3.5" />}
           onClick={() => setResetOpen(true)}
-          className="min-h-11 lg:min-h-0"
+          aria-label="Reset database"
+          title="Reset database"
+          className="min-h-11 px-2.5 sm:px-3 lg:min-h-0"
         >
-          Reset DB
+          <span className="hidden sm:inline">Reset DB</span>
         </Button>
       </div>
 

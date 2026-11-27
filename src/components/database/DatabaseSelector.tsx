@@ -64,7 +64,9 @@ export function DatabaseSelector() {
         onClick={() => setOpen((value) => !value)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        aria-label="Select database"
+        aria-label={
+          active ? `Select database, current: ${active.name}` : 'Select database'
+        }
         className="flex min-h-11 w-full min-w-0 items-center gap-2 rounded-lg border border-border bg-surface-2 px-2.5 py-2 text-left transition-colors hover:border-control-border sm:min-h-0 sm:max-w-[260px] sm:py-1.5"
       >
         <Database className="size-3.5 shrink-0 text-accent" aria-hidden />
