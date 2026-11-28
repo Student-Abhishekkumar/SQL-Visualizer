@@ -13,6 +13,7 @@ import { useDatabaseStore } from '../../store/databaseStore'
 import { useUIStore } from '../../store/uiStore'
 import { useSQLExecution } from '../../hooks/useSQLExecution'
 import { splitStatements } from '../../utils/queryHelpers'
+import { formatSQL } from '../../services/sql/sqlFormatter'
 
 /**
  * The Canvas workspace is a secondary feature and brings the animation
@@ -88,11 +89,11 @@ export function MainLayout() {
     })
   }, [content, setWorkspaceView])
 
-  // The formatter is small but only needed on demand.
+  // The formatter is tiny and already part of the workspace graph (the
+  // history and messages panels summarize through it), so a dynamic import
+  // could never split it out — it only delayed the click by a microtask.
   const handleFormat = useCallback(() => {
-    void import('../../services/sql/sqlFormatter').then(({ formatSQL }) => {
-      setContent(formatSQL(content))
-    })
+    setContent(formatSQL(content))
   }, [content, setContent])
 
   const handleReset = useCallback(async () => {

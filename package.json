@@ -5,7 +5,7 @@
   "license": "MIT",
   "type": "module",
   "engines": {
-    "node": ">=22.12.0 <23"
+    "node": ">=22.12.0"
   },
   "scripts": {
     "dev": "vite",
@@ -17,7 +17,11 @@
     "typecheck": "tsc -b",
     "qa:browser": "node scripts/browser-qa/run.mjs",
     "qa:canvas": "node scripts/browser-qa/canvas-ux.mjs",
+    "qa:canvas-ux": "node scripts/browser-qa/canvas-ux.mjs",
+    "qa:ui-ux": "node scripts/browser-qa/ui-ux.mjs",
     "qa:appearance": "node scripts/browser-qa/appearance.mjs",
+    "qa:entrance": "node scripts/browser-qa/mobile-entrance-audit.mjs",
+    "qa:journey": "node scripts/browser-qa/mobile-journey.mjs",
     "qa:production": "node scripts/browser-qa/production-smoke.mjs"
   },
   "dependencies": {

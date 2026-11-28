@@ -1,0 +1,528 @@
+/*
+  Website entrance — a three-second cinematic "living query network" that
+  plays once before the homepage.
+
+  It reuses the Canvas design language (.cl-node cards, sockets, Bézier wires,
+  node accents) but owns its composition: a layered network arranged around a
+  reserved brand band, so the wordmark is never covered by a card. This is
+  deliberately NOT the application loader (see .canvas-loader in index.css).
+*/
+
+.website-entrance {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 100svh;
+  overflow: hidden;
+  isolation: isolate;
+  color: var(--text-primary);
+  background:
+    radial-gradient(
+      120% 90% at 50% 0%,
+      color-mix(in srgb, var(--accent) 9%, transparent),
+      transparent 62%
+    ),
+    var(--bg);
+  overscroll-behavior: contain;
+  touch-action: none;
+  opacity: 1;
+  will-change: opacity;
+}
+.website-entrance[data-exiting='true'] {
+  pointer-events: none;
+}
+
+/* Pause all entrance animation work while the page is hidden. */
+.website-entrance[data-paused='true'],
+.website-entrance[data-paused='true'] * {
+  animation-play-state: paused !important;
+}
+
+.website-entrance .cl-camera {
+  top: 50%;
+  left: 50%;
+}
+
+/* A faster, tighter camera than the app loader (1.4s vs 3s). */
+.website-entrance .cl-lens {
+  animation: entrance-lens 1.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.entrance-drift {
+  width: 100%;
+  height: 100%;
+  transform-origin: center center;
+  animation: entrance-drift 11s ease-in-out infinite alternate;
+  will-change: transform;
+}
+
+.website-entrance .cl-grid {
+  opacity: 0.75;
+}
+
+/* Two soft pools of light give the flat grid midground depth. */
+.en-depth {
+  position: absolute;
+  width: 62vmax;
+  height: 62vmax;
+  border-radius: 50%;
+  filter: blur(4px);
+  opacity: 0.5;
+  pointer-events: none;
+}
+.en-depth--a {
+  top: -28vmax;
+  left: -18vmax;
+  background: radial-gradient(circle, color-mix(in srgb, var(--violet) 16%, transparent), transparent 62%);
+}
+.en-depth--b {
+  right: -24vmax;
+  bottom: -30vmax;
+  background: radial-gradient(circle, color-mix(in srgb, var(--cyan) 14%, transparent), transparent 64%);
+}
+
+/* ---------------------------------------------------------------- */
+/* Network layers                                                    */
+/* ---------------------------------------------------------------- */
+
+/* Small labelled relationship nodes (indexes, schema, rows, plan …). */
+.en-pill {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0 0.6rem;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  box-shadow: 0 10px 24px -20px rgba(0, 0, 0, 0.9);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  transform-origin: center center;
+  opacity: 0;
+  animation: en-pop 0.55s cubic-bezier(0.16, 1, 0.3, 1) both var(--cl-delay);
+}
+.en-pill__icon {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: color-mix(in srgb, var(--node-source) 82%, var(--text-secondary));
+}
+.en-pill[data-accent='where'] .en-pill__icon {
+  color: var(--node-where);
+}
+.en-pill[data-accent='join'] .en-pill__icon {
+  color: var(--node-join);
+}
+.en-pill[data-accent='group'] .en-pill__icon {
+  color: var(--node-group);
+}
+.en-pill[data-accent='final'] .en-pill__icon {
+  color: var(--node-final);
+}
+.en-pill__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Periheral connection points: the far layer of the network. */
+.en-dot {
+  position: absolute;
+  z-index: 1;
+  display: block;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 62%, var(--text-primary));
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent),
+    0 0 14px color-mix(in srgb, var(--accent) 55%, transparent);
+  opacity: 0;
+  animation: en-dot-in 0.6s ease both var(--cl-delay);
+}
+.en-dot[data-accent='final'] {
+  background: var(--node-final);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--node-final) 14%, transparent),
+    0 0 14px color-mix(in srgb, var(--node-final) 55%, transparent);
+}
+
+/* Bridge + peripheral wires: quieter than the query pipeline. */
+.en-edge {
+  color: color-mix(in srgb, var(--text-muted) 70%, transparent);
+}
+.en-edge[data-accent='where'] {
+  color: color-mix(in srgb, var(--node-where) 55%, transparent);
+}
+.en-edge[data-accent='join'] {
+  color: color-mix(in srgb, var(--node-join) 55%, transparent);
+}
+.en-edge[data-accent='group'] {
+  color: color-mix(in srgb, var(--node-group) 55%, transparent);
+}
+.en-edge[data-accent='final'] {
+  color: color-mix(in srgb, var(--node-final) 55%, transparent);
+}
+.en-edge[data-accent='source'] {
+  color: color-mix(in srgb, var(--node-source) 55%, transparent);
+}
+.en-edge__line {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0;
+  animation: en-wire-in 0.9s ease both var(--cl-delay);
+}
+.en-edge[data-weight='bridge'] .en-edge__line {
+  stroke-width: 1.1;
+  opacity: 0;
+}
+.en-edge[data-weight='faint'] .en-edge__line {
+  stroke-width: 0.85;
+  stroke-dasharray: 3 7;
+  opacity: 0;
+}
+
+/* Travelling data signal: a light packet on a wire. */
+.en-signal {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 3;
+  width: 5px;
+  height: 5px;
+  margin: -2.5px 0 0 -2.5px;
+  border-radius: 50%;
+  background: var(--node-final);
+  box-shadow:
+    0 0 6px 1px color-mix(in srgb, var(--node-final) 70%, transparent),
+    0 0 14px 3px color-mix(in srgb, var(--node-final) 32%, transparent);
+  offset-rotate: 0deg;
+  offset-distance: 0%;
+  opacity: 0;
+  pointer-events: none;
+  animation: en-signal-run var(--s-dur) linear var(--s-delay) infinite;
+  will-change: offset-distance, opacity;
+}
+.en-signal[data-accent='source'] {
+  background: var(--node-source);
+  box-shadow:
+    0 0 6px 1px color-mix(in srgb, var(--node-source) 70%, transparent),
+    0 0 14px 3px color-mix(in srgb, var(--node-source) 32%, transparent);
+}
+.en-signal[data-accent='where'] {
+  background: var(--node-where);
+  box-shadow:
+    0 0 6px 1px color-mix(in srgb, var(--node-where) 70%, transparent),
+    0 0 14px 3px color-mix(in srgb, var(--node-where) 32%, transparent);
+}
+.en-signal[data-accent='join'] {
+  background: var(--node-join);
+  box-shadow:
+    0 0 6px 1px color-mix(in srgb, var(--node-join) 70%, transparent),
+    0 0 14px 3px color-mix(in srgb, var(--node-join) 32%, transparent);
+}
+.en-signal[data-accent='group'] {
+  background: var(--node-group);
+  box-shadow:
+    0 0 6px 1px color-mix(in srgb, var(--node-group) 70%, transparent),
+    0 0 14px 3px color-mix(in srgb, var(--node-group) 32%, transparent);
+}
+.en-signal[data-accent='having'] {
+  background: var(--node-having);
+  box-shadow:
+    0 0 6px 1px color-mix(in srgb, var(--node-having) 70%, transparent),
+    0 0 14px 3px color-mix(in srgb, var(--node-having) 32%, transparent);
+}
+
+/* ---------------------------------------------------------------- */
+/* Foreground brand                                                  */
+/* ---------------------------------------------------------------- */
+
+.entrance-brand {
+  position: absolute;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6rem;
+  max-width: var(--brand-max, 86vw);
+  text-align: center;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+.entrance-brand__mark {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 50px;
+  height: 50px;
+  overflow: hidden;
+  border-radius: 14px;
+  color: var(--accent-ink);
+  background: linear-gradient(135deg, var(--accent), var(--violet) 55%, var(--cyan));
+  box-shadow:
+    0 16px 36px -14px color-mix(in srgb, var(--accent) 68%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  opacity: 0;
+  animation: en-brand-mark 0.7s cubic-bezier(0.16, 1, 0.3, 1) both 1.5s;
+}
+.entrance-brand__mark::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.35), transparent 55%);
+}
+.entrance-brand__mark > svg {
+  position: relative;
+  z-index: 1;
+}
+.entrance-brand__rule {
+  width: 3rem;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  transform-origin: center;
+  transform: scaleX(0);
+  animation: en-brand-rule 0.6s cubic-bezier(0.16, 1, 0.3, 1) both 1.66s;
+}
+.entrance-brand__name {
+  margin: 0;
+  font-size: clamp(2.1rem, 6.2vw, 4.4rem);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.035em;
+  color: var(--text-primary);
+  text-wrap: balance;
+  opacity: 0;
+  animation: en-brand-name 0.95s cubic-bezier(0.16, 1, 0.3, 1) both 1.56s;
+}
+.entrance-brand__sub {
+  margin: 0;
+  max-width: none;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  opacity: 0;
+  animation: en-brand-sub 0.7s ease both 1.82s;
+}
+
+/* ---------------------------------------------------------------- */
+/* Per-mode brand tuning (the band itself is reserved in the model)  */
+/* ---------------------------------------------------------------- */
+.website-entrance[data-mode='phone'] .entrance-brand {
+  gap: 0.4rem;
+}
+.website-entrance[data-mode='phone'] .entrance-brand__mark {
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+}
+/* One strong line on phones: two stacked lines start colliding with the
+   query cards on a 320px viewport. */
+.website-entrance[data-mode='phone'] .entrance-brand__name {
+  font-size: clamp(1.35rem, 7vw, 2rem);
+  letter-spacing: -0.03em;
+  white-space: nowrap;
+}
+.website-entrance[data-mode='phone'] .entrance-brand__sub {
+  max-width: 26ch;
+  font-size: 0.55rem;
+  line-height: 1.6;
+  letter-spacing: 0.14em;
+}
+@media (max-width: 380px) {
+  .website-entrance[data-mode='phone'] .entrance-brand__mark {
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+  }
+  .website-entrance[data-mode='phone'] .entrance-brand__sub {
+    font-size: 0.5rem;
+    letter-spacing: 0.1em;
+  }
+}
+.website-entrance[data-mode='landscape'] .entrance-brand {
+  gap: 0.35rem;
+}
+.website-entrance[data-mode='landscape'] .entrance-brand__mark {
+  display: none;
+}
+.website-entrance[data-mode='landscape'] .entrance-brand__name {
+  font-size: clamp(1.6rem, 3.8vw, 2.5rem);
+}
+.website-entrance[data-mode='landscape'] .entrance-brand__sub {
+  font-size: 0.58rem;
+}
+
+/* ---------------------------------------------------------------- */
+/* Keyframes                                                         */
+/* ---------------------------------------------------------------- */
+@keyframes entrance-lens {
+  from {
+    transform: scale(1.12) rotate(-0.8deg) translateY(1.2%);
+  }
+  to {
+    transform: none;
+  }
+}
+@keyframes entrance-drift {
+  from {
+    transform: scale(1) translate3d(0, 0, 0) rotate(0deg);
+  }
+  to {
+    transform: scale(1.012) translate3d(-0.5%, 0.6%, 0) rotate(0.28deg);
+  }
+}
+@keyframes en-pop {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes en-dot-in {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  to {
+    opacity: 0.85;
+    transform: none;
+  }
+}
+@keyframes en-wire-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 0.5;
+  }
+}
+@keyframes en-signal-run {
+  0% {
+    offset-distance: 0%;
+    opacity: 0;
+  }
+  8% {
+    opacity: 1;
+  }
+  88% {
+    opacity: 1;
+  }
+  100% {
+    offset-distance: 100%;
+    opacity: 0;
+  }
+}
+@keyframes en-brand-mark {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.86);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes en-brand-rule {
+  from {
+    transform: scaleX(0);
+    opacity: 0;
+  }
+  to {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+}
+@keyframes en-brand-name {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+    filter: blur(7px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: blur(0);
+  }
+}
+@keyframes en-brand-sub {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 0.9;
+    transform: none;
+  }
+}
+@keyframes entrance-exit {
+  to {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .website-entrance {
+    animation: entrance-exit 0.3s ease 2.7s forwards;
+  }
+  .website-entrance[data-exiting='true'] {
+    animation: entrance-exit 0.3s ease forwards;
+  }
+  /* The wordmark clears a beat before the network does, so the handoff never
+     shows the entrance logo stacked on the homepage headline. */
+  .website-entrance .entrance-brand {
+    animation: brand-exit 0.24s ease 2.6s forwards;
+  }
+  .website-entrance[data-exiting='true'] .entrance-brand {
+    animation: brand-exit 0.24s ease forwards;
+  }
+}
+
+@keyframes brand-exit {
+  to {
+    opacity: 0;
+  }
+}
+
+/* Fewer signals on very small screens / low-power devices. */
+.website-entrance[data-lite='true'] .en-signal {
+  display: none;
+}
+@media (max-width: 520px) {
+  .website-entrance .en-signal:nth-of-type(n + 5) {
+    display: none;
+  }
+}
+
+/* The gate skips the entrance for reduced motion; this removes any takeover
+   if the preference changes mid-sequence. */
+@media (prefers-reduced-motion: reduce) {
+  .website-entrance {
+    display: none;
+  }
+  .entrance-brand,
+  .entrance-brand__name,
+  .entrance-brand__sub,
+  .entrance-brand__mark,
+  .entrance-brand__rule {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+    filter: none !important;
+  }
+}
+.reduce-effects .entrance-brand__mark {
+  box-shadow: none;
+}

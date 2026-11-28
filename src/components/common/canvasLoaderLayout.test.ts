@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildEdgeGeometry, buildGraph, pickLoaderMode } from './canvasLoaderLayout'
+import { buildEdgeGeometry, buildGraph, pickEntranceMode, pickLoaderMode } from './canvasLoaderLayout'
 
 describe('canvasLoaderLayout', () => {
   it('chooses a composition per viewport', () => {
@@ -8,6 +8,15 @@ describe('canvasLoaderLayout', () => {
     expect(pickLoaderMode(768, 1024)).toBe('portrait')
     expect(pickLoaderMode(390, 844)).toBe('short')
     expect(pickLoaderMode(320, 568)).toBe('short')
+    expect(pickLoaderMode(844, 390)).toBe('landscape')
+    expect(pickLoaderMode(932, 430)).toBe('landscape')
+  })
+
+  it('uses the pocketed short composition for the entrance on portrait tablets', () => {
+    expect(pickEntranceMode(768, 1024)).toBe('short')
+    expect(pickEntranceMode(390, 844)).toBe('short')
+    expect(pickEntranceMode(844, 390)).toBe('landscape')
+    expect(pickEntranceMode(1440, 900)).toBe('desktop')
   })
 
   it('builds a connected desktop graph with real socket sides', () => {
@@ -36,6 +45,13 @@ describe('canvasLoaderLayout', () => {
     const graph = buildGraph('short')
     expect(graph.nodes).toHaveLength(4)
     expect(graph.edges).toHaveLength(3)
+  })
+
+  it('builds a wide landscape graph', () => {
+    const graph = buildGraph('landscape')
+    expect(graph.nodes).toHaveLength(4)
+    expect(graph.edges).toHaveLength(3)
+    expect(graph.width).toBeGreaterThan(graph.height)
   })
 
   it('derives smooth cubic geometry between two nodes', () => {

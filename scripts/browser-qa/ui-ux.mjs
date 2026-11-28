@@ -4,7 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { launchBrowser } from './cdp.mjs'
 
-const URL = process.env.APP_URL ?? 'http://127.0.0.1:5173/'
+const URL = process.env.APP_URL ?? 'http://127.0.0.1:5173/#/app'
 const OUT = process.env.QA_OUT ?? join('artifacts', 'browser-qa', 'ui-ux')
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const results = []
@@ -23,7 +23,7 @@ if (process.env.QA_MANAGED_SERVER === '1') {
   }
 }
 const viewports = [
-  [320, 568], [375, 667], [390, 844], [768, 1024],
+  [320, 568], [360, 800], [375, 667], [390, 844], [430, 932], [768, 1024],
   [1024, 768], [1280, 800], [1440, 900], [1920, 1080],
 ]
 const defaultQuery = 'SELECT department_id, COUNT(*) AS employees\nFROM employees\nGROUP BY department_id\nORDER BY employees DESC;'

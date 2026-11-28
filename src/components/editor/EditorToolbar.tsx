@@ -168,6 +168,19 @@ export function EditorToolbar({
           ? `“${activeDatabase.name}” runs its setup SQL again from scratch.`
           : `Every table and row in “${activeDatabase.name}” is permanently removed, leaving an empty database.`
 
+  const resetButton = (
+    <Button
+      variant="danger"
+      icon={<RotateCcw className="size-3.5" />}
+      onClick={() => setResetOpen(true)}
+      aria-label="Reset database"
+      title="Reset database"
+      className="min-h-11 px-2.5 sm:px-3 lg:min-h-0"
+    >
+      <span className="hidden sm:inline">Reset DB</span>
+    </Button>
+  )
+
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface px-2 py-1.5 sm:px-3 sm:py-2">
       <div
@@ -301,20 +314,10 @@ export function EditorToolbar({
         )}
       </div>
 
+        <div className="sm:hidden">{resetButton}</div>
       </div>
 
-      <div className="ml-auto">
-        <Button
-          variant="danger"
-          icon={<RotateCcw className="size-3.5" />}
-          onClick={() => setResetOpen(true)}
-          aria-label="Reset database"
-          title="Reset database"
-          className="min-h-11 px-2.5 sm:px-3 lg:min-h-0"
-        >
-          <span className="hidden sm:inline">Reset DB</span>
-        </Button>
-      </div>
+      <div className="ml-auto max-sm:hidden">{resetButton}</div>
 
       <Modal
         open={resetOpen}

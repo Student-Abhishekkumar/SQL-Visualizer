@@ -17,7 +17,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { launchBrowser } from './cdp.mjs'
 
-const APP_URL = process.env.APP_URL ?? 'http://127.0.0.1:5173/'
+const APP_URL = process.env.APP_URL ?? 'http://127.0.0.1:5173/#/app'
 const CDP_PORT = Number(process.env.CDP_PORT ?? 9335)
 const requested = (process.env.QA_ONLY ?? 'A,B,C,D,E').split(',').map((entry) => entry.trim().toUpperCase())
 const stamp = new Date().toISOString().replace(/[:.]/g, '-')

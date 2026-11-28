@@ -20,7 +20,7 @@ export type LoaderAccent =
   | 'rejected'
 
 export type LoaderKind = 'source' | 'operation' | 'group' | 'final' | 'branch'
-export type LoaderMode = 'desktop' | 'portrait' | 'short'
+export type LoaderMode = 'desktop' | 'portrait' | 'short' | 'landscape'
 export type SocketSide = 'left' | 'right' | 'top' | 'bottom'
 
 export interface LoaderNode {
@@ -200,10 +200,38 @@ const PORTRAIT_BOXES: Record<string, Box> = {
 }
 
 const SHORT_BOXES: Record<string, Box> = {
-  employees: { x: 30, y: 15, w: 370, h: 190 },
-  where: { x: 30, y: 215, w: 370, h: 150 },
-  group: { x: 30, y: 375, w: 370, h: 150 },
-  final: { x: 30, y: 535, w: 370, h: 190 },
+  // Portrait phone composition. Four cards, generous and readable, with a
+  // deliberate 178px brand pocket between WHERE and GROUP BY so the centred
+  // wordmark never sits on top of a card.
+  employees: { x: 30, y: 10, w: 370, h: 175 },
+  where: { x: 30, y: 195, w: 370, h: 112 },
+  group: { x: 30, y: 485, w: 370, h: 112 },
+  final: { x: 30, y: 605, w: 370, h: 175 },
+}
+
+/**
+ * Phone-only content enrichment. The short composition has room for the
+ * column chips that make the operation cards feel like real Canvas nodes
+ * instead of mostly-empty rectangles.
+ */
+const SHORT_CONTENT_OVERRIDES: Record<string, Partial<NodeContent>> = {
+  where: { chips: ['department_id', 'salary'] },
+  group: { chips: ['department'] },
+}
+
+/** Wide, low composition for phones held in landscape. The brand sits above
+ *  the flow instead of on top of it, so the four cards stay readable. */
+const LANDSCAPE_BOXES: Record<string, Box> = {
+  employees: { x: 20, y: 170, w: 240, h: 210 },
+  where: { x: 300, y: 200, w: 220, h: 160 },
+  group: { x: 600, y: 200, w: 220, h: 160 },
+  final: { x: 860, y: 170, w: 240, h: 210 },
+}
+
+const LANDSCAPE_CONTENT_OVERRIDES: Record<string, Partial<NodeContent>> = {
+  // Compact labels keep the narrow landscape headers from ellipsizing.
+  where: { chips: ['department_id', 'salary'], badge: '> 60k' },
+  group: { chips: ['department'], badge: 'dept' },
 }
 
 const DESKTOP_EDGES: LoaderEdge[] = [
@@ -229,6 +257,12 @@ const SHORT_EDGES: LoaderEdge[] = [
   { id: 'employees-where', from: 'employees', to: 'where', accent: 'where', delay: 1, duration: 0.6 },
   { id: 'where-group', from: 'where', to: 'group', accent: 'group', delay: 1.5, duration: 0.6 },
   { id: 'group-final', from: 'group', to: 'final', accent: 'final', delay: 2, duration: 0.7 },
+]
+
+const LANDSCAPE_EDGES: LoaderEdge[] = [
+  { id: 'employees-where', from: 'employees', to: 'where', accent: 'where', delay: 1, duration: 0.8 },
+  { id: 'where-group', from: 'where', to: 'group', accent: 'group', delay: 1.5, duration: 0.8 },
+  { id: 'group-final', from: 'group', to: 'final', accent: 'final', delay: 2, duration: 0.9 },
 ]
 
 type Side = SocketSide
@@ -306,17 +340,34 @@ export function buildEdgeGeometry(from: Box, to: Box): EdgeGeometry {
 
 export function pickLoaderMode(width: number, height: number): LoaderMode {
   if (width >= 1000) return 'desktop'
+  // Landscape phones need a wide, low composition rather than a shrunken one.
+  if (width > height * 1.15 && height < 640) return 'landscape'
   if (width >= 600 && height >= 620) return 'portrait'
-  // Very short screens keep the composition legible with fewer nodes.
+  // Very short portrait screens keep the composition legible with fewer nodes.
   return 'short'
 }
 
-function makeNodes(boxes: Record<string, Box>, ids: readonly string[]): LoaderNode[] {
+/**
+ * The website entrance uses the compact composition on portrait tablets too.
+ * The short graph reserves a pocket for the centred wordmark; the six-node
+ * portrait graph fills that space with cards, so the brand would sit on top
+ * of them. The application loader has no wordmark and keeps the full graph.
+ */
+export function pickEntranceMode(width: number, height: number): LoaderMode {
+  const mode = pickLoaderMode(width, height)
+  return mode === 'portrait' ? 'short' : mode
+}
+
+function makeNodes(
+  boxes: Record<string, Box>,
+  ids: readonly string[],
+  overrides?: Record<string, Partial<NodeContent>>,
+): LoaderNode[] {
   return ids.map((id) => {
-    const content = CONTENT[id]
+    const content = { ...CONTENT[id], ...overrides?.[id] }
     const box = boxes[id]
-    if (!content || !box) throw new Error(`Missing loader node ${id}`)
-    return { id, ...content, ...box }
+    if (!content.title || !box) throw new Error(`Missing loader node ${id}`)
+    return { id, ...content, ...box } as LoaderNode
   })
 }
 
@@ -326,9 +377,25 @@ export function buildGraph(mode: LoaderMode): LoaderGraph {
       ? { width: 1560, height: 960, boxes: DESKTOP_BOXES, ids: Object.keys(DESKTOP_BOXES), edges: DESKTOP_EDGES }
       : mode === 'portrait'
         ? { width: 900, height: 1180, boxes: PORTRAIT_BOXES, ids: Object.keys(PORTRAIT_BOXES), edges: PORTRAIT_EDGES }
-        : { width: 430, height: 760, boxes: SHORT_BOXES, ids: Object.keys(SHORT_BOXES), edges: SHORT_EDGES }
+        : mode === 'landscape'
+          ? {
+              width: 1120,
+              height: 480,
+              boxes: LANDSCAPE_BOXES,
+              ids: Object.keys(LANDSCAPE_BOXES),
+              edges: LANDSCAPE_EDGES,
+              overrides: LANDSCAPE_CONTENT_OVERRIDES,
+            }
+          : {
+              width: 430,
+              height: 790,
+              boxes: SHORT_BOXES,
+              ids: Object.keys(SHORT_BOXES),
+              edges: SHORT_EDGES,
+              overrides: SHORT_CONTENT_OVERRIDES,
+            }
 
-  const nodes = makeNodes(config.boxes, config.ids)
+  const nodes = makeNodes(config.boxes, config.ids, 'overrides' in config ? config.overrides : undefined)
   const byId = new Map(nodes.map((node) => [node.id, node]))
   const sockets: Record<string, SocketSide[]> = {}
   for (const node of nodes) sockets[node.id] = []

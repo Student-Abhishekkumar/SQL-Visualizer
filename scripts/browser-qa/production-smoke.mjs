@@ -7,7 +7,7 @@ import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { launchBrowser } from './cdp.mjs'
 
-const URL = process.env.APP_URL ?? 'http://127.0.0.1:4173/'
+const URL = process.env.APP_URL ?? 'http://127.0.0.1:4173/#/app'
 const PORT = Number(process.env.CDP_PORT ?? 9339)
 const OUT = process.env.QA_OUT ?? join('artifacts', 'browser-qa', 'production-smoke')
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
